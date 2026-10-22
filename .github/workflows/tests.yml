@@ -127,6 +127,13 @@ jobs:
           corepack enable
           pnpm install --frozen-lockfile
 
+      # Like upstream's `pnpm test:unit`: build the workspace packages the web app imports first.
+      - name: Build the shared packages
+        working-directory: forks/element-web
+        env:
+          NX_DAEMON: "false"
+        run: pnpm exec nx run element-web:test:unit:prepare
+
       - name: Unit tests and type check
         working-directory: forks/element-web/apps/web
         run: |
