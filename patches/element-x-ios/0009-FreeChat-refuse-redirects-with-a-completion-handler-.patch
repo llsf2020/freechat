@@ -1,0 +1,57 @@
+From 8494a3e45d4cb666676878ad5f1ad134ab789e20 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 00:00:00 +0000
+Subject: [PATCH 9/9] FreeChat: refuse redirects with a completion handler on
+ iOS
+
+The Swift 6.4 compiler crashes while bridging the async redirect callback to
+Objective-C, so the completion-handler form is used, with the selector spelled
+out. A unit test checks that URLSession can find it.
+---
+ ElementX/Sources/FreeChat/FreeChatAPI.swift | 12 +++++++++---
+ UnitTests/Sources/FreeChatTests.swift       |  7 +++++++
+ 2 files changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/ElementX/Sources/FreeChat/FreeChatAPI.swift b/ElementX/Sources/FreeChat/FreeChatAPI.swift
+index 89a3446df..a46485fff 100644
+--- a/ElementX/Sources/FreeChat/FreeChatAPI.swift
++++ b/ElementX/Sources/FreeChat/FreeChatAPI.swift
+@@ -100,11 +100,17 @@ nonisolated struct FreeChatAPI: Sendable {
+ }
+ 
+ /// Refuses HTTP redirects, so the bearer token only ever goes to the homeserver itself.
+-private nonisolated final class FreeChatNoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
++///
++/// The completion-handler form, not the async one: the Swift 6.4 compiler crashes while bridging the async
++/// variant to Objective-C. The selector is spelled out so URLSession finds the method whatever the SDK's
++/// exact Swift signature.
++nonisolated final class FreeChatNoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
++    @objc(URLSession:task:willPerformHTTPRedirection:newRequest:completionHandler:)
+     func urlSession(_ session: URLSession,
+                     task: URLSessionTask,
+                     willPerformHTTPRedirection response: HTTPURLResponse,
+-                    newRequest request: URLRequest) async -> URLRequest? {
+-        nil
++                    newRequest request: URLRequest,
++                    completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
++        completionHandler(nil)
+     }
+ }
+diff --git a/UnitTests/Sources/FreeChatTests.swift b/UnitTests/Sources/FreeChatTests.swift
+index f2fac0c13..bf3862580 100644
+--- a/UnitTests/Sources/FreeChatTests.swift
++++ b/UnitTests/Sources/FreeChatTests.swift
+@@ -11,6 +11,13 @@ import Testing
+ 
+ /// FreeChat JSON formats; the same cases are covered by the web and Android clients.
+ struct FreeChatTests {
++    @Test
++    func redirectsAreRefused() {
++        // URLSession calls the delegate by this selector; without it redirects would be followed with the token.
++        let selector = Selector(("URLSession:task:willPerformHTTPRedirection:newRequest:completionHandler:"))
++        #expect(FreeChatNoRedirects().responds(to: selector))
++    }
++
+     @Test
+     func roomTTLIsLenient() {
+         #expect(FreeChat.roomTTL(fromContentJSON: #"{"ttl":3600}"#) == 3600)

@@ -1,7 +1,7 @@
 From e7be0a9a9f3895fe24558bb65d95b5fd56e48de0 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 09:05:19 +0000
-Subject: [PATCH 2/8] FreeChat: room privacy settings in room details
+Subject: [PATCH 2/9] FreeChat: room privacy settings in room details
 
 Auto-delete (admins; both members in a DM), my burn-after-read override,
 screenshot protection and the join password. Strings live in FreeChatStrings

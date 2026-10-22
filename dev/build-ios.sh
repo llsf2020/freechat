@@ -108,9 +108,10 @@ if [ "$BUILD_OK" = 0 ]; then
 fi
 
 echo
+echo "summary: $SUMMARY"
 if [ "$BUILD_OK" = 0 ] && [ "$TEST_OK" = 0 ]; then
 	say "all passed"
 else
 	fail "some steps failed; see where in dev/ios-logs/latest/summary.txt"
+	exit 1
 fi
-echo "summary: $SUMMARY"
