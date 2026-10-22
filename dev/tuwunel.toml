@@ -25,6 +25,9 @@ ip_range_denylist = []
 
 # Local tests: makes auto-delete easier to watch (keep the default in production)
 log = "info,tuwunel_service::rooms::disappearing=debug"
+# The tests read the server's console output. Under systemd (CI runners are systemd services) Tuwunel would
+# send it to journald instead.
+log_journald = false
 
 [global.well_known]
 client = "http://localhost:8008"
