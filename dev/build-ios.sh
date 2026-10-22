@@ -61,7 +61,7 @@ run_step() { # run_step NAME LOGFILE COMMAND...
 } > "$SUMMARY"
 
 command -v xcodebuild >/dev/null || { fail "Xcode not found; install it from the App Store first"; exit 1; }
-xcode-select -p | grep -q Xcode.app || {
+xcode-select -p | grep -qE "/Xcode[^/]*\.app/" || {
 	fail "the command line tools do not point at Xcode; run: sudo xcode-select -s /Applications/Xcode.app"
 	exit 1
 }

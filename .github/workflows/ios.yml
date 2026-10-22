@@ -1,0 +1,63 @@
+# Builds the FreeChat iOS app from the upstream baseline + patches (simulator build, unsigned) and runs the
+# FreeChat unit tests, through dev/build-ios.sh. The logs are kept as the ios-logs artifact and the summary
+# is shown on the run page. Standard macOS runners are free for public repositories.
+name: ios
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - upstream.conf
+      - patches/element-x-ios/**
+      - branding/**
+      - docker/checkout.sh
+      - dev/build-ios.sh
+      - .github/workflows/ios.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Element X iOS needs Xcode 27, which this image provides as /Applications/Xcode_27.app.
+    runs-on: xcode-27
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Xcode and tools
+        env:
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
+        run: |
+          # Selected globally so the project's own tools use the same Xcode.
+          sudo xcode-select -s /Applications/Xcode_27.app
+          brew install xcodegen swiftlint swiftformat git-lfs pkl
+          # Upstream keeps some assets in Git LFS; with this the clone in docker/checkout.sh fetches them.
+          git lfs install
+          python3 -m pip install --user --break-system-packages --quiet pillow
+
+      - name: Build and test
+        run: dev/build-ios.sh
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f dev/ios-logs/latest/summary.txt ]; then
+            { echo '```'; cat dev/ios-logs/latest/summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          rm -f dev/ios-logs/latest
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: ios-logs
+          path: dev/ios-logs/
+          retention-days: 7
+          if-no-files-found: ignore
