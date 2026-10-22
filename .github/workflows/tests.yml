@@ -94,7 +94,7 @@ jobs:
         if: failure()
         with:
           name: server-log
-          path: dev/server.log
+          path: dev/server*.log
           retention-days: 7
 
   web:

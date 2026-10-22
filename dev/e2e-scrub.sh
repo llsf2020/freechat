@@ -18,7 +18,7 @@ stop_server() {
 trap stop_server EXIT
 pgrep -x tuwunel >/dev/null && { echo "stop the running server first" >&2; exit 1; }
 
-FREECHAT_SCRUB_INTERVAL_SECS=10 "$ROOT/dev/run.sh" server >"$ROOT/dev/server.log" 2>&1 &
+FREECHAT_SCRUB_INTERVAL_SECS=10 "$ROOT/dev/run.sh" server >"$ROOT/dev/server-scrub.log" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 1 60); do curl -sf "$HS/_matrix/client/versions" >/dev/null && break; sleep 1; done
 
@@ -32,12 +32,12 @@ sleep 1
 found() { grep -rqa "$MARK" "$DB"; }
 check "before deletion: the database files contain the message (control)" "found"
 
-echo "Waiting for expiry and the background compaction (about 30 seconds)..."
-for _ in $(seq 1 45); do
-	grep -q "Scrubbed deleted messages" "$ROOT/dev/server.log" && break
+echo "Waiting for expiry and the background compaction (about 30 seconds, up to 3 minutes on slow machines)..."
+for _ in $(seq 1 180); do
+	grep -q "Scrubbed deleted messages" "$ROOT/dev/server-scrub.log" && break
 	sleep 1
 done
-check "the background compaction ran" "grep -q 'Scrubbed deleted messages' '$ROOT/dev/server.log'"
+check "the background compaction ran" "grep -q 'Scrubbed deleted messages' '$ROOT/dev/server-scrub.log'"
 check "after deletion: no file in the database directory contains the message" "! found"
 
 summary

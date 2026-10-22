@@ -11,7 +11,7 @@ source "$ROOT/dev/e2e-lib.sh"
 
 SERVER_PID=""
 start_server() { # start_server [CAP_SECS]
-	FREECHAT_MAX_RETENTION_SECS="${1:-}" "$ROOT/dev/run.sh" server >"$ROOT/dev/server.log" 2>&1 &
+	FREECHAT_MAX_RETENTION_SECS="${1:-}" "$ROOT/dev/run.sh" server >"$ROOT/dev/server-retention.log" 2>&1 &
 	SERVER_PID=$!
 	for _ in $(seq 1 60); do curl -sf "$HS/_matrix/client/versions" >/dev/null && return; sleep 1; done
 	echo "the server did not start" >&2; exit 1
