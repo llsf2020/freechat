@@ -1,0 +1,163 @@
+# Runs FreeChat's tests whenever something they cover changes:
+#   server: builds Tuwunel (debug) with the patches and runs every end-to-end test in dev/e2e-*.sh
+#   web:    unit tests and type check of the web client, then the browser tests (strict mode, CSP)
+#           against that server and the web dev server
+name: tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - upstream.conf
+      - patches/tuwunel/**
+      - patches/element-web/**
+      - docker/checkout.sh
+      - deploy/install.sh
+      - dev/**
+      - .github/workflows/tests.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  NTFY_VERSION: 2.28.0
+  # sha256 of ntfy_2.28.0_linux_amd64.tar.gz, from the release's checksums.txt
+  NTFY_SHA256: 881a1530e30e01f1dec202c7f41e1664e57edfb7844e73e21e345159ac3ea9b7
+
+jobs:
+  server:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang libclang-dev liburing-dev cmake pkg-config libssl-dev
+
+      - name: Check out Tuwunel with the FreeChat patches
+        run: docker/checkout.sh tuwunel forks/tuwunel
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            forks/tuwunel/target
+          key: tuwunel-debug-${{ hashFiles('upstream.conf', 'patches/tuwunel/**') }}
+          restore-keys: tuwunel-debug-
+
+      - name: Build
+        run: dev/run.sh build
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tuwunel-debug
+          path: forks/tuwunel/target/debug/tuwunel
+          retention-days: 1
+
+      - name: Get ntfy for the push test
+        run: |
+          curl -fsSL -o ntfy.tar.gz "https://github.com/binwiederhier/ntfy/releases/download/v${NTFY_VERSION}/ntfy_${NTFY_VERSION}_linux_amd64.tar.gz"
+          echo "${NTFY_SHA256}  ntfy.tar.gz" | sha256sum -c -
+          mkdir -p dev/bin
+          tar -xzf ntfy.tar.gz --strip-components=1 -C dev/bin "ntfy_${NTFY_VERSION}_linux_amd64/ntfy"
+          rm ntfy.tar.gz
+
+      - name: End-to-end tests
+        run: |
+          failed=""
+          dev/run.sh server > dev/server.log 2>&1 &
+          server=$!
+          for _ in $(seq 1 60); do curl -sf http://localhost:8008/_matrix/client/versions >/dev/null && break; sleep 1; done
+          for t in disappearing event-media metadata private-rooms readburn strict-devices; do
+            echo "::group::$t"; dev/e2e-$t.sh || failed="$failed $t"; echo "::endgroup::"
+          done
+          echo "::group::push"; NTFY_BIN="$PWD/dev/bin/ntfy" dev/e2e-push.sh || failed="$failed push"; echo "::endgroup::"
+          kill "$server"; wait "$server" || true
+          # These two restart the server themselves.
+          for t in scrub retention; do
+            echo "::group::$t"; dev/e2e-$t.sh || failed="$failed $t"; echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then echo "failed:$failed"; exit 1; fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: server-log
+          path: dev/server.log
+          retention-days: 7
+
+  web:
+    needs: server
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Check out Element Web with the FreeChat patches
+        run: docker/checkout.sh element-web forks/element-web
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-${{ hashFiles('upstream.conf') }}
+          restore-keys: pnpm-
+
+      - name: Install
+        working-directory: forks/element-web
+        env:
+          COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+
+      - name: Unit tests and type check
+        working-directory: forks/element-web/apps/web
+        run: |
+          pnpm exec vitest run src/freechat
+          ../../node_modules/.bin/tsc --noEmit -p tsconfig.json
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: tuwunel-debug
+          path: forks/tuwunel/target/debug
+
+      - name: Browser tests
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends liburing2
+          chmod +x forks/tuwunel/target/debug/tuwunel
+          (cd forks/element-web/apps/web && pnpm exec playwright install --with-deps chromium)
+          dev/run.sh server > dev/server.log 2>&1 &
+          dev/run.sh web > dev/web.log 2>&1 &
+          for _ in $(seq 1 60); do curl -sf http://localhost:8008/_matrix/client/versions >/dev/null && break; sleep 1; done
+          # The first webpack build takes a few minutes.
+          for _ in $(seq 1 120); do curl -sf -o /dev/null http://localhost:8080/ && break; sleep 5; done
+          failed=""
+          node dev/browser-strict-mode.mjs || failed="$failed strict-mode"
+          node dev/browser-csp.mjs || failed="$failed csp"
+          if [ -n "$failed" ]; then echo "failed:$failed"; exit 1; fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: web-logs
+          path: |
+            dev/server.log
+            dev/web.log
+          retention-days: 7

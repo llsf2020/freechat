@@ -20,5 +20,9 @@ TASKS=("$@")
 python3 "$ROOT/branding/apply.py" android
 
 cd "$ROOT/forks/element-x-android"
-exec systemd-run --user --scope --quiet -p MemoryMax=5G -p MemorySwapMax=2G \
-	./gradlew --no-daemon --console=plain "${TASKS[@]}"
+# CI machines have no systemd user session (and enough memory): run Gradle directly there.
+if systemd-run --user --scope --quiet true 2>/dev/null; then
+	exec systemd-run --user --scope --quiet -p MemoryMax=5G -p MemorySwapMax=2G \
+		./gradlew --no-daemon --console=plain "${TASKS[@]}"
+fi
+exec ./gradlew --no-daemon --console=plain "${TASKS[@]}"

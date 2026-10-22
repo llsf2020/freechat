@@ -1,0 +1,91 @@
+# Builds FreeChat for Android from the upstream baseline + patches through dev/build-android.sh: runs the unit
+# tests of every module the FreeChat patches touch, then builds the F-Droid debug APK (no Google services),
+# kept as the freechat-android-debug artifact. Debug builds are signed with the public debug key; release
+# signing needs a keystore in repository secrets and is not part of this workflow.
+name: android
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - upstream.conf
+      - patches/element-x-android/**
+      - branding/**
+      - docker/checkout.sh
+      - dev/build-android.sh
+      - .github/workflows/android.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android
+  cancel-in-progress: true
+
+env:
+  GRADLE_OPTS: -Dorg.gradle.jvmargs="-Xmx7g -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8" -Dkotlin.daemon.jvm.options=-Xmx2g -XX:+UseG1GC
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force > /dev/null
+          df -h /
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+
+      - name: Check out Element X Android with the FreeChat patches
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends python3-pil
+          # Upstream keeps some assets in Git LFS; with this the clone fetches them.
+          git lfs install
+          docker/checkout.sh element-x-android forks/element-x-android
+
+      - name: Unit tests and debug APK
+        run: |
+          dev/build-android.sh \
+            :appnav:testDebugUnitTest \
+            :features:joinroom:impl:testDebugUnitTest \
+            :features:messages:impl:testDebugUnitTest \
+            :features:preferences:impl:testDebugUnitTest \
+            :features:roomdetails:impl:testDebugUnitTest \
+            :libraries:eventformatter:impl:testDebugUnitTest \
+            :libraries:matrix:api:testDebugUnitTest \
+            :libraries:matrix:impl:testDebugUnitTest \
+            :libraries:matrixui:testDebugUnitTest \
+            :libraries:preferences:impl:testDebugUnitTest \
+            :libraries:push:impl:testDebugUnitTest \
+            :libraries:pushproviders:unifiedpush:testDebugUnitTest \
+            :libraries:pushstore:impl:testDebugUnitTest \
+            :libraries:session-storage:impl:testDebugUnitTest \
+            :app:assembleFdroidDebug \
+            --stacktrace --no-configuration-cache
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: freechat-android-debug
+          path: forks/element-x-android/app/build/outputs/apk/fdroid/debug/*.apk
+          retention-days: 14
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: failure()
+        with:
+          name: android-test-reports
+          path: forks/element-x-android/**/build/reports/tests/
+          retention-days: 7
+          if-no-files-found: ignore
