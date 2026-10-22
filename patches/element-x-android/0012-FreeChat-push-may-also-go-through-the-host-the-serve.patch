@@ -1,0 +1,83 @@
+From 8ffc054ba2f7bd5dfeefded34e19043ff6da7b45 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 12/12] FreeChat: push may also go through the host the server
+ name delegates to
+
+---
+ .../UnifiedPushNewGatewayHandler.kt           | 14 +++++++---
+ ...DefaultUnifiedPushNewGatewayHandlerTest.kt | 28 +++++++++++++++++++
+ 2 files changed, 38 insertions(+), 4 deletions(-)
+
+diff --git a/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/UnifiedPushNewGatewayHandler.kt b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/UnifiedPushNewGatewayHandler.kt
+index 00dfe473de..d556dc29e5 100644
+--- a/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/UnifiedPushNewGatewayHandler.kt
++++ b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/UnifiedPushNewGatewayHandler.kt
+@@ -48,13 +48,17 @@ class DefaultUnifiedPushNewGatewayHandler(
+                 .getOrRestore(userId)
+                 .flatMap { client ->
+                     // FreeChat: pushes must not reveal to a third party when this user gets messages.
+-                    val ownServer = client.userIdServerName().substringBefore(':')
+-                    if (isOnServer(endpoint, ownServer) && isOnServer(pushGateway, ownServer)) {
++                    // Both the server name and the host the homeserver runs on are the user's own server;
++                    // they differ when the server name delegates to another host through .well-known.
++                    val ownHosts = listOfNotNull(client.userIdServerName().substringBefore(':'), hostOf(client.homeserverUrl))
++                        .distinct()
++                    if (ownHosts.any { isOnServer(endpoint, it) } && ownHosts.any { isOnServer(pushGateway, it) }) {
+                         pusherSubscriber.registerPusher(client, endpoint, pushGateway)
+                     } else {
+                         Result.failure(
+                             IllegalStateException(
+-                                "FreeChat: push must go through your own server $ownServer; set it as the default server of the ntfy app"
++                                "FreeChat: push must go through your own server ${ownHosts.joinToString(" / ")}; " +
++                                    "set it as the default server of the ntfy app"
+                             )
+                         )
+                     }
+@@ -73,4 +77,6 @@ class DefaultUnifiedPushNewGatewayHandler(
+ 
+ /** FreeChat: whether [url] is served by [host] itself. */
+ internal fun isOnServer(url: String, host: String): Boolean =
+-    runCatching { URI(url).host }.getOrNull().equals(host, ignoreCase = true)
++    hostOf(url).equals(host, ignoreCase = true)
++
++private fun hostOf(url: String): String? = runCatching { URI(url).host }.getOrNull()
+diff --git a/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/DefaultUnifiedPushNewGatewayHandlerTest.kt b/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/DefaultUnifiedPushNewGatewayHandlerTest.kt
+index e13a16aaa6..f07a4017fe 100644
+--- a/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/DefaultUnifiedPushNewGatewayHandlerTest.kt
++++ b/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/DefaultUnifiedPushNewGatewayHandlerTest.kt
+@@ -142,6 +142,34 @@ class DefaultUnifiedPushNewGatewayHandlerTest {
+         lambda.assertions().isNeverCalled()
+     }
+ 
++    @Test
++    fun `FreeChat - accepts the host the server name delegates to`() = runTest {
++        val lambda = lambdaRecorder { _: MatrixClient, _: String, _: String -> Result.success(Unit) }
++        val handler = createDefaultUnifiedPushNewGatewayHandler(
++            pushClientSecret = FakePushClientSecret(getUserIdFromSecretResult = { A_USER_ID }),
++            userPushStoreFactory = FakeUserPushStoreFactory(
++                userPushStore = { FakeUserPushStore(pushProviderName = UnifiedPushConfig.NAME) }
++            ),
++            pusherSubscriber = FakePusherSubscriber(registerPusherResult = lambda),
++            matrixClientProvider = FakeMatrixClientProvider {
++                // @user:example.org, delegated through .well-known to matrix.example.org
++                Result.success(
++                    FakeMatrixClient(userIdServerNameLambda = { "example.org" }, homeserverUrl = "https://matrix.example.org")
++                )
++            },
++        )
++        val delegated = handler.handle(
++            "https://matrix.example.org/upAbc123?up=1",
++            "https://matrix.example.org/_matrix/push/v1/notify",
++            A_SECRET,
++        )
++        val thirdParty = handler.handle("https://ntfy.sh/upAbc?up=1", "https://matrix.example.org/_matrix/push/v1/notify", A_SECRET)
++
++        assertThat(delegated).isEqualTo(Result.success(Unit))
++        assertThat(thirdParty.isFailure).isTrue()
++        lambda.assertions().isCalledOnce()
++    }
++
+     @Test
+     fun `FreeChat - a server name with a port is compared by host`() {
+         assertThat(isOnServer("http://localhost:8099/upAbc", "localhost")).isTrue()

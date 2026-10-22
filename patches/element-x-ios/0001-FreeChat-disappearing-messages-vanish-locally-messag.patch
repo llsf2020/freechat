@@ -1,0 +1,685 @@
+From 1a67b5b70ef51fea71d0ed34948f98ec2a9da5f9 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 1/8] FreeChat: disappearing messages vanish locally; messages
+ stay off disk
+
+Expiry markers are honoured to the second and purged messages are dropped
+after an existence check; redacted messages are hidden. The event and media
+caches are deleted when a session is restored, and the local search index is
+not built. Untested: needs a Mac to build.
+---
+ ElementX/Sources/FreeChat/FreeChat.swift      | 135 ++++++++++++++++++
+ ElementX/Sources/FreeChat/FreeChatAPI.swift   |  81 +++++++++++
+ .../Sources/FreeChat/FreeChatExpiry.swift     |  94 ++++++++++++
+ .../Services/Client/ClientFactory.swift       |   8 +-
+ .../Sources/Services/Client/ClientProxy.swift |  31 ++++
+ .../Services/Client/ClientProxyProtocol.swift |  10 ++
+ .../Services/Room/JoinedRoomProxy.swift       |  22 +++
+ .../Services/Room/RoomProxyProtocol.swift     |   7 +
+ .../TimelineController.swift                  |  40 ++++++
+ .../UserSession/SessionDirectories.swift      |  12 ++
+ UnitTests/Sources/FreeChatTests.swift         |  81 +++++++++++
+ 11 files changed, 517 insertions(+), 4 deletions(-)
+ create mode 100644 ElementX/Sources/FreeChat/FreeChat.swift
+ create mode 100644 ElementX/Sources/FreeChat/FreeChatAPI.swift
+ create mode 100644 ElementX/Sources/FreeChat/FreeChatExpiry.swift
+ create mode 100644 UnitTests/Sources/FreeChatTests.swift
+
+diff --git a/ElementX/Sources/FreeChat/FreeChat.swift b/ElementX/Sources/FreeChat/FreeChat.swift
+new file mode 100644
+index 000000000..19c47ac36
+--- /dev/null
++++ b/ElementX/Sources/FreeChat/FreeChat.swift
+@@ -0,0 +1,135 @@
++//
++// Copyright 2026 FreeChat contributors
++//
++// SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++// Please see LICENSE files in the repository root for full details.
++//
++
++import Foundation
++
++/// FreeChat protocol constants and the JSON formats shared with the web and Android clients.
++nonisolated enum FreeChat {
++    static let disappearingStateType = "com.freechat.disappearing"
++    static let privacyStateType = "com.freechat.privacy"
++    static let expiresAtKey = "com.freechat.expires_at"
++    static let readTTLKey = "com.freechat.read_ttl"
++    static let mediaKey = "com.freechat.media"
++
++    /// Power level needed to change room settings; the homeserver enforces it too.
++    static let adminPowerLevel: Int64 = 100
++
++    /// Room auto-delete presets in seconds. Zero means off.
++    static let roomTTLPresets: [UInt64] = [0, 3600, 86400, 7 * 86400, 30 * 86400]
++    /// Personal burn-after-read presets in seconds. Zero means off.
++    static let readTTLPresets: [UInt64] = [0, 5, 30, 60, 300, 3600]
++
++    // MARK: - Room auto-delete (`com.freechat.disappearing` state, `{"ttl": seconds}`)
++
++    static func roomTTL(fromContentJSON json: String?) -> UInt64 {
++        nonNegative(object(from: json)?["ttl"]) ?? 0
++    }
++
++    static func contentJSON(forRoomTTL ttl: UInt64) -> String {
++        "{\"ttl\":\(ttl)}"
++    }
++
++    // MARK: - Room privacy (`com.freechat.privacy` state, `{"block_screenshots": bool}`)
++
++    static func blocksScreenshots(privacyContentJSON json: String?) -> Bool {
++        isTrue(object(from: json)?["block_screenshots"])
++    }
++
++    static func privacyContentJSON(blockScreenshots: Bool) -> String {
++        "{\"block_screenshots\":\(blockScreenshots)}"
++    }
++
++    // MARK: - Personal settings (global `com.freechat.disappearing` account data)
++
++    /// `{"read_ttl": seconds, "rooms": {"<room id>": seconds}, "block_screenshots": bool}`.
++    struct Personal: Equatable {
++        var readTTL: UInt64 = 0
++        var rooms: [String: UInt64] = [:]
++        var blockScreenshots = false
++
++        func readTTL(in roomID: String) -> UInt64 {
++            rooms[roomID] ?? readTTL
++        }
++    }
++
++    static func personal(fromContentJSON json: String?) -> Personal {
++        guard let content = object(from: json) else { return Personal() }
++        var rooms = [String: UInt64]()
++        for (roomID, value) in content["rooms"] as? [String: Any] ?? [:] {
++            if let ttl = nonNegative(value) { rooms[roomID] = ttl }
++        }
++        return Personal(readTTL: nonNegative(content["read_ttl"]) ?? 0,
++                        rooms: rooms,
++                        blockScreenshots: isTrue(content["block_screenshots"]))
++    }
++
++    /// `json` with the given fields replaced and everything else kept, so settings written by newer clients survive.
++    static func updatingPersonal(_ json: String?,
++                                 readTTL: UInt64? = nil,
++                                 roomID: String? = nil,
++                                 roomReadTTL: UInt64?? = nil,
++                                 blockScreenshots: Bool? = nil) -> String {
++        var content = object(from: json) ?? [:]
++        if let readTTL { content["read_ttl"] = readTTL }
++        if let blockScreenshots { content["block_screenshots"] = blockScreenshots }
++        if let roomID, let roomReadTTL {
++            var rooms = content["rooms"] as? [String: Any] ?? [:]
++            if let ttl = roomReadTTL {
++                rooms[roomID] = ttl
++            } else {
++                rooms.removeValue(forKey: roomID)
++            }
++            content["rooms"] = rooms
++        }
++        guard let data = try? JSONSerialization.data(withJSONObject: content, options: [.sortedKeys]) else { return "{}" }
++        return String(decoding: data, as: UTF8.self)
++    }
++
++    // MARK: - Expiry markers (`unsigned` of each message)
++
++    struct ExpiryMarkers: Equatable {
++        static let none = ExpiryMarkers(expiresAt: nil, readTTL: nil)
++
++        /// When the message expires, in milliseconds since the epoch.
++        let expiresAt: UInt64?
++        /// Seconds after everyone else has read it.
++        let readTTL: UInt64?
++
++        var isMarked: Bool {
++            expiresAt != nil || readTTL != nil
++        }
++
++        func isExpired(now: Date) -> Bool {
++            guard let expiresAt else { return false }
++            return Double(expiresAt) <= now.timeIntervalSince1970 * 1000
++        }
++    }
++
++    static func expiryMarkers(fromEventJSON json: String?) -> ExpiryMarkers {
++        guard let unsigned = object(from: json)?["unsigned"] as? [String: Any] else { return .none }
++        return ExpiryMarkers(expiresAt: nonNegative(unsigned[expiresAtKey]), readTTL: nonNegative(unsigned[readTTLKey]))
++    }
++
++    // MARK: - Helpers
++
++    private static func object(from json: String?) -> [String: Any]? {
++        guard let data = json?.data(using: .utf8) else { return nil }
++        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
++    }
++
++    /// Only a JSON `true`: JSONSerialization also bridges the number 1 to `Bool`.
++    private static func isTrue(_ value: Any?) -> Bool {
++        guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return false }
++        return number.boolValue
++    }
++
++    private static func nonNegative(_ value: Any?) -> UInt64? {
++        // JSONSerialization turns `true` into an NSNumber as well.
++        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(), number.int64Value >= 0 else { return nil }
++        return number.uint64Value
++    }
++}
+diff --git a/ElementX/Sources/FreeChat/FreeChatAPI.swift b/ElementX/Sources/FreeChat/FreeChatAPI.swift
+new file mode 100644
+index 000000000..e258e6e98
+--- /dev/null
++++ b/ElementX/Sources/FreeChat/FreeChatAPI.swift
+@@ -0,0 +1,81 @@
++//
++// Copyright 2026 FreeChat contributors
++//
++// SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++// Please see LICENSE files in the repository root for full details.
++//
++
++import Foundation
++
++nonisolated enum FreeChatAPIError: Error, Equatable {
++    case http(statusCode: Int)
++    /// Too many wrong join passwords; the server locks the room for this user for a while.
++    case rateLimited
++    case invalidResponse
++    case network
++}
++
++/// FreeChat homeserver extensions under `/_matrix/client/unstable/com.freechat`.
++nonisolated struct FreeChatAPI: Sendable {
++    static let minimumJoinPasswordLength = 6
++
++    let homeserverURL: URL
++    let accessToken: String
++    var session: URLSession = .shared
++
++    /// Which of `eventIDs` still exist on the server; purged ones are left out. Members only, at most 500 per call.
++    func existingEvents(roomID: String, eventIDs: Set<String>) async -> Result<Set<String>, FreeChatAPIError> {
++        let body = ["event_ids": Array(eventIDs.prefix(500))]
++        return await request("POST", roomPath(roomID, "existing_events"), body: body).flatMap { json in
++            guard let existing = json["existing"] as? [String] else { return .failure(.invalidResponse) }
++            return .success(Set(existing))
++        }
++    }
++
++    /// Whether the room has a join password. Room admins only.
++    func hasJoinPassword(roomID: String) async -> Result<Bool, FreeChatAPIError> {
++        await request("GET", roomPath(roomID, "join_password"), body: nil).map { ($0["enabled"] as? Bool) == true }
++    }
++
++    /// Sets the room's join password, or removes it when `password` is nil. Room admins only.
++    func setJoinPassword(roomID: String, password: String?) async -> Result<Void, FreeChatAPIError> {
++        let body: [String: Any] = password.map { ["password": $0] } ?? [:]
++        return await request("PUT", roomPath(roomID, "join_password"), body: body).map { _ in }
++    }
++
++    /// Gets this user invited with `password`. The caller then joins the room normally.
++    func inviteWithPassword(roomID: String, password: String) async -> Result<Void, FreeChatAPIError> {
++        await request("POST", roomPath(roomID, "join_with_password"), body: ["password": password]).map { _ in }
++    }
++
++    // MARK: - Private
++
++    private func roomPath(_ roomID: String, _ endpoint: String) -> String {
++        let encoded = roomID.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? roomID
++        return "/_matrix/client/unstable/com.freechat/rooms/\(encoded)/\(endpoint)"
++    }
++
++    private func request(_ method: String, _ path: String, body: [String: Any]?) async -> Result<[String: Any], FreeChatAPIError> {
++        guard let url = URL(string: homeserverURL.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + path) else {
++            return .failure(.invalidResponse)
++        }
++        var request = URLRequest(url: url)
++        request.httpMethod = method
++        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
++        if let body {
++            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
++            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
++        }
++
++        do {
++            let (data, response) = try await session.data(for: request)
++            guard let status = (response as? HTTPURLResponse)?.statusCode else { return .failure(.invalidResponse) }
++            if status == 429 { return .failure(.rateLimited) }
++            guard (200..<300).contains(status) else { return .failure(.http(statusCode: status)) }
++            let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
++            return .success(json ?? [:])
++        } catch {
++            return .failure(.network)
++        }
++    }
++}
+diff --git a/ElementX/Sources/FreeChat/FreeChatExpiry.swift b/ElementX/Sources/FreeChat/FreeChatExpiry.swift
+new file mode 100644
+index 000000000..e815deefa
+--- /dev/null
++++ b/ElementX/Sources/FreeChat/FreeChatExpiry.swift
+@@ -0,0 +1,94 @@
++//
++// Copyright 2026 FreeChat contributors
++//
++// SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++// Please see LICENSE files in the repository root for full details.
++//
++
++import Foundation
++import MatrixRustSDK
++import Synchronization
++
++/// The signed-in session's FreeChat API, for code far from the `ClientProxy` (timelines).
++/// Element X iOS runs one account at a time.
++nonisolated enum FreeChatSession {
++    private static let currentAPI = Mutex<FreeChatAPI?>(nil)
++
++    static var api: FreeChatAPI? {
++        get { currentAPI.withLock { $0 } }
++        set { currentAPI.withLock { $0 = newValue } }
++    }
++}
++
++/// When a timeline last looked for expired and purged messages.
++nonisolated struct FreeChatExpiryChecks {
++    var last = Date.now
++    var lastExistence = Date.distantPast
++}
++
++/// FreeChat: removes disappearing messages from a timeline on this device.
++///
++/// The server purges expired messages without leaving a redaction. `com.freechat.expires_at` (room auto-delete
++/// and the server cap) is honoured to the second, even offline. Messages that burn after reading, whose expiry
++/// this device cannot compute, are dropped once the server says they no longer exist. Redacted messages are
++/// hidden as well: deleted messages leave no trace.
++nonisolated final class FreeChatExpiryTracker: Sendable {
++    private struct State {
++        var markers = [String: FreeChat.ExpiryMarkers]()
++        var purged = Set<String>()
++    }
++
++    private let state = Mutex(State())
++
++    /// Whether the item should not be shown at all.
++    func isHidden(_ item: EventTimelineItemProxy, now: Date = .now) -> Bool {
++        if case .msgLike(let content) = item.content, case .redacted = content.kind {
++            return true
++        }
++        guard let eventID = item.id.eventID else { return false }
++        if state.withLock({ $0.purged.contains(eventID) }) { return true }
++        return markers(for: item, eventID: eventID).isExpired(now: now)
++    }
++
++    /// Whether any of the items is shown but should not be any more, so the timeline needs rebuilding.
++    func hasNewlyHidden(in items: [TimelineItemProxy], since lastCheck: Date, now: Date = .now) -> Bool {
++        events(in: items).contains { item in
++            guard let eventID = item.id.eventID else { return false }
++            let markers = markers(for: item, eventID: eventID)
++            return markers.isExpired(now: now) && !markers.isExpired(now: lastCheck)
++        }
++    }
++
++    /// Marked messages that are shown and whose fate only the server knows.
++    func unresolvedEventIDs(in items: [TimelineItemProxy], now: Date = .now) -> Set<String> {
++        let purged = state.withLock { $0.purged }
++        return Set(events(in: items).compactMap { item -> String? in
++            guard let eventID = item.id.eventID, !purged.contains(eventID) else { return nil }
++            let markers = markers(for: item, eventID: eventID)
++            return markers.isMarked && !markers.isExpired(now: now) ? eventID : nil
++        })
++    }
++
++    /// Remembers messages the server no longer has. Returns whether there were any.
++    func markPurged(_ eventIDs: Set<String>) -> Bool {
++        guard !eventIDs.isEmpty else { return false }
++        state.withLock { $0.purged.formUnion(eventIDs) }
++        return true
++    }
++
++    // MARK: - Private
++
++    /// An event's original JSON never changes, so its markers are parsed once.
++    private func markers(for item: EventTimelineItemProxy, eventID: String) -> FreeChat.ExpiryMarkers {
++        if let cached = state.withLock({ $0.markers[eventID] }) { return cached }
++        let markers = FreeChat.expiryMarkers(fromEventJSON: item.item.lazyProvider.debugInfo().originalJson)
++        state.withLock { $0.markers[eventID] = markers }
++        return markers
++    }
++
++    private func events(in items: [TimelineItemProxy]) -> [EventTimelineItemProxy] {
++        items.compactMap { item in
++            if case .event(let event) = item { event } else { nil }
++        }
++    }
++}
+diff --git a/ElementX/Sources/Services/Client/ClientFactory.swift b/ElementX/Sources/Services/Client/ClientFactory.swift
+index 14e283647..11323de8b 100644
+--- a/ElementX/Sources/Services/Client/ClientFactory.swift
++++ b/ElementX/Sources/Services/Client/ClientFactory.swift
+@@ -29,8 +29,7 @@ nonisolated struct ClientFactory: ClientFactoryProtocol {
+             .enableAutomaticBackPagination(enableAutomaticBackPagination: true)
+             .sqliteStore(config: .init(dataPath: sessionDirectories.dataPath, cachePath: sessionDirectories.cachePath)
+                 .highEntropyPassphrase(passphrase: passphrase, base64Variant: .padded))
+-            .withSearchIndexStore(path: sessionDirectories.dataPath,
+-                                  key: passphrase.base64EncodedString())
++            // FreeChat: no local search index, it would keep decrypted messages on disk.
+             .serverNameOrHomeserverUrl(serverNameOrUrl: serverNameOrBaseURL)
+         
+         return try await build(builder, for: .authentication, appHooks: appHooks)
+@@ -60,6 +59,9 @@ nonisolated struct ClientFactory: ClientFactoryProtocol {
+                        appHooks: AppHooks) async throws -> ClientProtocol {
+         let homeserverURL = credentials.restorationToken.session.homeserverUrl
+         
++        // FreeChat: messages do not outlive the app; the next sync fetches what still exists on the server.
++        credentials.restorationToken.sessionDirectories.deleteMessageCaches()
++        
+         let builder = makeBaseBuilder(httpProxy: URL(string: homeserverURL)?.globalProxy,
+                                       discoverSlidingSync: false,
+                                       sessionDelegate: clientSessionDelegate,
+@@ -70,8 +72,6 @@ nonisolated struct ClientFactory: ClientFactoryProtocol {
+             .sqliteStore(config: .init(dataPath: credentials.restorationToken.sessionDirectories.dataPath,
+                                        cachePath: credentials.restorationToken.sessionDirectories.cachePath)
+                     .highEntropyPassphrase(passphrase: credentials.restorationToken.passphrase, base64Variant: .padded))
+-            .withSearchIndexStore(path: credentials.restorationToken.sessionDirectories.dataPath,
+-                                  key: credentials.restorationToken.passphrase.base64EncodedString())
+             .homeserverUrl(url: homeserverURL)
+         
+         return try await build(builder, for: .restoration(credentials.restorationToken.session, .all), appHooks: appHooks)
+diff --git a/ElementX/Sources/Services/Client/ClientProxy.swift b/ElementX/Sources/Services/Client/ClientProxy.swift
+index e71fd1c67..28b60c994 100644
+--- a/ElementX/Sources/Services/Client/ClientProxy.swift
++++ b/ElementX/Sources/Services/Client/ClientProxy.swift
+@@ -314,6 +314,8 @@ class ClientProxy: ClientProxyProtocol {
+         }
+         
+         liveLocationOwnInfoUpdatesListenerTaskHandle = createLiveLocationOwnInfoUpdatesObserver()
++        
++        FreeChatSession.api = freechatAPI
+     }
+     
+     var userID: String {
+@@ -338,6 +340,35 @@ class ClientProxy: ClientProxyProtocol {
+         client.homeserver()
+     }
+     
++    // MARK: FreeChat
++    
++    var freechatAPI: FreeChatAPI? {
++        guard let url = URL(string: client.homeserver()), let token = try? client.session().accessToken else {
++            MXLog.error("FreeChat: no homeserver URL or session")
++            return nil
++        }
++        return FreeChatAPI(homeserverURL: url, accessToken: token)
++    }
++    
++    func freechatAccountData(type: String) async -> Result<String?, ClientProxyError> {
++        do {
++            return try await .success(client.accountData(eventType: type))
++        } catch {
++            MXLog.error("FreeChat: failed reading account data \(type): \(error)")
++            return .failure(.sdkError(error))
++        }
++    }
++    
++    func setFreechatAccountData(type: String, contentJSON: String) async -> Result<Void, ClientProxyError> {
++        do {
++            try await client.setAccountData(eventType: type, content: contentJSON)
++            return .success(())
++        } catch {
++            MXLog.error("FreeChat: failed writing account data \(type): \(error)")
++            return .failure(.sdkError(error))
++        }
++    }
++    
+     var canDeactivateAccount: Bool {
+         client.canDeactivateAccount()
+     }
+diff --git a/ElementX/Sources/Services/Client/ClientProxyProtocol.swift b/ElementX/Sources/Services/Client/ClientProxyProtocol.swift
+index e79792da5..90b1ec665 100644
+--- a/ElementX/Sources/Services/Client/ClientProxyProtocol.swift
++++ b/ElementX/Sources/Services/Client/ClientProxyProtocol.swift
+@@ -125,6 +125,16 @@ protocol ClientProxyProtocol: AnyObject {
+     
+     var homeserver: String { get }
+     
++    // MARK: FreeChat
++    
++    /// The FreeChat homeserver extensions, signed in as this session.
++    var freechatAPI: FreeChatAPI? { get }
++    
++    /// Global account data content as JSON, nil when unset.
++    func freechatAccountData(type: String) async -> Result<String?, ClientProxyError>
++    
++    func setFreechatAccountData(type: String, contentJSON: String) async -> Result<Void, ClientProxyError>
++    
+     var canDeactivateAccount: Bool { get }
+     
+     var userIDServerName: String? { get }
+diff --git a/ElementX/Sources/Services/Room/JoinedRoomProxy.swift b/ElementX/Sources/Services/Room/JoinedRoomProxy.swift
+index ccbd72b22..ceb2961f8 100644
+--- a/ElementX/Sources/Services/Room/JoinedRoomProxy.swift
++++ b/ElementX/Sources/Services/Room/JoinedRoomProxy.swift
+@@ -436,6 +436,28 @@ class JoinedRoomProxy: JoinedRoomProxyProtocol {
+         }
+     }
+     
++    // MARK: FreeChat
++    
++    func freechatStateContent(type: String) async -> Result<String?, RoomProxyError> {
++        do {
++            let events = try await room.stateEvents(eventType: stateEventTypeFromString(s: type))
++            return .success(events.first { $0.stateKey.isEmpty }?.contentJson)
++        } catch {
++            MXLog.error("FreeChat: failed reading \(type) state: \(error)")
++            return .failure(.sdkError(error))
++        }
++    }
++    
++    func sendFreechatState(type: String, contentJSON: String) async -> Result<Void, RoomProxyError> {
++        do {
++            _ = try await room.sendStateEventRaw(eventType: type, stateKey: "", content: contentJSON)
++            return .success(())
++        } catch {
++            MXLog.error("FreeChat: failed sending \(type) state: \(error)")
++            return .failure(.sdkError(error))
++        }
++    }
++    
+     func ignoreDeviceTrustAndResend(devices: [String: [String]], sendHandle: SendHandleProxy) async -> Result<Void, RoomProxyError> {
+         do {
+             try await room.ignoreDeviceTrustAndResend(devices: devices, sendHandle: sendHandle.underlyingHandle)
+diff --git a/ElementX/Sources/Services/Room/RoomProxyProtocol.swift b/ElementX/Sources/Services/Room/RoomProxyProtocol.swift
+index 6b0f3c18f..a3e19964e 100644
+--- a/ElementX/Sources/Services/Room/RoomProxyProtocol.swift
++++ b/ElementX/Sources/Services/Room/RoomProxyProtocol.swift
+@@ -122,6 +122,13 @@ protocol JoinedRoomProxyProtocol: RoomProxyProtocol {
+     /// https://spec.matrix.org/v1.9/client-server-api/#typing-notifications
+     @discardableResult func sendTypingNotification(isTyping: Bool) async -> Result<Void, RoomProxyError>
+     
++    // MARK: FreeChat
++    
++    /// The content JSON of a state event with an empty state key, nil when unset.
++    func freechatStateContent(type: String) async -> Result<String?, RoomProxyError>
++    
++    func sendFreechatState(type: String, contentJSON: String) async -> Result<Void, RoomProxyError>
++    
+     func ignoreDeviceTrustAndResend(devices: [String: [String]], sendHandle: SendHandleProxy) async -> Result<Void, RoomProxyError>
+     
+     func withdrawVerificationAndResend(userIDs: [String], sendHandle: SendHandleProxy) async -> Result<Void, RoomProxyError>
+diff --git a/ElementX/Sources/Services/Timeline/TimelineController/TimelineController.swift b/ElementX/Sources/Services/Timeline/TimelineController/TimelineController.swift
+index 24c9201af..41511836e 100644
+--- a/ElementX/Sources/Services/Timeline/TimelineController/TimelineController.swift
++++ b/ElementX/Sources/Services/Timeline/TimelineController/TimelineController.swift
+@@ -493,6 +493,10 @@ class TimelineController: TimelineControllerProtocol {
+     /// The controller is switching the `activeTimelineItemProvider`.
+     private var isSwitchingTimelines = false
+     
++    // FreeChat: disappearing messages vanish from the timeline on their own.
++    private nonisolated let freechatExpiry = FreeChatExpiryTracker()
++    private var freechatExpiryCancellable: AnyCancellable?
++    
+     /// Configures the controller to listen to `activeTimeline` for events.
+     /// - Parameter clearExistingItems: Whether or not to clear any existing items before loading the timeline's contents.
+     private func configureActiveTimelineItemProvider() {
+@@ -518,6 +522,39 @@ class TimelineController: TimelineControllerProtocol {
+                 await self?.updateTimelineItems(itemProxies: items, paginationState: paginationState)
+             }
+         }.asCancellable()
++        
++        // Holds self only for one check at a time, so the controller can go away and cancel the loop.
++        freechatExpiryCancellable = Task { [weak self] in
++            var checks = FreeChatExpiryChecks()
++            while !Task.isCancelled {
++                try? await Task.sleep(for: .seconds(1))
++                guard let self else { return }
++                await refreshForExpiry(&checks)
++            }
++        }.asCancellable()
++    }
++    
++    /// FreeChat: rebuilds the timeline when a message expires, or the server says it was purged.
++    private func refreshForExpiry(_ checks: inout FreeChatExpiryChecks) async {
++        let provider = activeTimelineItemProvider
++        let now = Date.now
++        var changed = freechatExpiry.hasNewlyHidden(in: provider.itemProxies, since: checks.last, now: now)
++        checks.last = now
++        if now.timeIntervalSince(checks.lastExistence) >= 30, let api = FreeChatSession.api {
++            checks.lastExistence = now
++            let pending = freechatExpiry.unresolvedEventIDs(in: provider.itemProxies, now: now)
++            if !pending.isEmpty {
++                switch await api.existingEvents(roomID: roomID, eventIDs: pending) {
++                case .success(let existing):
++                    changed = freechatExpiry.markPurged(pending.subtracting(existing)) || changed
++                case .failure(let error):
++                    MXLog.error("FreeChat: existence check failed in \(roomID): \(error)")
++                }
++            }
++        }
++        if changed {
++            await updateTimelineItems(itemProxies: provider.itemProxies, paginationState: provider.paginationState)
++        }
+     }
+     
+     private func updateTimelineItems(itemProxies: [TimelineItemProxy], paginationState: TimelinePaginationState) async {
+@@ -594,6 +631,9 @@ class TimelineController: TimelineControllerProtocol {
+                                                activeTimeline: TimelineProxyProtocol) -> RoomTimelineItemProtocol? {
+         switch itemProxy {
+         case .event(let eventTimelineItem):
++            if freechatExpiry.isHidden(eventTimelineItem) {
++                return nil
++            }
+             let timelineItem = timelineItemFactory.buildTimelineItem(for: eventTimelineItem, isDM: isDM)
+             
+             if let messageTimelineItem = timelineItem as? EventBasedMessageTimelineItemProtocol {
+diff --git a/ElementX/Sources/Services/UserSession/SessionDirectories.swift b/ElementX/Sources/Services/UserSession/SessionDirectories.swift
+index 8f41bad3a..48ce92cc1 100644
+--- a/ElementX/Sources/Services/UserSession/SessionDirectories.swift
++++ b/ElementX/Sources/Services/UserSession/SessionDirectories.swift
+@@ -62,6 +62,18 @@ nonisolated struct SessionDirectories: Hashable, Codable {
+         }
+     }
+     
++    /// FreeChat: deletes the event cache (timelines) and the media cache, keeping keys and room state.
++    func deleteMessageCaches() {
++        guard FileManager.default.directoryExists(at: cacheDirectory) else { return }
++        for prefix in ["matrix-sdk-event-cache", "matrix-sdk-media"] {
++            do {
++                try deleteFiles(at: cacheDirectory, with: prefix)
++            } catch {
++                MXLog.error("FreeChat: failed deleting \(prefix): \(error)")
++            }
++        }
++    }
++    
+     /// Check that mission critical files (the crypto db) are still in the right place when restoring a session
+     /// iOS might decide to move the app with its user defaults and keychain but without
+     /// some of the files stored in the shared container e.g. after a device transfer, offloading etc.
+diff --git a/UnitTests/Sources/FreeChatTests.swift b/UnitTests/Sources/FreeChatTests.swift
+new file mode 100644
+index 000000000..801bcfda4
+--- /dev/null
++++ b/UnitTests/Sources/FreeChatTests.swift
+@@ -0,0 +1,81 @@
++//
++// Copyright 2026 FreeChat contributors
++//
++// SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++// Please see LICENSE files in the repository root for full details.
++//
++
++@testable import ElementX
++import Foundation
++import Testing
++
++/// FreeChat JSON formats; the same cases are covered by the web and Android clients.
++struct FreeChatTests {
++    @Test
++    func roomTTLIsLenient() {
++        #expect(FreeChat.roomTTL(fromContentJSON: #"{"ttl":3600}"#) == 3600)
++        #expect(FreeChat.roomTTL(fromContentJSON: #"{"ttl":0}"#) == 0)
++        #expect(FreeChat.roomTTL(fromContentJSON: #"{"ttl":-5}"#) == 0)
++        #expect(FreeChat.roomTTL(fromContentJSON: #"{"ttl":"3600"}"#) == 0)
++        #expect(FreeChat.roomTTL(fromContentJSON: #"{"ttl":true}"#) == 0)
++        #expect(FreeChat.roomTTL(fromContentJSON: "not json") == 0)
++        #expect(FreeChat.roomTTL(fromContentJSON: nil) == 0)
++        #expect(FreeChat.contentJSON(forRoomTTL: 60) == #"{"ttl":60}"#)
++    }
++
++    @Test
++    func screenshotBlockingIsStrict() {
++        #expect(FreeChat.blocksScreenshots(privacyContentJSON: #"{"block_screenshots":true}"#))
++        #expect(!FreeChat.blocksScreenshots(privacyContentJSON: #"{"block_screenshots":"true"}"#))
++        #expect(!FreeChat.blocksScreenshots(privacyContentJSON: #"{"block_screenshots":1}"#))
++        #expect(!FreeChat.blocksScreenshots(privacyContentJSON: nil))
++    }
++
++    @Test
++    func personalSettingsKeepUnknownFields() {
++        let original = #"{"read_ttl":30,"rooms":{"!a:x":5},"future":"kept"}"#
++        let personal = FreeChat.personal(fromContentJSON: original)
++        #expect(personal.readTTL == 30)
++        #expect(personal.readTTL(in: "!a:x") == 5)
++        #expect(personal.readTTL(in: "!b:x") == 30)
++        #expect(!personal.blockScreenshots)
++
++        let updated = FreeChat.updatingPersonal(original, readTTL: 60, roomID: "!b:x", roomReadTTL: .some(.none), blockScreenshots: true)
++        let reparsed = FreeChat.personal(fromContentJSON: updated)
++        #expect(reparsed.readTTL == 60)
++        #expect(reparsed.rooms == ["!a:x": 5])
++        #expect(reparsed.blockScreenshots)
++        #expect(updated.contains(#""future":"kept""#))
++    }
++
++    @Test
++    func roomOverridesCanBeSetAndCleared() {
++        let set = FreeChat.updatingPersonal(nil, roomID: "!a:x", roomReadTTL: .some(5))
++        #expect(FreeChat.personal(fromContentJSON: set).rooms == ["!a:x": 5])
++        let cleared = FreeChat.updatingPersonal(set, roomID: "!a:x", roomReadTTL: .some(.none))
++        #expect(FreeChat.personal(fromContentJSON: cleared).rooms.isEmpty)
++    }
++
++    @Test
++    func expiryMarkers() {
++        let marked = FreeChat.expiryMarkers(fromEventJSON: #"{"unsigned":{"com.freechat.expires_at":1000,"com.freechat.read_ttl":30}}"#)
++        #expect(marked.expiresAt == 1000)
++        #expect(marked.readTTL == 30)
++        #expect(marked.isMarked)
++        #expect(marked.isExpired(now: Date(timeIntervalSince1970: 1)))
++        #expect(!marked.isExpired(now: Date(timeIntervalSince1970: 0.5)))
++
++        #expect(FreeChat.expiryMarkers(fromEventJSON: #"{"unsigned":{}}"#) == .none)
++        #expect(FreeChat.expiryMarkers(fromEventJSON: #"{"unsigned":{"com.freechat.expires_at":"1000"}}"#) == .none)
++        #expect(FreeChat.expiryMarkers(fromEventJSON: nil) == .none)
++        #expect(!FreeChat.ExpiryMarkers.none.isMarked)
++    }
++
++    @Test
++    func purgedEventsAreRemembered() {
++        let tracker = FreeChatExpiryTracker()
++        #expect(!tracker.markPurged([]))
++        #expect(tracker.markPurged(["$a"]))
++        #expect(tracker.unresolvedEventIDs(in: []).isEmpty)
++    }
++}

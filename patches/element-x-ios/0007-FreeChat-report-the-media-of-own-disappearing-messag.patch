@@ -1,0 +1,170 @@
+From d608bbc368a6927556798d832e156c5679566b93 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 7/8] FreeChat: report the media of own disappearing messages
+ on iOS
+
+Same as Android: after sending, the MXCs of the message's files and thumbnails
+go to the server's event_media endpoint. Not yet built or tested on a Mac.
+---
+ ElementX/Sources/FreeChat/FreeChatAPI.swift   |  8 +++
+ .../Sources/FreeChat/FreeChatExpiry.swift     | 67 +++++++++++++++++++
+ .../TimelineController.swift                  | 12 +++-
+ UnitTests/Sources/FreeChatTests.swift         |  6 ++
+ 4 files changed, 92 insertions(+), 1 deletion(-)
+
+diff --git a/ElementX/Sources/FreeChat/FreeChatAPI.swift b/ElementX/Sources/FreeChat/FreeChatAPI.swift
+index e258e6e98..b696f75b0 100644
+--- a/ElementX/Sources/FreeChat/FreeChatAPI.swift
++++ b/ElementX/Sources/FreeChat/FreeChatAPI.swift
+@@ -32,6 +32,14 @@ nonisolated struct FreeChatAPI: Sendable {
+         }
+     }
+ 
++    /// Tells the server which media the user's own disappearing message uses, so the files are deleted when it
++    /// expires. The SDK encrypts attachments itself, so their IDs cannot go in the event's plaintext. Returns how
++    /// many the server kept: none for messages that never expire. At most 64 per message.
++    func reportEventMedia(roomID: String, eventID: String, mxcs: [String]) async -> Result<Int, FreeChatAPIError> {
++        let body: [String: Any] = ["event_id": eventID, "mxcs": Array(mxcs.prefix(64))]
++        return await request("POST", roomPath(roomID, "event_media"), body: body).map { ($0["kept"] as? Int) ?? 0 }
++    }
++
+     /// Whether the room has a join password. Room admins only.
+     func hasJoinPassword(roomID: String) async -> Result<Bool, FreeChatAPIError> {
+         await request("GET", roomPath(roomID, "join_password"), body: nil).map { ($0["enabled"] as? Bool) == true }
+diff --git a/ElementX/Sources/FreeChat/FreeChatExpiry.swift b/ElementX/Sources/FreeChat/FreeChatExpiry.swift
+index e815deefa..cfbb2525c 100644
+--- a/ElementX/Sources/FreeChat/FreeChatExpiry.swift
++++ b/ElementX/Sources/FreeChat/FreeChatExpiry.swift
+@@ -32,10 +32,14 @@ nonisolated struct FreeChatExpiryChecks {
+ /// and the server cap) is honoured to the second, even offline. Messages that burn after reading, whose expiry
+ /// this device cannot compute, are dropped once the server says they no longer exist. Redacted messages are
+ /// hidden as well: deleted messages leave no trace.
++///
++/// It also picks the user's own disappearing messages whose media should be reported to the server, so the files
++/// are deleted with them.
+ nonisolated final class FreeChatExpiryTracker: Sendable {
+     private struct State {
+         var markers = [String: FreeChat.ExpiryMarkers]()
+         var purged = Set<String>()
++        var reportedMedia = Set<String>()
+     }
+ 
+     private let state = Mutex(State())
+@@ -76,6 +80,27 @@ nonisolated final class FreeChatExpiryTracker: Sendable {
+         return true
+     }
+ 
++    /// The user's own sent disappearing messages with media not reported yet, and the MXCs of each. They count as
++    /// reported from now on; call `retryMediaReport` when sending failed.
++    func mediaToReport(in items: [TimelineItemProxy], now: Date = .now) -> [String: [String]] {
++        var result = [String: [String]]()
++        for item in events(in: items) where item.isOwn {
++            guard let eventID = item.id.eventID,
++                  !state.withLock({ $0.reportedMedia.contains(eventID) }) else { continue }
++            let markers = markers(for: item, eventID: eventID)
++            guard markers.isMarked, !markers.isExpired(now: now) else { continue }
++            let mxcs = FreeChat.mediaMXCs(of: item.content)
++            if !mxcs.isEmpty { result[eventID] = mxcs }
++        }
++        state.withLock { $0.reportedMedia.formUnion(result.keys) }
++        return result
++    }
++
++    /// Lets a report that did not reach the server be sent again.
++    func retryMediaReport(_ eventID: String) {
++        _ = state.withLock { $0.reportedMedia.remove(eventID) }
++    }
++
+     // MARK: - Private
+ 
+     /// An event's original JSON never changes, so its markers are parsed once.
+@@ -92,3 +117,45 @@ nonisolated final class FreeChatExpiryTracker: Sendable {
+         }
+     }
+ }
++
++extension FreeChat {
++    /// MXCs of a message's files and thumbnails; for encrypted media they are the IDs of the encrypted files.
++    static func mediaMXCs(of content: TimelineItemContent) -> [String] {
++        guard case .msgLike(let msgLike) = content else { return [] }
++        var sources = [MediaSource?]()
++        switch msgLike.kind {
++        case .message(let message):
++            switch message.msgType {
++            case .image(let image):
++                sources = [image.source, image.info?.thumbnailSource]
++            case .video(let video):
++                sources = [video.source, video.info?.thumbnailSource]
++            case .file(let file):
++                sources = [file.source, file.info?.thumbnailSource]
++            case .audio(let audio):
++                sources = [audio.source]
++            case .gallery(let gallery):
++                for itemType in gallery.itemtypes {
++                    switch itemType {
++                    case .image(let image): sources += [image.source, image.info?.thumbnailSource]
++                    case .video(let video): sources += [video.source, video.info?.thumbnailSource]
++                    case .file(let file): sources += [file.source, file.info?.thumbnailSource]
++                    case .audio(let audio): sources += [audio.source]
++                    case .other: break
++                    }
++                }
++            default:
++                break
++            }
++        case .sticker(_, let info, let source):
++            sources = [source, info.thumbnailSource]
++        default:
++            break
++        }
++        var seen = Set<String>()
++        return sources.compactMap { source -> String? in
++            guard let url = source?.url().components(separatedBy: "#").first, url.hasPrefix("mxc://") else { return nil }
++            return seen.insert(url).inserted ? url : nil
++        }
++    }
++}
+diff --git a/ElementX/Sources/Services/Timeline/TimelineController/TimelineController.swift b/ElementX/Sources/Services/Timeline/TimelineController/TimelineController.swift
+index 41511836e..2f976c997 100644
+--- a/ElementX/Sources/Services/Timeline/TimelineController/TimelineController.swift
++++ b/ElementX/Sources/Services/Timeline/TimelineController/TimelineController.swift
+@@ -534,12 +534,22 @@ class TimelineController: TimelineControllerProtocol {
+         }.asCancellable()
+     }
+     
+-    /// FreeChat: rebuilds the timeline when a message expires, or the server says it was purged.
++    /// FreeChat: rebuilds the timeline when a message expires, or the server says it was purged, and reports the
++    /// media of the user's own disappearing messages.
+     private func refreshForExpiry(_ checks: inout FreeChatExpiryChecks) async {
+         let provider = activeTimelineItemProvider
+         let now = Date.now
+         var changed = freechatExpiry.hasNewlyHidden(in: provider.itemProxies, since: checks.last, now: now)
+         checks.last = now
++        if let api = FreeChatSession.api {
++            for (eventID, mxcs) in freechatExpiry.mediaToReport(in: provider.itemProxies, now: now) {
++                if case .failure(let error) = await api.reportEventMedia(roomID: roomID, eventID: eventID, mxcs: mxcs) {
++                    // Retry on the next check only when the server was not reached; otherwise it refused for good.
++                    if error == .network { freechatExpiry.retryMediaReport(eventID) }
++                    MXLog.error("FreeChat: reporting media failed in \(roomID): \(error)")
++                }
++            }
++        }
+         if now.timeIntervalSince(checks.lastExistence) >= 30, let api = FreeChatSession.api {
+             checks.lastExistence = now
+             let pending = freechatExpiry.unresolvedEventIDs(in: provider.itemProxies, now: now)
+diff --git a/UnitTests/Sources/FreeChatTests.swift b/UnitTests/Sources/FreeChatTests.swift
+index 801bcfda4..f2fac0c13 100644
+--- a/UnitTests/Sources/FreeChatTests.swift
++++ b/UnitTests/Sources/FreeChatTests.swift
+@@ -78,4 +78,10 @@ struct FreeChatTests {
+         #expect(tracker.markPurged(["$a"]))
+         #expect(tracker.unresolvedEventIDs(in: []).isEmpty)
+     }
++
++    @Test
++    func mediaIsOnlyReportedForMessagesWithFiles() {
++        #expect(FreeChat.mediaMXCs(of: .callInvite).isEmpty)
++        #expect(FreeChatExpiryTracker().mediaToReport(in: []).isEmpty)
++    }
+ }

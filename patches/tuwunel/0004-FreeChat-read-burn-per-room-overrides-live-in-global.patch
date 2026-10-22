@@ -1,0 +1,88 @@
+From 4daa40321e76f5a4daa3700716e4d6c6131f6154 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 04/14] FreeChat: read-burn per-room overrides live in global
+ account data
+
+matrix-rust-sdk (Element X) cannot write room account data, so the
+per-room override moves to {"rooms": {"<room id>": seconds}} inside the
+global com.freechat.disappearing account data.
+---
+ src/service/rooms/disappearing/read_burn.rs | 40 ++++++++++-----------
+ 1 file changed, 18 insertions(+), 22 deletions(-)
+
+diff --git a/src/service/rooms/disappearing/read_burn.rs b/src/service/rooms/disappearing/read_burn.rs
+index 01e0a4e9d..40d5ea07e 100644
+--- a/src/service/rooms/disappearing/read_burn.rs
++++ b/src/service/rooms/disappearing/read_burn.rs
+@@ -1,9 +1,10 @@
+ //! FreeChat: burn your own messages once they have been read.
+ //!
+-//! A user sets `com.freechat.disappearing` account data with content
+-//! `{"read_ttl": <seconds>}`: globally as their default, and in a room to
+-//! override it there (`"read_ttl": 0` turns it off in that room; content
+-//! without `read_ttl` follows the global default).
++//! A user sets global `com.freechat.disappearing` account data:
++//! `{"read_ttl": <seconds>, "rooms": {"<room id>": <seconds>}}`. `read_ttl` is
++//! their default; an entry in `rooms` overrides it for that room (`0` turns it
++//! off there; no entry follows the default). Overrides live in global rather
++//! than room account data because matrix-rust-sdk cannot set the latter.
+ //!
+ //! Each message sent while it is on waits in `readburn_pending` until every
+ //! other joined member has read it, meaning their read receipt or private read
+@@ -11,9 +12,11 @@
+ //! later through the regular expiry index. Read positions are tracked in
+ //! `readburn_readpos` from the moment this feature saw them.
+ 
++use std::collections::BTreeMap;
++
+ use futures::StreamExt;
+ use ruma::{
+-	EventId, OwnedUserId, RoomId, UserId,
++	EventId, OwnedRoomId, OwnedUserId, RoomId, UserId,
+ 	events::receipt::{ReceiptEvent, ReceiptType},
+ };
+ use serde::Deserialize;
+@@ -37,32 +40,25 @@ struct AccountDataEvent {
+ 
+ #[derive(Default, Deserialize)]
+ struct Personal {
+-	read_ttl: Option<u64>,
++	#[serde(default)]
++	read_ttl: u64,
++	#[serde(default)]
++	rooms: BTreeMap<OwnedRoomId, u64>,
+ }
+ 
+ /// The sender's effective read-burn delay in seconds, zero when off.
+ #[implement(super::Service)]
+ pub async fn personal_read_ttl(&self, room_id: &RoomId, user_id: &UserId) -> u64 {
+-	match self.read_ttl_setting(Some(room_id), user_id).await {
+-		| Some(ttl) => ttl,
+-		| None => self
+-			.read_ttl_setting(None, user_id)
+-			.await
+-			.unwrap_or(0),
+-	}
+-}
+-
+-/// The `read_ttl` stored in room (or global, when `room_id` is none) account
+-/// data, if that data sets one.
+-#[implement(super::Service)]
+-async fn read_ttl_setting(&self, room_id: Option<&RoomId>, user_id: &UserId) -> Option<u64> {
+ 	self.services
+ 		.account_data
+-		.get_raw(room_id, user_id, STATE_TYPE)
++		.get_raw(None, user_id, STATE_TYPE)
+ 		.await
+ 		.deserialized::<AccountDataEvent>()
+-		.ok()
+-		.and_then(|event| event.content.read_ttl)
++		.map(|event| {
++			let Personal { read_ttl, rooms } = event.content;
++			rooms.get(room_id).copied().unwrap_or(read_ttl)
++		})
++		.unwrap_or(0)
+ }
+ 
+ /// Queues a freshly appended local message for burning after read.

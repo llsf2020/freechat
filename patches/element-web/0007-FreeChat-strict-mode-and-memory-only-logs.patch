@@ -1,0 +1,722 @@
+From 711ad3cc40f6bee894894b4b1eef55362a9b14e1 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 07/12] FreeChat: strict mode and memory-only logs
+
+Strict mode (per device, opt-in): the session and crypto store stay in memory,
+closing the page signs out on the server and wipes localStorage, and hiding the
+page for the chosen time signs out. Rageshake logs are no longer persisted.
+---
+ apps/web/src/Lifecycle.ts                     |  24 ++-
+ apps/web/src/MatrixClientPeg.test.ts          |   4 +-
+ apps/web/src/MatrixClientPeg.ts               |   8 +-
+ .../tabs/user/SecurityUserSettingsTab.tsx     |   4 +
+ .../SecurityUserSettingsTab.test.tsx.snap     |  42 +++++
+ apps/web/src/freechat/StrictModeSettings.tsx  |  83 +++++++++
+ apps/web/src/freechat/i18n.ts                 |  37 ++++
+ apps/web/src/freechat/strictMode.test.ts      | 131 +++++++++++++
+ apps/web/src/freechat/strictMode.ts           | 172 ++++++++++++++++++
+ apps/web/src/rageshake/rageshake.ts           |   9 +
+ 10 files changed, 508 insertions(+), 6 deletions(-)
+ create mode 100644 apps/web/src/freechat/StrictModeSettings.tsx
+ create mode 100644 apps/web/src/freechat/strictMode.test.ts
+ create mode 100644 apps/web/src/freechat/strictMode.ts
+
+diff --git a/apps/web/src/Lifecycle.ts b/apps/web/src/Lifecycle.ts
+index 5dadfb097d..81ad43876c 100644
+--- a/apps/web/src/Lifecycle.ts
++++ b/apps/web/src/Lifecycle.ts
+@@ -70,6 +70,13 @@ import { CallStatusListener } from "./CallStatusListener.ts";
+ import { CallStore } from "./stores/CallStore.ts";
+ import { ModuleApi } from "./modules/Api.ts";
+ import { draftStorage } from "./freechat/localPrivacy";
++import {
++    beginSession,
++    endSession,
++    getStrictMode,
++    keepStrictModeChoice,
++    watchStrictSession,
++} from "./freechat/strictMode";
+ 
+ const HOMESERVER_URL_KEY = "mx_hs_url";
+ const ID_SERVER_URL_KEY = "mx_is_url";
+@@ -180,6 +187,9 @@ export async function loadSession(opts: ILoadSessionOpts = {}): Promise<boolean>
+         const guestIsUrl = opts.guestIsUrl;
+         const defaultDeviceDisplayName = opts.defaultDeviceDisplayName;
+ 
++        // FreeChat strict mode: nothing is restored; wipe whatever the last session left behind.
++        if (getStrictMode().enabled) await clearStorage();
++
+         const success = await restoreSessionFromStorage({
+             ignoreGuest: Boolean(opts.ignoreGuest),
+         });
+@@ -781,7 +791,8 @@ async function handleLoadSessionFailure(e: unknown, loadSessionOpts?: ILoadSessi
+ export async function setLoggedIn(credentials: IMatrixClientCreds): Promise<MatrixClient> {
+     credentials.freshLogin = true;
+     stopMatrixClient();
+-    credentials.pickleKey = await loadOrCreatePickleKey(credentials);
++    // FreeChat strict mode: the crypto store is in memory, so there is nothing to encrypt at rest.
++    if (!getStrictMode().enabled) credentials.pickleKey = await loadOrCreatePickleKey(credentials);
+     return doSetLoggedIn(credentials, true, true);
+ }
+ 
+@@ -896,7 +907,11 @@ async function doSetLoggedIn(
+         PosthogAnalytics.instance.startListeningToSettingsChanges(client);
+     }
+ 
+-    if (localStorage) {
++    // FreeChat strict mode: the session lives in memory only.
++    const strict = beginSession();
++    if (strict) {
++        logger.log("FreeChat strict mode: not persisting the session");
++    } else if (localStorage) {
+         try {
+             await persistCredentials(credentials);
+             // make sure we don't think that it's a fresh login any more
+@@ -933,6 +948,8 @@ async function doSetLoggedIn(
+         clientPegOpts.rustCryptoStoreKey?.fill(0);
+     }
+ 
++    if (strict) watchStrictSession(client, () => void logout());
++
+     // Run the migrations after the MatrixClientPeg has been assigned
+     SettingsStore.runMigrations(isFreshLogin);
+ 
+@@ -1133,6 +1150,7 @@ export async function onLoggedOut(): Promise<void> {
+     // that React components unmount first. This avoids React soft crashes
+     // that can occur when components try to use a null client.
+     dis.fire(Action.OnLoggedOut, true);
++    endSession();
+     stopMatrixClient();
+     await clearStorage({ deleteEverything: true });
+     clearUploadedMediaCache();
+@@ -1167,7 +1185,9 @@ export async function clearStorage(opts?: { deleteEverything?: boolean }): Promi
+         const pendingInvites = ThreepidInviteStore.instance.getWireInvites();
+         const registrationTime = window.localStorage.getItem("mx_registration_time");
+ 
++        const restoreStrictMode = keepStrictModeChoice();
+         window.localStorage.clear();
++        restoreStrictMode();
+ 
+         try {
+             await StorageAccess.idbClear("account");
+diff --git a/apps/web/src/MatrixClientPeg.test.ts b/apps/web/src/MatrixClientPeg.test.ts
+index 6898908cc5..3b72c94adf 100644
+--- a/apps/web/src/MatrixClientPeg.test.ts
++++ b/apps/web/src/MatrixClientPeg.test.ts
+@@ -88,7 +88,7 @@ describe("MatrixClientPeg", () => {
+ 
+             const cryptoStoreKey = new Uint8Array([1, 2, 3, 4]);
+             await testPeg.start({ rustCryptoStoreKey: cryptoStoreKey });
+-            expect(mockInitRustCrypto).toHaveBeenCalledWith({ storageKey: cryptoStoreKey });
++            expect(mockInitRustCrypto).toHaveBeenCalledWith({ useIndexedDB: true, storageKey: cryptoStoreKey });
+         });
+ 
+         it("should try to start dehydration if dehydration is enabled", async () => {
+@@ -108,7 +108,7 @@ describe("MatrixClientPeg", () => {
+ 
+             const cryptoStoreKey = new Uint8Array([1, 2, 3, 4]);
+             await testPeg.start({ rustCryptoStoreKey: cryptoStoreKey });
+-            expect(mockInitRustCrypto).toHaveBeenCalledWith({ storageKey: cryptoStoreKey });
++            expect(mockInitRustCrypto).toHaveBeenCalledWith({ useIndexedDB: true, storageKey: cryptoStoreKey });
+             expect(mockStartDehydration).toHaveBeenCalledWith({ onlyIfKeyCached: true, rehydrate: false });
+         });
+ 
+diff --git a/apps/web/src/MatrixClientPeg.ts b/apps/web/src/MatrixClientPeg.ts
+index 2d1a41ab87..05bf453440 100644
+--- a/apps/web/src/MatrixClientPeg.ts
++++ b/apps/web/src/MatrixClientPeg.ts
+@@ -29,6 +29,7 @@ import { setDeviceIsolationMode } from "./settings/controllers/DeviceIsolationMo
+ import { initialiseDehydrationIfEnabled } from "./utils/device/dehydration";
+ import { installMediaHint } from "./freechat/mediaHint";
+ import { installExpiry } from "./freechat/expiry";
++import { isStrictSession } from "./freechat/strictMode";
+ 
+ export interface MatrixClientPegAssignOpts {
+     /**
+@@ -311,11 +312,14 @@ class MatrixClientPegClass implements IMatrixClientPeg {
+             throw new Error("createClient must be called first");
+         }
+ 
+-        if (!opts.rustCryptoStoreKey && !opts.rustCryptoStorePassword) {
++        if (!opts.rustCryptoStoreKey && !opts.rustCryptoStorePassword && !isStrictSession()) {
+             logger.error("Warning! Not using an encryption key for rust crypto store.");
+         }
+ 
++        // FreeChat strict mode: keys live in memory only.
++        const strict = isStrictSession();
+         await this.matrixClient.initRustCrypto({
++            useIndexedDB: !strict,
+             storageKey: opts.rustCryptoStoreKey,
+             storagePassword: opts.rustCryptoStorePassword,
+             caCertsPem: opts.x509?.userVerificationCaCertsPem,
+@@ -323,7 +327,7 @@ class MatrixClientPegClass implements IMatrixClientPeg {
+             x509Validity: opts.x509?.validity,
+         });
+ 
+-        StorageManager.setCryptoInitialised(true);
++        if (!strict) StorageManager.setCryptoInitialised(true);
+ 
+         setDeviceIsolationMode(this.matrixClient, SettingsStore.getValue("feature_exclude_insecure_devices"));
+ 
+diff --git a/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx b/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx
+index 3828a9d250..0c427017d0 100644
+--- a/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx
++++ b/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx
+@@ -35,6 +35,7 @@ import { DiscoverySettings } from "../../discovery/DiscoverySettings";
+ import SetIntegrationManager from "../../SetIntegrationManager";
+ import { GlobalReadBurnSettings } from "../../../../../freechat/ReadBurnSettings";
+ import { ft } from "../../../../../freechat/i18n";
++import { StrictModeSettings } from "../../../../../freechat/StrictModeSettings";
+ 
+ interface IIgnoredUserProps {
+     userId: string;
+@@ -374,6 +375,9 @@ export default class SecurityUserSettingsTab extends React.Component<EmptyObject
+                 <SettingsSection heading={ft("burn_section")}>
+                     <GlobalReadBurnSettings />
+                 </SettingsSection>
++                <SettingsSection heading={ft("strict_section")}>
++                    <StrictModeSettings />
++                </SettingsSection>
+                 {advancedSection}
+             </SettingsTab>
+         );
+diff --git a/apps/web/src/components/views/settings/tabs/user/__snapshots__/SecurityUserSettingsTab.test.tsx.snap b/apps/web/src/components/views/settings/tabs/user/__snapshots__/SecurityUserSettingsTab.test.tsx.snap
+index 1c5d7197a9..92ff2bc0f3 100644
+--- a/apps/web/src/components/views/settings/tabs/user/__snapshots__/SecurityUserSettingsTab.test.tsx.snap
++++ b/apps/web/src/components/views/settings/tabs/user/__snapshots__/SecurityUserSettingsTab.test.tsx.snap
+@@ -360,6 +360,48 @@ exports[`<SecurityUserSettingsTab /> > renders security section 1`] = `
+           </fieldset>
+         </div>
+       </div>
++      <div
++        class="mx_SettingsSection"
++      >
++        <h2
++          class="mx_Heading_h3"
++        >
++          Strict mode
++        </h2>
++        <div
++          class="mx_SettingsSection_subSections"
++        >
++          <fieldset
++            class="mx_SettingsFieldset"
++          >
++            <legend
++              class="mx_SettingsFieldset_legend"
++            >
++              Leave nothing on this device
++            </legend>
++            <div
++              class="mx_SettingsFieldset_description"
++            >
++              <div
++                class="mx_SettingsSubsection_text"
++              >
++                Nothing about this session is saved on this device: not messages, not keys, not the login. Closing or reloading the page signs you out, and so does leaving it in the background. Signing in again needs your password and your recovery key.
++              </div>
++            </div>
++            <div
++              class="mx_SettingsFieldset_content"
++            >
++              <div
++                class="mx_AccessibleButton mx_AccessibleButton_hasKind mx_AccessibleButton_kind_danger_outline"
++                role="button"
++                tabindex="0"
++              >
++                Turn on strict mode
++              </div>
++            </div>
++          </fieldset>
++        </div>
++      </div>
+       <div
+         class="mx_SettingsSection"
+       >
+diff --git a/apps/web/src/freechat/StrictModeSettings.tsx b/apps/web/src/freechat/StrictModeSettings.tsx
+new file mode 100644
+index 0000000000..c6b057b74c
+--- /dev/null
++++ b/apps/web/src/freechat/StrictModeSettings.tsx
+@@ -0,0 +1,83 @@
++/*
++Copyright 2026 FreeChat contributors
++
++SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++Please see LICENSE files in the repository root for full details.
++*/
++
++/*
++ * FreeChat: the strict mode switch in Security & Privacy. See strictMode.ts.
++ */
++
++import React, { type JSX, useState } from "react";
++
++import Modal from "../Modal";
++import QuestionDialog from "../components/views/dialogs/QuestionDialog";
++import LogoutDialog from "../components/views/dialogs/LogoutDialog";
++import AccessibleButton from "../components/views/elements/AccessibleButton";
++import StyledRadioGroup from "../components/views/elements/StyledRadioGroup";
++import SettingsFieldset from "../components/views/settings/SettingsFieldset";
++import { IDLE_PRESETS_MINUTES, getStrictMode, isStrictSession, setStrictMode } from "./strictMode";
++import { ft } from "./i18n";
++
++async function turnOn(idleMinutes: number): Promise<void> {
++    const { finished } = Modal.createDialog(QuestionDialog, {
++        title: ft("strict_confirm_title"),
++        description: ft("strict_confirm_body"),
++        button: ft("strict_confirm_button"),
++        danger: true,
++    });
++    const [confirmed] = await finished;
++    if (!confirmed) return;
++
++    setStrictMode({ enabled: true, idleMinutes });
++    // The upstream dialog warns if the keys are not backed up, then signs out.
++    const [signedOut] = await Modal.createDialog(LogoutDialog).finished;
++    if (!signedOut) setStrictMode({ enabled: false, idleMinutes });
++}
++
++export function StrictModeSettings(): JSX.Element {
++    const [mode, setMode] = useState(getStrictMode);
++    const strictNow = isStrictSession();
++
++    const update = (next: typeof mode): void => {
++        setStrictMode(next);
++        setMode(next);
++    };
++
++    let body: JSX.Element;
++    if (strictNow && mode.enabled) {
++        body = (
++            <>
++                <p>{ft("strict_on")}</p>
++                <StyledRadioGroup
++                    name="freechatStrictIdle"
++                    value={String(mode.idleMinutes)}
++                    onChange={(value) => update({ ...mode, idleMinutes: Number(value) })}
++                    definitions={IDLE_PRESETS_MINUTES.map((minutes) => ({
++                        value: String(minutes),
++                        label: ft("minutes", { count: minutes }),
++                    }))}
++                />
++                <AccessibleButton kind="secondary" onClick={() => update({ ...mode, enabled: false })}>
++                    {ft("strict_disable")}
++                </AccessibleButton>
++            </>
++        );
++    } else if (strictNow) {
++        body = <p>{ft("strict_disabled_pending")}</p>;
++    } else {
++        body = (
++            <AccessibleButton kind="danger_outline" onClick={() => void turnOn(mode.idleMinutes)}>
++                {ft("strict_enable")}
++            </AccessibleButton>
++        );
++    }
++
++    return (
++        <SettingsFieldset legend={ft("strict_legend")} description={ft("strict_description")}>
++            {strictNow && mode.enabled && <h4>{ft("strict_idle_legend")}</h4>}
++            {body}
++        </SettingsFieldset>
++    );
++}
+diff --git a/apps/web/src/freechat/i18n.ts b/apps/web/src/freechat/i18n.ts
+index 5f46a0b5fb..143c04b670 100644
+--- a/apps/web/src/freechat/i18n.ts
++++ b/apps/web/src/freechat/i18n.ts
+@@ -66,6 +66,19 @@ const en = {
+     block_screenshots_help:
+         "On Android, screenshots and screen recording are blocked for every member. iOS cannot block them and shows a warning instead. Browsers cannot block screenshots.",
+     privacy_error_title: "Could not change the screenshot setting",
++    strict_section: "Strict mode",
++    strict_legend: "Leave nothing on this device",
++    strict_description:
++        "Nothing about this session is saved on this device: not messages, not keys, not the login. Closing or reloading the page signs you out, and so does leaving it in the background. Signing in again needs your password and your recovery key.",
++    strict_enable: "Turn on strict mode",
++    strict_on: "Strict mode is on.",
++    strict_disable: "Turn off (from the next sign-in)",
++    strict_disabled_pending: "Strict mode will be off from your next sign-in.",
++    strict_idle_legend: "Sign out after this long in the background",
++    strict_confirm_title: "Turn on strict mode?",
++    strict_confirm_body:
++        "You will be signed out now. Make sure you have your recovery key: without it, you cannot read earlier encrypted messages after signing in again.",
++    strict_confirm_button: "Sign out and turn on",
+ };
+ 
+ type Key = keyof typeof en;
+@@ -119,6 +132,18 @@ const zhHans: Record<Key, string> = {
+     block_screenshots_help:
+         "在安卓上，所有成员在这个房间里都不能截屏和录屏。iOS 无法禁止，会改为提醒。浏览器无法禁止截屏。",
+     privacy_error_title: "无法修改截屏设置",
++    strict_section: "严格模式",
++    strict_legend: "本机什么都不留",
++    strict_description:
++        "这台设备上不保存这次登录的任何东西：消息、密钥、登录状态都不保存。关闭或刷新页面就会退出登录，放在后台超过设定时间也会退出。重新登录需要密码和恢复密钥。",
++    strict_enable: "开启严格模式",
++    strict_on: "严格模式已开启。",
++    strict_disable: "关闭（下次登录起生效）",
++    strict_disabled_pending: "下次登录起，严格模式关闭。",
++    strict_idle_legend: "放在后台多久后退出登录",
++    strict_confirm_title: "开启严格模式？",
++    strict_confirm_body: "现在会退出登录。请确认你保存好了恢复密钥：没有它，重新登录后就看不到以前的加密消息。",
++    strict_confirm_button: "退出并开启",
+ };
+ 
+ const zhHant: Record<Key, string> = {
+@@ -170,6 +195,18 @@ const zhHant: Record<Key, string> = {
+     block_screenshots_help:
+         "在 Android 上，所有成員在這個房間裡都不能截圖和錄影。iOS 無法禁止，會改為提醒。瀏覽器無法禁止截圖。",
+     privacy_error_title: "無法修改截圖設定",
++    strict_section: "嚴格模式",
++    strict_legend: "本機什麼都不留",
++    strict_description:
++        "這台裝置上不儲存這次登入的任何東西：訊息、金鑰、登入狀態都不儲存。關閉或重新整理頁面就會登出，放在背景超過設定時間也會登出。重新登入需要密碼和復原金鑰。",
++    strict_enable: "開啟嚴格模式",
++    strict_on: "嚴格模式已開啟。",
++    strict_disable: "關閉（下次登入起生效）",
++    strict_disabled_pending: "下次登入起，嚴格模式關閉。",
++    strict_idle_legend: "放在背景多久後登出",
++    strict_confirm_title: "開啟嚴格模式？",
++    strict_confirm_body: "現在會登出。請確認你儲存好了復原金鑰：沒有它，重新登入後就看不到以前的加密訊息。",
++    strict_confirm_button: "登出並開啟",
+ };
+ 
+ function table(): Record<Key, string> {
+diff --git a/apps/web/src/freechat/strictMode.test.ts b/apps/web/src/freechat/strictMode.test.ts
+new file mode 100644
+index 0000000000..ad11b32cb0
+--- /dev/null
++++ b/apps/web/src/freechat/strictMode.test.ts
+@@ -0,0 +1,131 @@
++/*
++Copyright 2026 FreeChat contributors
++
++SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++Please see LICENSE files in the repository root for full details.
++*/
++
++// @vitest-environment happy-dom
++
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import { type MatrixClient } from "matrix-js-sdk/src/matrix";
++
++import {
++    DEFAULT_IDLE_MINUTES,
++    beginSession,
++    endSession,
++    getStrictMode,
++    isStrictSession,
++    keepStrictModeChoice,
++    setStrictMode,
++    watchStrictSession,
++} from "./strictMode";
++
++const client = {
++    baseUrl: "https://chat.example",
++    getAccessToken: () => "secret-token",
++} as unknown as MatrixClient;
++
++function setVisibility(state: "visible" | "hidden"): void {
++    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state });
++    document.dispatchEvent(new Event("visibilitychange"));
++}
++
++describe("strict mode", () => {
++    beforeEach(() => localStorage.clear());
++    afterEach(() => {
++        endSession();
++        setVisibility("visible");
++        vi.useRealTimers();
++        vi.unstubAllGlobals();
++    });
++
++    it("is off by default and tolerates junk", () => {
++        expect(getStrictMode()).toEqual({ enabled: false, idleMinutes: DEFAULT_IDLE_MINUTES });
++        localStorage.setItem("freechat_strict_mode", "{not json");
++        expect(getStrictMode().enabled).toBe(false);
++        localStorage.setItem("freechat_strict_mode", JSON.stringify({ enabled: "yes", idleMinutes: -3 }));
++        expect(getStrictMode()).toEqual({ enabled: false, idleMinutes: DEFAULT_IDLE_MINUTES });
++    });
++
++    it("fixes the session's mode at sign-in", () => {
++        setStrictMode({ enabled: true, idleMinutes: 1 });
++        expect(beginSession()).toBe(true);
++        setStrictMode({ enabled: false, idleMinutes: 1 });
++        expect(isStrictSession()).toBe(true);
++        endSession();
++        expect(isStrictSession()).toBe(false);
++    });
++
++    it("survives a wipe of localStorage", () => {
++        setStrictMode({ enabled: true, idleMinutes: 15 });
++        const restore = keepStrictModeChoice();
++        localStorage.clear();
++        restore();
++        expect(getStrictMode()).toEqual({ enabled: true, idleMinutes: 15 });
++    });
++
++    it("signs out after the idle time in the background", () => {
++        vi.useFakeTimers();
++        setStrictMode({ enabled: true, idleMinutes: 5 });
++        const logout = vi.fn();
++        watchStrictSession(client, logout);
++
++        setVisibility("hidden");
++        vi.advanceTimersByTime(4 * 60_000);
++        setVisibility("visible");
++        expect(logout).not.toHaveBeenCalled();
++
++        setVisibility("hidden");
++        vi.advanceTimersByTime(5 * 60_000);
++        expect(logout).toHaveBeenCalledTimes(1);
++        setVisibility("visible");
++        expect(logout).toHaveBeenCalledTimes(1);
++    });
++
++    it("signs out when coming back after the timer was frozen", () => {
++        vi.useFakeTimers();
++        setStrictMode({ enabled: true, idleMinutes: 1 });
++        const logout = vi.fn();
++        watchStrictSession(client, logout);
++
++        setVisibility("hidden");
++        vi.setSystemTime(Date.now() + 2 * 60_000); // the clock moves, timers do not fire
++        setVisibility("visible");
++        expect(logout).toHaveBeenCalledTimes(1);
++    });
++
++    it("signs out on the server and wipes localStorage when the page goes away", () => {
++        const fetch = vi.fn().mockResolvedValue(undefined);
++        vi.stubGlobal("fetch", fetch);
++        setStrictMode({ enabled: true, idleMinutes: 5 });
++        localStorage.setItem("mx_local_settings", '{"language":"zh-hans"}');
++        localStorage.setItem("mx_last_room_id", "!secret:chat.example");
++        watchStrictSession(client, vi.fn());
++
++        window.dispatchEvent(new Event("pagehide"));
++
++        expect(fetch).toHaveBeenCalledWith(
++            "https://chat.example/_matrix/client/v3/logout",
++            expect.objectContaining({
++                method: "POST",
++                keepalive: true,
++                headers: expect.objectContaining({ Authorization: "Bearer secret-token" }),
++            }),
++        );
++        expect(localStorage.getItem("mx_last_room_id")).toBeNull();
++        expect(localStorage.getItem("mx_local_settings")).toBe('{"language":"zh-hans"}');
++        expect(getStrictMode().enabled).toBe(true);
++    });
++
++    it("stops watching on sign-out", () => {
++        vi.useFakeTimers();
++        const logout = vi.fn();
++        beginSession();
++        watchStrictSession(client, logout);
++        endSession();
++        setVisibility("hidden");
++        vi.advanceTimersByTime(60 * 60_000);
++        expect(logout).not.toHaveBeenCalled();
++    });
++});
+diff --git a/apps/web/src/freechat/strictMode.ts b/apps/web/src/freechat/strictMode.ts
+new file mode 100644
+index 0000000000..9b7fd9bb9b
+--- /dev/null
++++ b/apps/web/src/freechat/strictMode.ts
+@@ -0,0 +1,172 @@
++/*
++Copyright 2026 FreeChat contributors
++
++SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++Please see LICENSE files in the repository root for full details.
++*/
++
++/*
++ * FreeChat: strict mode, a per-device choice to leave nothing on the device.
++ *
++ * While it is on, a session is never written to disk: the login is not persisted and the crypto
++ * store is in memory. Closing or reloading the page, or leaving it in the background for the
++ * chosen time, signs out on the server, so no orphaned device keeps receiving keys. Signing in
++ * again takes the password and the recovery key.
++ *
++ * The choice itself (on/off and the idle time) is stored in localStorage: it says nothing about
++ * the user. It applies from the next sign-in; turning it on signs out right away.
++ */
++
++import { type MatrixClient } from "matrix-js-sdk/src/matrix";
++import { logger } from "matrix-js-sdk/src/logger";
++
++const STORAGE_KEY = "freechat_strict_mode";
++
++export const IDLE_PRESETS_MINUTES = [1, 5, 15, 30, 60];
++export const DEFAULT_IDLE_MINUTES = 5;
++
++export interface StrictMode {
++    enabled: boolean;
++    idleMinutes: number;
++}
++
++function validIdle(value: unknown): number {
++    return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : DEFAULT_IDLE_MINUTES;
++}
++
++export function getStrictMode(): StrictMode {
++    try {
++        const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "null");
++        if (parsed && typeof parsed === "object") {
++            return { enabled: parsed.enabled === true, idleMinutes: validIdle(parsed.idleMinutes) };
++        }
++    } catch {}
++    return { enabled: false, idleMinutes: DEFAULT_IDLE_MINUTES };
++}
++
++export function setStrictMode(mode: StrictMode): void {
++    localStorage.setItem(
++        STORAGE_KEY,
++        JSON.stringify({ enabled: mode.enabled, idleMinutes: validIdle(mode.idleMinutes) }),
++    );
++}
++
++/**
++ * Whether the session currently running is a strict one. Fixed at sign-in, so turning strict mode
++ * off mid-session does not suddenly start persisting an in-memory session.
++ */
++let strictSession = false;
++
++let stopWatching: (() => void) | undefined;
++
++/** Called once per sign-in, before the session is persisted or crypto starts. */
++export function beginSession(): boolean {
++    endSession();
++    strictSession = getStrictMode().enabled;
++    return strictSession;
++}
++
++/** Called on sign-out. */
++export function endSession(): void {
++    stopWatching?.();
++    stopWatching = undefined;
++    strictSession = false;
++}
++
++/** Keeps the strict mode choice across a wipe of localStorage. Returns the function that puts it back. */
++export function keepStrictModeChoice(): () => void {
++    let saved: string | null = null;
++    try {
++        saved = localStorage.getItem(STORAGE_KEY);
++    } catch {}
++    return () => {
++        if (saved !== null) localStorage.setItem(STORAGE_KEY, saved);
++    };
++}
++
++export function isStrictSession(): boolean {
++    return strictSession;
++}
++
++/** Device preferences (language, theme) that say nothing about the user and survive a wipe. */
++const KEPT_KEYS = [STORAGE_KEY, "mx_local_settings"];
++
++/**
++ * Clears localStorage synchronously, for the moment the page goes away when there is no time for
++ * the app's full sign-out. The next start finishes the job (see `loadSession`).
++ */
++function wipeLocalStorage(): void {
++    try {
++        const kept = KEPT_KEYS.map((key) => [key, localStorage.getItem(key)] as const);
++        localStorage.clear();
++        for (const [key, value] of kept) if (value !== null) localStorage.setItem(key, value);
++    } catch (e) {
++        logger.warn("FreeChat: strict mode could not clear localStorage", e);
++    }
++}
++
++/** Signs out on the server while the page unloads; `fetch` with `keepalive` outlives the page. */
++function logoutOnUnload(client: MatrixClient): void {
++    const token = client.getAccessToken();
++    if (!token) return;
++    try {
++        void fetch(`${client.baseUrl}/_matrix/client/v3/logout`, {
++            method: "POST",
++            keepalive: true,
++            headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
++            body: "{}",
++        });
++    } catch (e) {
++        logger.warn("FreeChat: strict mode could not sign out on unload", e);
++    }
++}
++
++/**
++ * Watches a strict session: signs out when the page goes away or stays hidden for the idle time.
++ * `logout` is the app's normal sign-out, which also clears local storage.
++ * Returns a function that stops watching.
++ */
++export function watchStrictSession(client: MatrixClient, logout: () => void): () => void {
++    // Read on every use so a new idle time applies straight away.
++    const idleMs = (): number => getStrictMode().idleMinutes * 60_000;
++    let hiddenAt: number | null = null;
++    let timer: ReturnType<typeof setTimeout> | undefined;
++    let stopped = false;
++
++    const signOut = (): void => {
++        if (stopped) return;
++        stop();
++        logger.info("FreeChat: strict mode signing out after being in the background");
++        logout();
++    };
++    const onVisibility = (): void => {
++        if (document.visibilityState === "hidden") {
++            hiddenAt = Date.now();
++            clearTimeout(timer);
++            timer = setTimeout(signOut, idleMs());
++        } else {
++            clearTimeout(timer);
++            // Timers in background tabs can be throttled or frozen, so check the clock as well.
++            if (hiddenAt !== null && Date.now() - hiddenAt >= idleMs()) signOut();
++            hiddenAt = null;
++        }
++    };
++    const onPageHide = (): void => {
++        if (stopped) return;
++        stop();
++        logoutOnUnload(client);
++        wipeLocalStorage();
++    };
++    function stop(): void {
++        stopped = true;
++        clearTimeout(timer);
++        document.removeEventListener("visibilitychange", onVisibility);
++        window.removeEventListener("pagehide", onPageHide);
++    }
++
++    stopWatching?.();
++    stopWatching = stop;
++    document.addEventListener("visibilitychange", onVisibility);
++    window.addEventListener("pagehide", onPageHide);
++    return stop;
++}
+diff --git a/apps/web/src/rageshake/rageshake.ts b/apps/web/src/rageshake/rageshake.ts
+index e190d2a631..b1d2774511 100644
+--- a/apps/web/src/rageshake/rageshake.ts
++++ b/apps/web/src/rageshake/rageshake.ts
+@@ -528,6 +528,15 @@ export function tryInitStorage(): Promise<void> {
+         indexedDB = window.indexedDB;
+     } catch {}
+ 
++    // FreeChat: logs stay in memory only. Delete what an older build wrote and never persist.
++    if (indexedDB) {
++        try {
++            indexedDB.deleteDatabase("logs");
++        } catch {}
++        global.mx_rage_initStoragePromise = Promise.resolve();
++        return global.mx_rage_initStoragePromise;
++    }
++
+     if (indexedDB) {
+         global.mx_rage_store = new IndexedDBLogStore(indexedDB, global.mx_rage_logger);
+         global.mx_rage_initStoragePromise = global.mx_rage_store.connect();

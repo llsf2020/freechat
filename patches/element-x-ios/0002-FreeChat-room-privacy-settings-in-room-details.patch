@@ -1,0 +1,482 @@
+From e7be0a9a9f3895fe24558bb65d95b5fd56e48de0 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 2/8] FreeChat: room privacy settings in room details
+
+Auto-delete (admins; both members in a DM), my burn-after-read override,
+screenshot protection and the join password. Strings live in FreeChatStrings
+so upstream translations never conflict. Untested: needs a Mac to build.
+---
+ .../FreeChat/FreeChatRoomSettings.swift       | 197 +++++++++++++++++
+ .../Sources/FreeChat/FreeChatStrings.swift    | 204 ++++++++++++++++++
+ .../RoomDetailsScreenCoordinator.swift        |   4 +-
+ .../View/RoomDetailsScreen.swift              |   5 +
+ 4 files changed, 409 insertions(+), 1 deletion(-)
+ create mode 100644 ElementX/Sources/FreeChat/FreeChatRoomSettings.swift
+ create mode 100644 ElementX/Sources/FreeChat/FreeChatStrings.swift
+
+diff --git a/ElementX/Sources/FreeChat/FreeChatRoomSettings.swift b/ElementX/Sources/FreeChat/FreeChatRoomSettings.swift
+new file mode 100644
+index 000000000..9bbddb31d
+--- /dev/null
++++ b/ElementX/Sources/FreeChat/FreeChatRoomSettings.swift
+@@ -0,0 +1,197 @@
++//
++// Copyright 2026 FreeChat contributors
++//
++// SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++// Please see LICENSE files in the repository root for full details.
++//
++
++import Compound
++import SwiftUI
++
++/// FreeChat settings of one room: auto-delete, my burn-after-read, screenshots and the join password.
++@Observable
++final class FreeChatRoomSettings {
++    private(set) var roomTTL: UInt64 = 0
++    private(set) var personal = FreeChat.Personal()
++    private(set) var blockScreenshots = false
++    private(set) var hasJoinPassword: Bool?
++    private(set) var isSaving = false
++    var hasError = false
++
++    /// Room admins change room settings; in a DM both members may change auto-delete.
++    let canEditRoomSettings: Bool
++    let canEditAutoDelete: Bool
++    let canManagePassword: Bool
++
++    var roomReadTTL: UInt64? {
++        personal.rooms[roomProxy.id]
++    }
++
++    private let roomProxy: JoinedRoomProxyProtocol
++    private let clientProxy: ClientProxyProtocol
++
++    init(roomProxy: JoinedRoomProxyProtocol, clientProxy: ClientProxyProtocol) {
++        self.roomProxy = roomProxy
++        self.clientProxy = clientProxy
++        let info = roomProxy.infoPublisher.value
++        let isAdmin = info.powerLevels?.canOwnUser(sendStateEvent: .roomPowerLevels) == true
++        canEditRoomSettings = isAdmin
++        canEditAutoDelete = isAdmin || info.isDirect
++        canManagePassword = isAdmin && !info.isDirect
++    }
++
++    func load() async {
++        if case .success(let json) = await roomProxy.freechatStateContent(type: FreeChat.disappearingStateType) {
++            roomTTL = FreeChat.roomTTL(fromContentJSON: json)
++        }
++        if case .success(let json) = await roomProxy.freechatStateContent(type: FreeChat.privacyStateType) {
++            blockScreenshots = FreeChat.blocksScreenshots(privacyContentJSON: json)
++        }
++        if case .success(let json) = await clientProxy.freechatAccountData(type: FreeChat.disappearingStateType) {
++            personal = FreeChat.personal(fromContentJSON: json)
++        }
++        if canManagePassword, let api = clientProxy.freechatAPI, case .success(let enabled) = await api.hasJoinPassword(roomID: roomProxy.id) {
++            hasJoinPassword = enabled
++        }
++    }
++
++    func setRoomTTL(_ ttl: UInt64) async {
++        await save {
++            await self.roomProxy.sendFreechatState(type: FreeChat.disappearingStateType, contentJSON: FreeChat.contentJSON(forRoomTTL: ttl))
++                .map { self.roomTTL = ttl }
++                .mapError { $0 as Error }
++        }
++    }
++
++    func setBlockScreenshots(_ block: Bool) async {
++        await save {
++            await self.roomProxy.sendFreechatState(type: FreeChat.privacyStateType, contentJSON: FreeChat.privacyContentJSON(blockScreenshots: block))
++                .map { self.blockScreenshots = block }
++                .mapError { $0 as Error }
++        }
++    }
++
++    /// `nil` follows my default.
++    func setRoomReadTTL(_ ttl: UInt64?) async {
++        await save {
++            // Re-read so changes made on another device are kept.
++            let latest = await self.clientProxy.freechatAccountData(type: FreeChat.disappearingStateType)
++            guard case .success(let json) = latest else { return .failure(FreeChatAPIError.invalidResponse) }
++            let updated = FreeChat.updatingPersonal(json, roomID: self.roomProxy.id, roomReadTTL: .some(ttl))
++            return await self.clientProxy.setFreechatAccountData(type: FreeChat.disappearingStateType, contentJSON: updated)
++                .map { self.personal = FreeChat.personal(fromContentJSON: updated) }
++                .mapError { $0 as Error }
++        }
++    }
++
++    /// `nil` removes the password.
++    func setJoinPassword(_ password: String?) async {
++        guard let api = clientProxy.freechatAPI else {
++            hasError = true
++            return
++        }
++        await save {
++            await api.setJoinPassword(roomID: self.roomProxy.id, password: password)
++                .map { self.hasJoinPassword = password != nil }
++                .mapError { $0 as Error }
++        }
++    }
++
++    private func save(_ operation: () async -> Result<Void, Error>) async {
++        isSaving = true
++        defer { isSaving = false }
++        if case .failure(let error) = await operation() {
++            MXLog.error("FreeChat: failed saving a room setting: \(error)")
++            hasError = true
++        }
++    }
++}
++
++/// The FreeChat section of the room details screen.
++struct FreeChatRoomSection: View {
++    let settings: FreeChatRoomSettings
++
++    @State private var isEditingPassword = false
++    @State private var newPassword = ""
++
++    var body: some View {
++        Section {
++            autoDeleteRow
++            burnRow
++            if settings.canEditRoomSettings {
++                ListRow(label: .default(title: FreeChatStrings.string(.blockScreenshots), icon: \.visibilityOff),
++                        kind: .toggle(Binding(get: { settings.blockScreenshots },
++                                              set: { block in Task { await settings.setBlockScreenshots(block) } })))
++            }
++            if settings.canManagePassword {
++                passwordRows
++            }
++        } header: {
++            Text(FreeChatStrings.string(.section))
++                .compoundListSectionHeader()
++        } footer: {
++            Text(FreeChatStrings.string(settings.canEditAutoDelete ? .autoDeleteFooter : .burnFooter))
++                .compoundListSectionFooter()
++        }
++        .disabled(settings.isSaving)
++        .task { await settings.load() }
++        .alert(FreeChatStrings.string(.error), isPresented: Binding(get: { settings.hasError }, set: { settings.hasError = $0 })) {
++            Button(FreeChatStrings.string(.cancel), role: .cancel) { }
++        }
++        .alert(FreeChatStrings.string(.setPassword), isPresented: $isEditingPassword) {
++            SecureField(FreeChatStrings.string(.passwordPlaceholder), text: $newPassword)
++            Button(FreeChatStrings.string(.save)) {
++                let password = newPassword
++                newPassword = ""
++                Task { await settings.setJoinPassword(password) }
++            }
++            .disabled(newPassword.count < FreeChatAPI.minimumJoinPasswordLength)
++            Button(FreeChatStrings.string(.cancel), role: .cancel) { newPassword = "" }
++        } message: {
++            Text(FreeChatStrings.string(.passwordTooShort))
++        }
++    }
++
++    // MARK: - Private
++
++    @ViewBuilder
++    private var autoDeleteRow: some View {
++        if settings.canEditAutoDelete {
++            ListRow(label: .default(title: FreeChatStrings.string(.autoDelete), icon: \.timer),
++                    kind: .picker(selection: Binding(get: { settings.roomTTL },
++                                                     set: { ttl in Task { await settings.setRoomTTL(ttl) } }),
++                                  items: choices(FreeChat.roomTTLPresets, current: settings.roomTTL)))
++        } else {
++            ListRow(label: .default(title: FreeChatStrings.string(.autoDelete), icon: \.timer),
++                    details: .title(FreeChatStrings.duration(settings.roomTTL)),
++                    kind: .label)
++        }
++    }
++
++    private var burnRow: some View {
++        let followDefault = UInt64.max
++        let current = settings.roomReadTTL ?? followDefault
++        let items = [(title: "\(FreeChatStrings.string(.burnFollowDefault)) (\(FreeChatStrings.duration(settings.personal.readTTL)))", tag: followDefault)]
++            + choices(FreeChat.readTTLPresets, current: settings.roomReadTTL ?? 0)
++        return ListRow(label: .default(title: FreeChatStrings.string(.burn), icon: \.visibilityOff),
++                       kind: .picker(selection: Binding(get: { current },
++                                                        set: { ttl in Task { await settings.setRoomReadTTL(ttl == followDefault ? nil : ttl) } }),
++                                     items: items))
++    }
++
++    @ViewBuilder
++    private var passwordRows: some View {
++        ListRow(label: .default(title: FreeChatStrings.string(.joinPassword), icon: \.lock),
++                details: settings.hasJoinPassword.map { .title(FreeChatStrings.string($0 ? .joinPasswordSet : .joinPasswordNotSet)) } ?? .isWaiting(true),
++                kind: .button { isEditingPassword = true })
++        if settings.hasJoinPassword == true {
++            ListRow(label: .action(title: FreeChatStrings.string(.removePassword), icon: \.delete, role: .destructive),
++                    kind: .button { Task { await settings.setJoinPassword(nil) } })
++        }
++    }
++
++    private func choices(_ presets: [UInt64], current: UInt64) -> [(title: String, tag: UInt64)] {
++        let values = presets.contains(current) ? presets : presets + [current]
++        return values.map { (title: FreeChatStrings.duration($0), tag: $0) }
++    }
++}
+diff --git a/ElementX/Sources/FreeChat/FreeChatStrings.swift b/ElementX/Sources/FreeChat/FreeChatStrings.swift
+new file mode 100644
+index 000000000..aa55889db
+--- /dev/null
++++ b/ElementX/Sources/FreeChat/FreeChatStrings.swift
+@@ -0,0 +1,204 @@
++//
++// Copyright 2026 FreeChat contributors
++//
++// SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++// Please see LICENSE files in the repository root for full details.
++//
++
++import Foundation
++
++/// FreeChat-only strings, kept out of the upstream Localizable files so syncing translations never conflicts.
++nonisolated enum FreeChatStrings {
++    enum Key: String {
++        case section, autoDelete, autoDeleteFooter, burn, burnFollowDefault, burnFooter, off
++        case blockScreenshots, blockScreenshotsFooter, joinPassword, joinPasswordSet, joinPasswordNotSet
++        case setPassword, removePassword, passwordPlaceholder, passwordTooShort, save, cancel, error
++        case joinWithPassword, joinWithPasswordMessage, wrongPassword, lockedOut
++        case burnDefault, alwaysBlockScreenshots, alwaysBlockScreenshotsFooter
++        case strictSection, strictTitle, strictFooter, strictOn, strictOffPending, strictIdle
++        case strictConfirmTitle, strictConfirmMessage, strictConfirmButton, strictTurnOff
++        case screenshotTaken, screenshotTakenMessage, screenHidden
++    }
++
++    static func string(_ key: Key) -> String {
++        table[key] ?? english[key] ?? key.rawValue
++    }
++
++    /// A duration in seconds as the largest whole unit, e.g. "5 minutes".
++    static func duration(_ seconds: UInt64) -> String {
++        guard seconds > 0 else { return string(.off) }
++        let (count, unit): (UInt64, TimeUnit) = switch seconds {
++        case let s where s % 86400 == 0: (s / 86400, .day)
++        case let s where s % 3600 == 0: (s / 3600, .hour)
++        case let s where s % 60 == 0: (s / 60, .minute)
++        default: (seconds, .second)
++        }
++        return unit.format(count, language: language)
++    }
++
++    // MARK: - Private
++
++    private enum Language { case english, simplified, traditional }
++
++    private enum TimeUnit {
++        case second, minute, hour, day
++
++        func format(_ count: UInt64, language: Language) -> String {
++            switch language {
++            case .simplified: "\(count) " + ["秒", "分钟", "小时", "天"][index]
++            case .traditional: "\(count) " + ["秒", "分鐘", "小時", "天"][index]
++            case .english: "\(count) " + (count == 1 ? ["second", "minute", "hour", "day"] : ["seconds", "minutes", "hours", "days"])[index]
++            }
++        }
++
++        private var index: Int {
++            switch self {
++            case .second: 0
++            case .minute: 1
++            case .hour: 2
++            case .day: 3
++            }
++        }
++    }
++
++    private static var language: Language {
++        let preferred = (Bundle.main.preferredLocalizations.first ?? Locale.preferredLanguages.first ?? "en").lowercased()
++        if preferred.hasPrefix("zh-hant") || preferred.hasPrefix("zh-tw") || preferred.hasPrefix("zh-hk") { return .traditional }
++        if preferred.hasPrefix("zh") { return .simplified }
++        return .english
++    }
++
++    private static var table: [Key: String] {
++        switch language {
++        case .english: english
++        case .simplified: simplified
++        case .traditional: traditional
++        }
++    }
++
++    private static let english: [Key: String] = [
++        .section: "Privacy",
++        .autoDelete: "Auto-delete messages",
++        .autoDeleteFooter: "New messages are deleted for everyone, on every device and on the server, after this long. Only admins can change it.",
++        .burn: "Burn my messages after reading",
++        .burnFollowDefault: "Same as my default",
++        .burnFooter: "Messages you send are deleted for everyone this long after every other member has read them.",
++        .off: "Off",
++        .blockScreenshots: "Block screenshots in this room",
++        .blockScreenshotsFooter: "Android blocks screenshots and screen recording. iOS cannot block them: the room is hidden while the screen is recorded, and members are warned about screenshots.",
++        .joinPassword: "Join password",
++        .joinPasswordSet: "Set",
++        .joinPasswordNotSet: "Not set",
++        .setPassword: "Set password",
++        .removePassword: "Remove password",
++        .passwordPlaceholder: "At least 6 characters",
++        .passwordTooShort: "The password must be at least 6 characters.",
++        .save: "Save",
++        .cancel: "Cancel",
++        .error: "Could not save the setting. Try again.",
++        .joinWithPassword: "Join with a password",
++        .joinWithPasswordMessage: "Enter the password you were given for this room.",
++        .wrongPassword: "Wrong password, or the room does not exist.",
++        .lockedOut: "Too many wrong attempts. Try again in 15 minutes.",
++        .burnDefault: "Burn my messages after reading",
++        .alwaysBlockScreenshots: "Protect every chat",
++        .alwaysBlockScreenshotsFooter: "Hide chats while the screen is recorded and warn about screenshots, in every room, on all your devices.",
++        .strictSection: "Strict mode",
++        .strictTitle: "Leave nothing on this device",
++        .strictFooter: "Your sign-in, keys and messages are kept in memory only. Closing the app or leaving it in the background signs you out. Signing in again needs your password and recovery key.",
++        .strictOn: "On",
++        .strictOffPending: "Off from your next sign-in",
++        .strictIdle: "Sign out after this long in the background",
++        .strictConfirmTitle: "Turn on strict mode?",
++        .strictConfirmMessage: "You will be signed out now. Make sure you have your recovery key: without it, you cannot read earlier encrypted messages after signing in again.",
++        .strictConfirmButton: "Sign out and turn on",
++        .strictTurnOff: "Turn off from the next sign-in",
++        .screenshotTaken: "Screenshot taken",
++        .screenshotTakenMessage: "This room asks members not to take screenshots.",
++        .screenHidden: "Hidden while the screen is being recorded"
++    ]
++
++    private static let simplified: [Key: String] = [
++        .section: "隐私",
++        .autoDelete: "自动删除消息",
++        .autoDeleteFooter: "新消息会在设定时间后，从所有人的所有设备和服务器上删除。只有管理员能修改。",
++        .burn: "我发的消息阅后即焚",
++        .burnFollowDefault: "跟随我的默认设置",
++        .burnFooter: "你发的消息在其他人都读过之后，过这么久就从所有人那里删除。",
++        .off: "关闭",
++        .blockScreenshots: "禁止在这个房间截屏",
++        .blockScreenshotsFooter: "安卓上会禁止截屏和录屏。iOS 无法禁止：录屏时房间内容会被隐藏，截屏时会提醒。",
++        .joinPassword: "入群密码",
++        .joinPasswordSet: "已设置",
++        .joinPasswordNotSet: "未设置",
++        .setPassword: "设置密码",
++        .removePassword: "删除密码",
++        .passwordPlaceholder: "至少 6 个字符",
++        .passwordTooShort: "密码至少要 6 个字符。",
++        .save: "保存",
++        .cancel: "取消",
++        .error: "设置没有保存成功，请重试。",
++        .joinWithPassword: "用密码加入",
++        .joinWithPasswordMessage: "输入别人给你的这个房间的密码。",
++        .wrongPassword: "密码错误，或者房间不存在。",
++        .lockedOut: "错误次数太多，请 15 分钟后再试。",
++        .burnDefault: "我发的消息阅后即焚",
++        .alwaysBlockScreenshots: "保护所有聊天",
++        .alwaysBlockScreenshotsFooter: "在所有房间、你的所有设备上：录屏时隐藏聊天内容，截屏时提醒。",
++        .strictSection: "严格模式",
++        .strictTitle: "本机什么都不留",
++        .strictFooter: "登录状态、密钥和消息都只放在内存里。关掉 App 或放在后台超过设定时间，就会退出登录。重新登录需要密码和恢复密钥。",
++        .strictOn: "已开启",
++        .strictOffPending: "下次登录起关闭",
++        .strictIdle: "放在后台多久后退出登录",
++        .strictConfirmTitle: "开启严格模式？",
++        .strictConfirmMessage: "现在会退出登录。请确认你保存好了恢复密钥：没有它，重新登录后就看不到以前的加密消息。",
++        .strictConfirmButton: "退出并开启",
++        .strictTurnOff: "下次登录起关闭",
++        .screenshotTaken: "检测到截屏",
++        .screenshotTakenMessage: "这个房间要求成员不要截屏。",
++        .screenHidden: "正在录屏，内容已隐藏"
++    ]
++
++    private static let traditional: [Key: String] = [
++        .section: "隱私",
++        .autoDelete: "自動刪除訊息",
++        .autoDeleteFooter: "新訊息會在設定時間後，從所有人的所有裝置和伺服器上刪除。只有管理員能修改。",
++        .burn: "我發的訊息閱後即焚",
++        .burnFollowDefault: "跟隨我的預設設定",
++        .burnFooter: "你發的訊息在其他人都讀過之後，過這麼久就從所有人那裡刪除。",
++        .off: "關閉",
++        .blockScreenshots: "禁止在這個房間截圖",
++        .blockScreenshotsFooter: "Android 上會禁止截圖和錄影。iOS 無法禁止：錄影時房間內容會被隱藏，截圖時會提醒。",
++        .joinPassword: "入群密碼",
++        .joinPasswordSet: "已設定",
++        .joinPasswordNotSet: "未設定",
++        .setPassword: "設定密碼",
++        .removePassword: "刪除密碼",
++        .passwordPlaceholder: "至少 6 個字元",
++        .passwordTooShort: "密碼至少要 6 個字元。",
++        .save: "儲存",
++        .cancel: "取消",
++        .error: "設定沒有儲存成功，請重試。",
++        .joinWithPassword: "用密碼加入",
++        .joinWithPasswordMessage: "輸入別人給你的這個房間的密碼。",
++        .wrongPassword: "密碼錯誤，或者房間不存在。",
++        .lockedOut: "錯誤次數太多，請 15 分鐘後再試。",
++        .burnDefault: "我發的訊息閱後即焚",
++        .alwaysBlockScreenshots: "保護所有聊天",
++        .alwaysBlockScreenshotsFooter: "在所有房間、你的所有裝置上：錄影時隱藏聊天內容，截圖時提醒。",
++        .strictSection: "嚴格模式",
++        .strictTitle: "本機什麼都不留",
++        .strictFooter: "登入狀態、金鑰和訊息都只放在記憶體裡。關掉 App 或放在背景超過設定時間，就會登出。重新登入需要密碼和復原金鑰。",
++        .strictOn: "已開啟",
++        .strictOffPending: "下次登入起關閉",
++        .strictIdle: "放在背景多久後登出",
++        .strictConfirmTitle: "開啟嚴格模式？",
++        .strictConfirmMessage: "現在會登出。請確認你儲存好了復原金鑰：沒有它，重新登入後就看不到以前的加密訊息。",
++        .strictConfirmButton: "登出並開啟",
++        .strictTurnOff: "下次登入起關閉",
++        .screenshotTaken: "偵測到截圖",
++        .screenshotTakenMessage: "這個房間要求成員不要截圖。",
++        .screenHidden: "正在錄影，內容已隱藏"
++    ]
++}
+diff --git a/ElementX/Sources/Screens/RoomDetailsScreen/RoomDetailsScreenCoordinator.swift b/ElementX/Sources/Screens/RoomDetailsScreen/RoomDetailsScreenCoordinator.swift
+index 8006c3d06..2e5c8c9cc 100644
+--- a/ElementX/Sources/Screens/RoomDetailsScreen/RoomDetailsScreenCoordinator.swift
++++ b/ElementX/Sources/Screens/RoomDetailsScreen/RoomDetailsScreenCoordinator.swift
+@@ -40,6 +40,7 @@ enum RoomDetailsScreenCoordinatorAction {
+ final class RoomDetailsScreenCoordinator: CoordinatorProtocol {
+     private var viewModel: RoomDetailsScreenViewModelProtocol
+     private let isSpace: Bool
++    private let freechat: FreeChatRoomSettings // FreeChat
+     
+     private let actionsSubject: PassthroughSubject<RoomDetailsScreenCoordinatorAction, Never> = .init()
+     private var cancellables = Set<AnyCancellable>()
+@@ -50,6 +51,7 @@ final class RoomDetailsScreenCoordinator: CoordinatorProtocol {
+     
+     init(parameters: RoomDetailsScreenCoordinatorParameters) {
+         isSpace = parameters.roomProxy.infoPublisher.value.isSpace
++        freechat = FreeChatRoomSettings(roomProxy: parameters.roomProxy, clientProxy: parameters.userSession.clientProxy)
+         viewModel = RoomDetailsScreenViewModel(roomProxy: parameters.roomProxy,
+                                                userSession: parameters.userSession,
+                                                analyticsService: parameters.analyticsService,
+@@ -111,7 +113,7 @@ final class RoomDetailsScreenCoordinator: CoordinatorProtocol {
+         if isSpace {
+             AnyView(SpaceSettingsScreen(context: viewModel.context))
+         } else {
+-            AnyView(RoomDetailsScreen(context: viewModel.context))
++            AnyView(RoomDetailsScreen(context: viewModel.context, freechat: freechat))
+         }
+     }
+ }
+diff --git a/ElementX/Sources/Screens/RoomDetailsScreen/View/RoomDetailsScreen.swift b/ElementX/Sources/Screens/RoomDetailsScreen/View/RoomDetailsScreen.swift
+index 7e3a78218..486a0859d 100644
+--- a/ElementX/Sources/Screens/RoomDetailsScreen/View/RoomDetailsScreen.swift
++++ b/ElementX/Sources/Screens/RoomDetailsScreen/View/RoomDetailsScreen.swift
+@@ -11,6 +11,7 @@ import SwiftUI
+ 
+ struct RoomDetailsScreen: View {
+     @Bindable var context: RoomDetailsScreenViewModel.Context
++    var freechat: FreeChatRoomSettings? // FreeChat
+     
+     @State private var isTopicExpanded = false
+     
+@@ -35,6 +36,10 @@ struct RoomDetailsScreen: View {
+             
+             securitySection
+             
++            if let freechat {
++                FreeChatRoomSection(settings: freechat)
++            }
++            
+             if let recipient = context.viewState.dmRecipientInfo?.member {
+                 ignoreUserSection(user: recipient)
+             } else if context.viewState.reportRoomEnabled {

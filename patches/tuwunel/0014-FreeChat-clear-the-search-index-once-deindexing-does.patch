@@ -1,0 +1,106 @@
+From f8f69affe670ca458c2503da50c2447625800637 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 14/14] FreeChat: clear the search index once; deindexing does
+ nothing
+
+---
+ .../migrations/freechat_clear_search_index.rs | 23 +++++++++++++++++++
+ src/service/migrations/mod.rs                 |  6 +++++
+ src/service/rooms/search/mod.rs               | 20 ++++------------
+ 3 files changed, 33 insertions(+), 16 deletions(-)
+ create mode 100644 src/service/migrations/freechat_clear_search_index.rs
+
+diff --git a/src/service/migrations/freechat_clear_search_index.rs b/src/service/migrations/freechat_clear_search_index.rs
+new file mode 100644
+index 000000000..0423f075d
+--- /dev/null
++++ b/src/service/migrations/freechat_clear_search_index.rs
+@@ -0,0 +1,23 @@
++use tuwunel_core::{Result, warn};
++
++use crate::Services;
++
++pub(super) const MARKER: &str = "freechat_clear_search_index";
++
++/// FreeChat: empties the full-text search index once.
++///
++/// Nothing has been indexed since FreeChat dropped server-side search (see
++/// `rooms::search::index_pdu`), but a database from an earlier build may still
++/// hold the words of plaintext messages here. Clearing it lets deindexing skip
++/// the per-word lookups, and the compaction afterwards drops those words from
++/// the database files too.
++pub(super) async fn clear_search_index(services: &Services) -> Result {
++	let db = &services.db;
++	let tokenids = db["tokenids"].clone();
++
++	warn!("Clearing the full-text search index");
++	tokenids.clear().await;
++
++	db["global"].insert(MARKER, []);
++	tokenids.sort()
++}
+diff --git a/src/service/migrations/mod.rs b/src/service/migrations/mod.rs
+index 2f121821c..4a28c8553 100644
+--- a/src/service/migrations/mod.rs
++++ b/src/service/migrations/mod.rs
+@@ -47,6 +47,7 @@
+ mod clear_state_local_error_memos;
+ mod conduit;
+ mod email_bindings;
++mod freechat_clear_search_index;
+ mod fix_bad_double_separator_in_state_cache;
+ mod fix_hashed_sentinel_passwords;
+ mod fix_readreceiptid_readreceipt_duplicates;
+@@ -264,6 +265,7 @@ async fn fresh(services: &Services) -> Result {
+ 	db["global"].insert(token_expiry::RESTORE_MARKER, []);
+ 	db["global"].insert(token_expiry::ADOPT_MARKER, []);
+ 	db["global"].insert(redactions::MARKER, []);
++	db["global"].insert(freechat_clear_search_index::MARKER, []);
+ 	mark_clean_injectivity(services);
+ 
+ 	// Create the admin room and server user on first run
+@@ -414,6 +416,10 @@ async fn migrate(services: &Services, foreign_lineage: bool) -> Result {
+ 
+ 	run_once(services, redactions::MARKER, restore_redactions).await?;
+ 
++	if pending(services, freechat_clear_search_index::MARKER).await? {
++		freechat_clear_search_index::clear_search_index(services).await?;
++	}
++
+ 	services.server.check_running()?;
+ 
+ 	// A newer same-lineage database was already refused; stamping ours is safe. A
+diff --git a/src/service/rooms/search/mod.rs b/src/service/rooms/search/mod.rs
+index 17e3bcd1b..4ae147d2b 100644
+--- a/src/service/rooms/search/mod.rs
++++ b/src/service/rooms/search/mod.rs
+@@ -65,24 +65,12 @@ pub fn index_pdu(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId, message_bod
+ 	let _ = (self, shortroomid, pdu_id, message_body);
+ }
+ 
+-/// FreeChat: only keys that exist are removed. Nothing is indexed any more (see
+-/// `index_pdu`), and deleting absent words would write them to the write-ahead
+-/// log as tombstone keys.
++/// FreeChat: nothing to remove. Nothing is indexed (see `index_pdu`), and the
++/// `freechat_clear_search_index` migration emptied whatever an earlier build
++/// left behind.
+ #[implement(Service)]
+ pub fn deindex_pdu(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId, message_body: &str) {
+-	let batch = tokenize(message_body).map(|word| {
+-		let mut key = shortroomid.to_be_bytes().to_vec();
+-		key.extend_from_slice(word.as_bytes());
+-		key.push(0xFF);
+-		key.extend_from_slice(pdu_id.as_ref()); // TODO: currently we save the room id a second time here
+-		key
+-	});
+-
+-	for token in batch {
+-		if self.db.tokenids.exists_blocking(&token).is_ok() {
+-			self.db.tokenids.remove(&token);
+-		}
+-	}
++	let _ = (self, shortroomid, pdu_id, message_body);
+ }
+ 
+ /// Searches a room and returns its total hit count and a page of counted events.

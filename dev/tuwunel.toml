@@ -1,0 +1,30 @@
+# Tuwunel configuration for FreeChat local tests (not for production)
+# Start: dev/run.sh server
+
+[global]
+server_name = "localhost"
+database_path = "dev/data/tuwunel"
+address = ["127.0.0.1"]
+port = 8008
+
+# No federation: metadata stays on this server
+allow_federation = false
+
+# Local tests: registration with the registration token
+allow_registration = true
+registration_token = "freechat-dev"
+
+# Required by FreeChat: never keep the original of a deleted message
+save_unredacted_events = false
+
+# Every room is encrypted, public ones included
+encryption_enabled_by_default_for_room_type = "all"
+
+# Local tests: the ntfy push service runs on localhost too, which is blocked as a private address by default. Don't do this in production.
+ip_range_denylist = []
+
+# Local tests: makes auto-delete easier to watch (keep the default in production)
+log = "info,tuwunel_service::rooms::disappearing=debug"
+
+[global.well_known]
+client = "http://localhost:8008"

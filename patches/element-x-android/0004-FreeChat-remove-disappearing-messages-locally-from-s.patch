@@ -1,0 +1,319 @@
+From fd4c80f6bc33e85df3e971d39bb07a495f00d9a2 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 04/12] FreeChat: remove disappearing messages locally from
+ server markers
+
+The server purges expired messages without a redaction. The timeline now
+hides messages whose unsigned.com.freechat.expires_at passed (checked every
+second, offline too) and, every 30 seconds, asks the server which marked
+messages still exist (existing_events) to drop burned ones.
+---
+ .../impl/timeline/TimelinePresenter.kt        |   5 +-
+ .../freechat/DisappearingTimelineFilter.kt    | 139 ++++++++++++++++++
+ .../DisappearingTimelineFilterTest.kt         |  60 ++++++++
+ .../matrix/api/freechat/FreeChatApi.kt        |  31 ++++
+ 4 files changed, 233 insertions(+), 2 deletions(-)
+ create mode 100644 features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilter.kt
+ create mode 100644 features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilterTest.kt
+
+diff --git a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenter.kt b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenter.kt
+index 08d0f178b5..a7a26fcbe6 100644
+--- a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenter.kt
++++ b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenter.kt
+@@ -31,6 +31,7 @@ import io.element.android.features.messages.impl.crypto.sendfailure.resolve.Reso
+ import io.element.android.features.messages.impl.timeline.components.MessageShieldData
+ import io.element.android.features.messages.impl.timeline.factories.TimelineItemsFactory
+ import io.element.android.features.messages.impl.timeline.factories.TimelineItemsFactoryConfig
++import io.element.android.features.messages.impl.timeline.freechat.DisappearingTimelineFilter
+ import io.element.android.features.messages.impl.timeline.freechat.hideDeletedMessages
+ import io.element.android.features.messages.impl.timeline.model.NewEventState
+ import io.element.android.features.messages.impl.timeline.model.TimelineItem
+@@ -106,6 +107,7 @@ class TimelinePresenter(
+     private val liveLocationShareManager: ActiveLiveLocationShareManager,
+     private val markAsFullyRead: MarkAsFullyRead,
+     private val timelineProtectionPresenter: Presenter<TimelineProtectionState>,
++    private val disappearingTimelineFilter: DisappearingTimelineFilter = DisappearingTimelineFilter.None, // FreeChat
+ ) : Presenter<TimelineState> {
+     private val tag = "TimelinePresenter"
+ 
+@@ -322,8 +324,7 @@ class TimelinePresenter(
+ 
+         LaunchedEffect(Unit) {
+             // FreeChat: deleted messages vanish without a placeholder.
+-            timelineItemsFactory.timelineItems
+-                .map(::hideDeletedMessages)
++            disappearingTimelineFilter.filter(room.roomId, timelineItemsFactory.timelineItems.map(::hideDeletedMessages))
+                 .onEach { newTimelineItems ->
+                     timelineItemIndexer.process(newTimelineItems)
+                     timelineItems = newTimelineItems.toImmutableList()
+diff --git a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilter.kt b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilter.kt
+new file mode 100644
+index 0000000000..113d6e5a92
+--- /dev/null
++++ b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilter.kt
+@@ -0,0 +1,139 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.features.messages.impl.timeline.freechat
++
++import dev.zacsweers.metro.ContributesBinding
++import dev.zacsweers.metro.Inject
++import io.element.android.features.messages.impl.timeline.model.TimelineItem
++import io.element.android.libraries.di.SessionScope
++import io.element.android.libraries.matrix.api.MatrixClient
++import io.element.android.libraries.matrix.api.core.EventId
++import io.element.android.libraries.matrix.api.core.RoomId
++import io.element.android.libraries.matrix.api.freechat.ExpiryMarkers
++import io.element.android.libraries.matrix.api.freechat.existingEvents
++import kotlinx.collections.immutable.toImmutableList
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.flow.Flow
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.channelFlow
++import kotlinx.coroutines.flow.combine
++import kotlinx.coroutines.flow.distinctUntilChanged
++import kotlinx.coroutines.flow.flow
++import kotlinx.coroutines.launch
++import timber.log.Timber
++
++/**
++ * FreeChat: removes disappearing messages from the timeline on this device.
++ *
++ * The server purges expired messages without leaving a redaction. `unsigned.com.freechat.expires_at`
++ * (room auto-delete) is honoured to the second, even offline. Messages that burn after reading, whose
++ * expiry this device cannot compute, are dropped once the server says they no longer exist.
++ */
++interface DisappearingTimelineFilter {
++    fun filter(roomId: RoomId, items: Flow<List<TimelineItem>>): Flow<List<TimelineItem>>
++
++    /** No filtering; keeps tests and previews independent of the server. */
++    object None : DisappearingTimelineFilter {
++        override fun filter(roomId: RoomId, items: Flow<List<TimelineItem>>) = items
++    }
++}
++
++@ContributesBinding(SessionScope::class)
++@Inject
++class DefaultDisappearingTimelineFilter(
++    private val client: MatrixClient,
++) : DisappearingTimelineFilter {
++    override fun filter(roomId: RoomId, items: Flow<List<TimelineItem>>): Flow<List<TimelineItem>> = channelFlow {
++        val latest = MutableStateFlow<List<TimelineItem>>(emptyList())
++        val purged = MutableStateFlow<Set<EventId>>(emptySet())
++        val markers = MarkerCache()
++
++        launch { items.collect { latest.value = it } }
++        launch {
++            while (true) {
++                val pending = latest.value.markedEventIds(markers, System.currentTimeMillis()) - purged.value
++                if (pending.isNotEmpty()) {
++                    client.existingEvents(roomId, pending)
++                        .onSuccess { existing -> purged.value += pending - existing }
++                        .onFailure { Timber.w(it, "FreeChat: existence check failed in $roomId") }
++                }
++                delay(CHECK_INTERVAL_MS)
++            }
++        }
++        combine(latest, purged, ticker()) { list, gone, now -> hideExpired(list, now, gone, markers::of) }
++            .collect { send(it) }
++    }.distinctUntilChanged()
++
++    private companion object {
++        const val CHECK_INTERVAL_MS = 30_000L
++    }
++}
++
++/** Parses each event's markers once; the original JSON of an event never changes. */
++private class MarkerCache {
++    private val cache = HashMap<EventId, ExpiryMarkers>()
++
++    fun of(event: TimelineItem.Event): ExpiryMarkers {
++        val eventId = event.eventId ?: return ExpiryMarkers.NONE
++        return synchronized(cache) {
++            cache.getOrPut(eventId) { ExpiryMarkers.parse(event.timelineItemDebugInfoProvider().originalJson) }
++        }
++    }
++}
++
++/** Hides events whose marked expiry passed or that the server purged. */
++internal fun hideExpired(
++    items: List<TimelineItem>,
++    now: Long,
++    purged: Set<EventId>,
++    markersOf: (TimelineItem.Event) -> ExpiryMarkers,
++): List<TimelineItem> {
++    fun TimelineItem.Event.isGone(): Boolean {
++        if (eventId in purged) return true
++        val expiresAt = markersOf(this).expiresAt
++        return expiresAt != null && expiresAt <= now
++    }
++
++    return items.mapNotNull { item ->
++        when (item) {
++            is TimelineItem.Event -> item.takeUnless { it.isGone() }
++            is TimelineItem.GroupedEvents -> {
++                val kept = item.events.filterNot { it.isGone() }
++                when {
++                    kept.size == item.events.size -> item
++                    kept.isEmpty() -> null
++                    else -> item.copy(events = kept.toImmutableList())
++                }
++            }
++            is TimelineItem.Virtual -> item
++        }
++    }
++}
++
++private fun List<TimelineItem>.markedEventIds(markers: MarkerCache, now: Long): Set<EventId> =
++    flatMap { item ->
++        when (item) {
++            is TimelineItem.Event -> listOf(item)
++            is TimelineItem.GroupedEvents -> item.events
++            is TimelineItem.Virtual -> emptyList()
++        }
++    }
++        .filter { event ->
++            val m = markers.of(event)
++            val expiresAt = m.expiresAt
++            m.isMarked && (expiresAt == null || expiresAt > now)
++        }
++        .mapNotNull { it.eventId }
++        .toSet()
++
++private fun ticker() = flow {
++    while (true) {
++        emit(System.currentTimeMillis())
++        delay(1_000)
++    }
++}
+diff --git a/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilterTest.kt b/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilterTest.kt
+new file mode 100644
+index 0000000000..2ad3501b89
+--- /dev/null
++++ b/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilterTest.kt
+@@ -0,0 +1,60 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.features.messages.impl.timeline.freechat
++
++import com.google.common.truth.Truth.assertThat
++import io.element.android.features.messages.impl.timeline.aTimelineItemDebugInfo
++import io.element.android.features.messages.impl.timeline.aTimelineItemEvent
++import io.element.android.features.messages.impl.timeline.model.TimelineItem
++import io.element.android.libraries.matrix.api.core.EventId
++import io.element.android.libraries.matrix.api.core.UniqueId
++import io.element.android.libraries.matrix.api.freechat.ExpiryMarkers
++import kotlinx.collections.immutable.persistentListOf
++import org.junit.Test
++
++class DisappearingTimelineFilterTest {
++    private fun json(unsigned: String) = """{"type":"m.room.message","content":{},"unsigned":$unsigned}"""
++
++    private val plain = aTimelineItemEvent(eventId = EventId("\$plain"))
++    private val timed = aTimelineItemEvent(
++        eventId = EventId("\$timed"),
++        debugInfo = aTimelineItemDebugInfo(originalJson = json("""{"com.freechat.expires_at":5000}""")),
++    )
++    private val burn = aTimelineItemEvent(
++        eventId = EventId("\$burn"),
++        debugInfo = aTimelineItemDebugInfo(originalJson = json("""{"com.freechat.read_ttl":5}""")),
++    )
++
++    private fun markers(event: TimelineItem.Event) = ExpiryMarkers.parse(event.timelineItemDebugInfoProvider().originalJson)
++
++    @Test
++    fun `markers are parsed leniently`() {
++        assertThat(ExpiryMarkers.parse(json("""{"com.freechat.expires_at":5000}"""))).isEqualTo(ExpiryMarkers(5000, false))
++        assertThat(ExpiryMarkers.parse(json("""{"com.freechat.read_ttl":5}"""))).isEqualTo(ExpiryMarkers(null, true))
++        assertThat(ExpiryMarkers.parse(json("""{"com.freechat.expires_at":"5000"}"""))).isEqualTo(ExpiryMarkers.NONE)
++        assertThat(ExpiryMarkers.parse(null)).isEqualTo(ExpiryMarkers.NONE)
++        assertThat(ExpiryMarkers.parse("broken")).isEqualTo(ExpiryMarkers.NONE)
++    }
++
++    @Test
++    fun `timed messages disappear on time, without the server`() {
++        assertThat(hideExpired(listOf(plain, timed), now = 4999, purged = emptySet(), markersOf = ::markers)).containsExactly(plain, timed).inOrder()
++        assertThat(hideExpired(listOf(plain, timed), now = 5000, purged = emptySet(), markersOf = ::markers)).containsExactly(plain)
++    }
++
++    @Test
++    fun `messages the server purged disappear`() {
++        assertThat(hideExpired(listOf(plain, burn), now = 0, purged = setOf(EventId("\$burn")), markersOf = ::markers)).containsExactly(plain)
++    }
++
++    @Test
++    fun `groups are filtered too`() {
++        val group = TimelineItem.GroupedEvents(UniqueId("g"), persistentListOf(timed, burn), persistentListOf())
++        assertThat(hideExpired(listOf(group), now = 9999, purged = setOf(EventId("\$burn")), markersOf = ::markers)).isEmpty()
++    }
++}
+diff --git a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/FreeChatApi.kt b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/FreeChatApi.kt
+index 83db5e7cd0..eac9caf41a 100644
+--- a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/FreeChatApi.kt
++++ b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/FreeChatApi.kt
+@@ -8,12 +8,15 @@
+ package io.element.android.libraries.matrix.api.freechat
+ 
+ import io.element.android.libraries.matrix.api.MatrixClient
++import io.element.android.libraries.matrix.api.core.EventId
+ import io.element.android.libraries.matrix.api.core.RoomId
+ import kotlinx.serialization.json.Json
++import kotlinx.serialization.json.JsonArray
+ import kotlinx.serialization.json.JsonObject
+ import kotlinx.serialization.json.JsonPrimitive
+ import kotlinx.serialization.json.booleanOrNull
+ import kotlinx.serialization.json.jsonObject
++import kotlinx.serialization.json.longOrNull
+ import java.net.URLEncoder
+ 
+ /** A FreeChat homeserver extension answered with a non-2xx [statusCode]. */
+@@ -33,6 +36,8 @@ object FreeChatApi {
+ 
+     fun joinWithPasswordPath(roomId: RoomId) = "/rooms/${encode(roomId.value)}/join_with_password"
+ 
++    fun existingEventsPath(roomId: RoomId) = "/rooms/${encode(roomId.value)}/existing_events"
++
+     /** True only for a real JSON `true`; strings and anything malformed count as off. */
+     fun blockScreenshotsFromContent(contentJson: String?): Boolean {
+         val value = runCatching { Json.parseToJsonElement(contentJson ?: return false).jsonObject["block_screenshots"] }.getOrNull()
+@@ -63,3 +68,29 @@ suspend fun MatrixClient.joinWithPassword(roomId: RoomId, password: String): Res
+         .mapCatching { joinRoom(roomId).getOrThrow() }
+         .map { }
+ }
++
++/** Expiry markers the server put in an event's `unsigned`, read from its original JSON. */
++data class ExpiryMarkers(val expiresAt: Long?, val burnsAfterReading: Boolean) {
++    val isMarked get() = expiresAt != null || burnsAfterReading
++
++    companion object {
++        val NONE = ExpiryMarkers(null, false)
++
++        fun parse(originalJson: String?): ExpiryMarkers {
++            val unsigned = runCatching { Json.parseToJsonElement(originalJson ?: return NONE).jsonObject["unsigned"] as? JsonObject }
++                .getOrNull() ?: return NONE
++            fun positive(key: String) = (unsigned[key] as? JsonPrimitive)?.takeUnless { it.isString }?.longOrNull?.takeIf { it > 0 }
++            return ExpiryMarkers(expiresAt = positive("com.freechat.expires_at"), burnsAfterReading = positive("com.freechat.read_ttl") != null)
++        }
++    }
++}
++
++/** Which of [eventIds] still exist on the server; purged ones are left out. Members only. */
++suspend fun MatrixClient.existingEvents(roomId: RoomId, eventIds: Set<EventId>): Result<Set<EventId>> {
++    val body = JsonObject(mapOf("event_ids" to JsonArray(eventIds.map { JsonPrimitive(it.value) }))).toString()
++    return freechatRequest("POST", FreeChatApi.existingEventsPath(roomId), body).mapCatching { response ->
++        (Json.parseToJsonElement(response).jsonObject["existing"] as? JsonArray).orEmpty()
++            .mapNotNull { (it as? JsonPrimitive)?.content?.let(::EventId) }
++            .toSet()
++    }
++}

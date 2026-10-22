@@ -1,0 +1,238 @@
+From ec1313a1f3c6d3ab0291d0c2191ce0e0fee61692 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 11/14] FreeChat: deleted messages leave the database files too
+
+No WAL archive; after messages are purged, all memtables are flushed and the
+event maps compacted all the way down, at most daily. There is no server-side
+search index: every room is encrypted, and its keys (the words) would outlive
+deleted messages in RocksDB's metadata.
+---
+ src/database/engine/db_opts.rs          |  5 +-
+ src/service/rooms/disappearing/mod.rs   |  6 ++
+ src/service/rooms/disappearing/scrub.rs | 94 +++++++++++++++++++++++++
+ src/service/rooms/search/mod.rs         | 24 +++----
+ 4 files changed, 116 insertions(+), 13 deletions(-)
+ create mode 100644 src/service/rooms/disappearing/scrub.rs
+
+diff --git a/src/database/engine/db_opts.rs b/src/database/engine/db_opts.rs
+index fd07755e4..22ab69d1c 100644
+--- a/src/database/engine/db_opts.rs
++++ b/src/database/engine/db_opts.rs
+@@ -56,7 +56,10 @@ pub(crate) fn db_options(config: &Config, env: &Env, row_cache: &Cache) -> Resul
+ 
+ 	// Files
+ 	opts.set_table_cache_num_shard_bits(7);
+-	opts.set_wal_size_limit_mb(1024);
++	// FreeChat: no WAL archive. Archived logs keep every write, deleted messages
++	// included, until the limit is reached; obsolete logs are deleted instead.
++	opts.set_wal_size_limit_mb(0);
++	opts.set_wal_ttl_seconds(0);
+ 	opts.set_max_total_wal_size(1024 * 1024 * 512);
+ 	opts.set_writable_file_max_buffer_size(1024 * 1024 * 2);
+ 	if !config.rocksdb_allow_fallocate {
+diff --git a/src/service/rooms/disappearing/mod.rs b/src/service/rooms/disappearing/mod.rs
+index 3792bbf16..d1f6b6e2f 100644
+--- a/src/service/rooms/disappearing/mod.rs
++++ b/src/service/rooms/disappearing/mod.rs
+@@ -27,6 +27,7 @@
+ 
+ pub mod join_password;
+ pub mod read_burn;
++pub mod scrub;
+ pub mod strict_device;
+ #[cfg(test)]
+ mod tests;
+@@ -117,6 +118,7 @@ pub struct Service {
+ 	roomid_joinpassword: Arc<Map>,
+ 	join_attempts: join_password::Attempts,
+ 	strict_last_use: strict_device::LastUse,
++	scrub: scrub::Scrub,
+ }
+ 
+ #[derive(Clone, Copy, Debug, Default, Deserialize)]
+@@ -136,6 +138,7 @@ fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
+ 			roomid_joinpassword: args.db["roomid_joinpassword"].clone(),
+ 			join_attempts: join_password::Attempts::default(),
+ 			strict_last_use: strict_device::LastUse::default(),
++			scrub: scrub::Scrub::new(|name| args.db[name].clone()),
+ 		}))
+ 	}
+ 
+@@ -144,6 +147,7 @@ async fn worker(self: Arc<Self>) -> Result {
+ 		self.track_existing_strict_devices().await;
+ 		loop {
+ 			self.expire_strict_devices().await;
++			self.scrub_if_due().await;
+ 
+ 			if let Err(e) = self.expire_due().await {
+ 				warn!("Disappearing messages sweep failed: {e}");
+@@ -354,6 +358,7 @@ async fn enforce_retention(&self) -> Result {
+ 
+ 	if purged > 0 {
+ 		debug_info!(purged, "Retention sweep removed old messages");
++		self.scrub.mark();
+ 	}
+ 
+ 	Ok(())
+@@ -384,6 +389,7 @@ async fn expire(&self, event_id: &EventId) -> Result {
+ 		.await;
+ 
+ 	self.services.timeline.purge_pdu(event_id).await?;
++	self.scrub.mark();
+ 
+ 	if was_extremity {
+ 		let others: Vec<OwnedEventId> = self
+diff --git a/src/service/rooms/disappearing/scrub.rs b/src/service/rooms/disappearing/scrub.rs
+new file mode 100644
+index 000000000..4972d9c20
+--- /dev/null
++++ b/src/service/rooms/disappearing/scrub.rs
+@@ -0,0 +1,94 @@
++//! FreeChat: make deleted messages unrecoverable from the database files.
++//!
++//! Deleting a key in RocksDB only writes a tombstone: the old value stays in
++//! the write-ahead log and the table files until a compaction rewrites them.
++//! After messages are purged, all memtables are flushed (so the write-ahead log
++//! holding them is dropped) and the maps holding events are compacted all the
++//! way down, at most once a day, so expired messages do not linger on disk.
++
++use std::{
++	sync::{
++		Arc, Mutex,
++		atomic::{AtomicBool, Ordering},
++	},
++	time::{Duration, Instant},
++};
++
++use tuwunel_core::{implement, info, warn};
++use tuwunel_database::{Map, compact::Options};
++
++/// Maps that hold event content or the words of plaintext messages.
++const SCRUBBED_MAPS: &[&str] = &["pduid_pdu", "eventid_pduid", "eventid_outlierpdu", "tokenids"];
++
++pub(super) struct Scrub {
++	maps: Vec<Arc<Map>>,
++	pending: AtomicBool,
++	last: Mutex<Instant>,
++}
++
++impl Scrub {
++	pub(super) fn new(map: impl Fn(&str) -> Arc<Map>) -> Self {
++		let interval = interval();
++		Self {
++			maps: SCRUBBED_MAPS.iter().map(|name| map(name)).collect(),
++			pending: AtomicBool::new(false),
++			// The first scrub runs an hour after start-up rather than slowing the start.
++			last: Mutex::new(
++				Instant::now()
++					.checked_sub(interval.saturating_sub(Duration::from_secs(3600).min(interval)))
++					.unwrap_or_else(Instant::now),
++			),
++		}
++	}
++
++	/// Notes that messages were purged and the maps need scrubbing.
++	pub(super) fn mark(&self) { self.pending.store(true, Ordering::Relaxed); }
++}
++
++/// How often at most to scrub; `FREECHAT_SCRUB_INTERVAL_SECS` shortens it for tests.
++fn interval() -> Duration {
++	std::env::var("FREECHAT_SCRUB_INTERVAL_SECS")
++		.ok()
++		.and_then(|secs| secs.trim().parse().ok())
++		.map_or(Duration::from_secs(24 * 60 * 60), Duration::from_secs)
++}
++
++/// Compacts the event maps when messages were purged since the last scrub and
++/// the interval has passed.
++#[implement(super::Service)]
++pub(super) async fn scrub_if_due(&self) {
++	let scrub = &self.scrub;
++	{
++		let mut last = scrub.last.lock().expect("locked");
++		if !scrub.pending.load(Ordering::Relaxed) || last.elapsed() < interval() {
++			return;
++		}
++		*last = Instant::now();
++	}
++	scrub.pending.store(false, Ordering::Relaxed);
++
++	let runtime = self.services.server.runtime().clone();
++
++	// The write-ahead log holds every map's recent writes and is only dropped once
++	// all memtables are flushed, so flush them all before compacting.
++	let engine = self.services.db.engine.clone();
++	match runtime.spawn_blocking(move || engine.sort()).await {
++		| Ok(Ok(())) => {},
++		| Ok(Err(e)) => warn!("Flushing before scrubbing failed: {e}"),
++		| Err(e) => warn!("Flushing before scrubbing panicked: {e}"),
++	}
++
++	for map in &scrub.maps {
++		let map = map.clone();
++		let options = Options { exhaustive: true, ..Options::default() };
++		match runtime
++			.spawn_blocking(move || map.compact_blocking(options))
++			.await
++		{
++			| Ok(Ok(())) => {},
++			| Ok(Err(e)) => warn!("Scrubbing deleted messages failed: {e}"),
++			| Err(e) => warn!("Scrubbing deleted messages panicked: {e}"),
++		}
++	}
++	info!("Scrubbed deleted messages from the database files");
++}
+diff --git a/src/service/rooms/search/mod.rs b/src/service/rooms/search/mod.rs
+index 40a3119a0..17e3bcd1b 100644
+--- a/src/service/rooms/search/mod.rs
++++ b/src/service/rooms/search/mod.rs
+@@ -13,7 +13,7 @@
+ 		stream::{TryIgnore, WidebandExt},
+ 	},
+ };
+-use tuwunel_database::{Map, Txn, keyval::Val};
++use tuwunel_database::{Map, keyval::Val};
+ 
+ use crate::rooms::{
+ 	short::ShortRoomId,
+@@ -56,20 +56,18 @@ fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
+ 	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
+ }
+ 
++/// FreeChat: there is no server-side search index. Every room is end-to-end
++/// encrypted, so it would only ever hold the words of plaintext messages, and
++/// its keys (the words themselves) outlive deleted messages in RocksDB's
++/// metadata. Clients search their own decrypted messages instead.
+ #[implement(Service)]
+ pub fn index_pdu(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId, message_body: &str) {
+-	let items = tokenize(message_body).map(|word| {
+-		let mut key = shortroomid.to_be_bytes().to_vec();
+-		key.extend_from_slice(word.as_bytes());
+-		key.push(0xFF);
+-		key.extend_from_slice(pdu_id.as_ref()); // TODO: currently we save the room id a second time here
+-
+-		(key, [])
+-	});
+-
+-	Txn::insert(&self.db.tokenids, items).execute();
++	let _ = (self, shortroomid, pdu_id, message_body);
+ }
+ 
++/// FreeChat: only keys that exist are removed. Nothing is indexed any more (see
++/// `index_pdu`), and deleting absent words would write them to the write-ahead
++/// log as tombstone keys.
+ #[implement(Service)]
+ pub fn deindex_pdu(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId, message_body: &str) {
+ 	let batch = tokenize(message_body).map(|word| {
+@@ -81,7 +79,9 @@ pub fn deindex_pdu(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId, message_b
+ 	});
+ 
+ 	for token in batch {
+-		self.db.tokenids.remove(&token);
++		if self.db.tokenids.exists_blocking(&token).is_ok() {
++			self.db.tokenids.remove(&token);
++		}
+ 	}
+ }
+ 

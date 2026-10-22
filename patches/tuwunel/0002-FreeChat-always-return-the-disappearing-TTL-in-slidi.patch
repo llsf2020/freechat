@@ -1,0 +1,74 @@
+From d4dba1c103e746e061ebe23d486974ff8804cabf Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 02/14] FreeChat: always return the disappearing TTL in sliding
+ sync
+
+matrix-rust-sdk clients (Element X) only store state their sync asked
+for and cannot request custom state types, so the server adds
+com.freechat.disappearing to every room's required_state.
+---
+ src/api/client/sync/v5/rooms.rs       |  5 ++++-
+ src/service/rooms/disappearing/mod.rs | 12 +++++++++++-
+ 2 files changed, 15 insertions(+), 2 deletions(-)
+
+diff --git a/src/api/client/sync/v5/rooms.rs b/src/api/client/sync/v5/rooms.rs
+index fc79dfaa1..e535b0c2d 100644
+--- a/src/api/client/sync/v5/rooms.rs
++++ b/src/api/client/sync/v5/rooms.rs
+@@ -42,6 +42,7 @@
+ };
+ use tuwunel_service::{
+ 	Services,
++	rooms::disappearing,
+ 	sync::{RequiredState, Room, RoomConfig},
+ };
+ 
+@@ -302,7 +303,9 @@ pub(super) fn merged_room_details(
+ 		.filter_map(|list_id| conn.lists.get(list_id))
+ 		.map(|list| &list.room_details)
+ 		.chain(conn.subscriptions.get(room_id))
+-		.fold((0_usize, HashSet::new()), |mut details, config| {
++		// FreeChat: every client needs the disappearing-messages TTL, but
++		// clients built on matrix-rust-sdk cannot ask for custom state.
++		.fold((0_usize, disappearing::always_required_state()), |mut details, config| {
+ 			details.0 = details.0.max(usize_from_ruma_bounded(
+ 				config.timeline_limit,
+ 				TIMELINE_LIMIT_MAX,
+diff --git a/src/service/rooms/disappearing/mod.rs b/src/service/rooms/disappearing/mod.rs
+index 3f4ada242..df651c796 100644
+--- a/src/service/rooms/disappearing/mod.rs
++++ b/src/service/rooms/disappearing/mod.rs
+@@ -14,7 +14,7 @@
+ #[cfg(test)]
+ mod tests;
+ 
+-use std::{sync::Arc, time::Duration};
++use std::{collections::HashSet, sync::Arc, time::Duration};
+ 
+ use async_trait::async_trait;
+ use futures::{StreamExt, TryStreamExt};
+@@ -27,6 +27,7 @@
+ use tuwunel_core::{
+ 	Result, debug, debug_info, implement,
+ 	matrix::{
++		StateKey,
+ 		event::Event,
+ 		pdu::{PduBuilder, PduEvent},
+ 	},
+@@ -45,6 +46,15 @@
+ /// hide the event entirely instead of showing a "message deleted" notice.
+ pub const EXPIRED_KEY: &str = "com.freechat.expired";
+ 
++/// State that sliding sync always returns, whatever the client requested.
++///
++/// matrix-rust-sdk based clients (Element X) only store state their sync
++/// asked for and cannot add custom types, so the server adds the TTL event.
++#[must_use]
++pub fn always_required_state() -> HashSet<(StateEventType, StateKey)> {
++	HashSet::from([(StateEventType::from(STATE_TYPE), StateKey::new())])
++}
++
+ /// How often the worker checks for expired messages.
+ const INTERVAL: Duration = Duration::from_secs(5);
+ 

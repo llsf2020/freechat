@@ -1,0 +1,150 @@
+From 4e0720c74652a974caa275da060b1b866012c113 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 11/12] FreeChat: batch existence checks, no redirects with the
+ token; drop dead code
+
+- Existence checks are sent in batches of 500, the server limit; larger
+  timelines used to get a 400 and never learned what was purged.
+- FreeChat requests do not follow redirects, so the access token cannot be
+  sent to another host.
+- The unused expired-redaction helper is gone.
+---
+ .../timeline/freechat/HideDeletedMessages.kt    |  3 +--
+ .../matrix/api/freechat/Disappearing.kt         | 13 ++-----------
+ .../matrix/api/freechat/FreeChatApi.kt          | 17 ++++++++++++-----
+ .../matrix/api/freechat/DisappearingTest.kt     | 15 ---------------
+ .../libraries/matrix/impl/RustMatrixClient.kt   |  2 ++
+ 5 files changed, 17 insertions(+), 33 deletions(-)
+
+diff --git a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideDeletedMessages.kt b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideDeletedMessages.kt
+index 18745e3388..dd5595760f 100644
+--- a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideDeletedMessages.kt
++++ b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideDeletedMessages.kt
+@@ -16,8 +16,7 @@ import kotlinx.collections.immutable.toImmutableList
+  * FreeChat: deleted messages vanish from the timeline instead of leaving a "message deleted" placeholder,
+  * like Telegram. Deleted thread roots stay so their threads remain reachable.
+  *
+- * Every deletion is hidden, not just server expiries: matrix-rust-sdk forgets an event's original JSON when a
+- * redaction arrives live, so the `com.freechat.expired` marker cannot be told apart from a manual deletion.
++ * Expired messages are purged by the server without a redaction, so what is hidden here are manual deletions.
+  */
+ internal fun hideDeletedMessages(items: List<TimelineItem>): List<TimelineItem> {
+     fun TimelineItem.Event.isHidden(): Boolean =
+diff --git a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/Disappearing.kt b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/Disappearing.kt
+index 3ccaa88255..ecc7751d4e 100644
+--- a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/Disappearing.kt
++++ b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/Disappearing.kt
+@@ -17,12 +17,11 @@ import kotlinx.serialization.json.longOrNull
+ /**
+  * FreeChat disappearing messages.
+  *
+- * The homeserver enforces expiry by
+- * redacting messages as their sender; clients let users pick a TTL and hide expired messages entirely.
++ * The homeserver purges expired messages
++ * without leaving a redaction; clients let users pick a TTL and remove their own copies.
+  */
+ object Disappearing {
+     const val STATE_TYPE = "com.freechat.disappearing"
+-    const val EXPIRED_KEY = "com.freechat.expired"
+ 
+     private const val HOUR = 3600L
+     private const val DAY = 24 * HOUR
+@@ -96,14 +95,6 @@ object Disappearing {
+ 
+     fun contentForTtl(ttl: Long): String = """{"ttl":${ttl.coerceAtLeast(0)}}"""
+ 
+-    /** True when an event's original JSON shows it was redacted by the server because it expired. */
+-    fun isExpiredRedaction(originalJson: String?): Boolean {
+-        val event = parseObject(originalJson) ?: return false
+-        val because = (event["unsigned"] as? JsonObject)?.get("redacted_because") as? JsonObject ?: return false
+-        val content = because["content"] as? JsonObject ?: return false
+-        return (content[EXPIRED_KEY] as? JsonPrimitive)?.booleanOrNull == true
+-    }
+-
+     /** How a TTL should be described: a preset label or a count of the largest whole unit. */
+     sealed interface Duration {
+         data object Off : Duration
+diff --git a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/FreeChatApi.kt b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/FreeChatApi.kt
+index aa20708d3e..e12f6592df 100644
+--- a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/FreeChatApi.kt
++++ b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/FreeChatApi.kt
+@@ -7,6 +7,7 @@
+ 
+ package io.element.android.libraries.matrix.api.freechat
+ 
++import io.element.android.libraries.core.extensions.runCatchingExceptions
+ import io.element.android.libraries.matrix.api.MatrixClient
+ import io.element.android.libraries.matrix.api.core.EventId
+ import io.element.android.libraries.matrix.api.core.RoomId
+@@ -40,6 +41,9 @@ object FreeChatApi {
+ 
+     fun eventMediaPath(roomId: RoomId) = "/rooms/${encode(roomId.value)}/event_media"
+ 
++    /** Most event IDs one existence check may ask about; the server rejects more. */
++    const val MAX_EXISTING_EVENTS = 500
++
+     /** Most media one message may report; the server rejects more. */
+     const val MAX_EVENT_MEDIA = 64
+ 
+@@ -90,13 +94,16 @@ data class ExpiryMarkers(val expiresAt: Long?, val burnsAfterReading: Boolean) {
+     }
+ }
+ 
+-/** Which of [eventIds] still exist on the server; purged ones are left out. Members only. */
+-suspend fun MatrixClient.existingEvents(roomId: RoomId, eventIds: Set<EventId>): Result<Set<EventId>> {
+-    val body = JsonObject(mapOf("event_ids" to JsonArray(eventIds.map { JsonPrimitive(it.value) }))).toString()
+-    return freechatRequest("POST", FreeChatApi.existingEventsPath(roomId), body).mapCatching { response ->
++/**
++ * Which of [eventIds] still exist on the server; purged ones are left out. Members only. Asks in batches of
++ * [FreeChatApi.MAX_EXISTING_EVENTS], the most the server takes at once.
++ */
++suspend fun MatrixClient.existingEvents(roomId: RoomId, eventIds: Set<EventId>): Result<Set<EventId>> = runCatchingExceptions {
++    eventIds.chunked(FreeChatApi.MAX_EXISTING_EVENTS).flatMapTo(HashSet()) { batch ->
++        val body = JsonObject(mapOf("event_ids" to JsonArray(batch.map { JsonPrimitive(it.value) }))).toString()
++        val response = freechatRequest("POST", FreeChatApi.existingEventsPath(roomId), body).getOrThrow()
+         (Json.parseToJsonElement(response).jsonObject["existing"] as? JsonArray).orEmpty()
+             .mapNotNull { (it as? JsonPrimitive)?.content?.let(::EventId) }
+-            .toSet()
+     }
+ }
+ 
+diff --git a/libraries/matrix/api/src/test/kotlin/io/element/android/libraries/matrix/api/freechat/DisappearingTest.kt b/libraries/matrix/api/src/test/kotlin/io/element/android/libraries/matrix/api/freechat/DisappearingTest.kt
+index 4322db7036..6253070329 100644
+--- a/libraries/matrix/api/src/test/kotlin/io/element/android/libraries/matrix/api/freechat/DisappearingTest.kt
++++ b/libraries/matrix/api/src/test/kotlin/io/element/android/libraries/matrix/api/freechat/DisappearingTest.kt
+@@ -30,21 +30,6 @@ class DisappearingTest {
+         assertThat(Disappearing.ttlFromContent(Disappearing.contentForTtl(86400))).isEqualTo(86400)
+     }
+ 
+-    @Test
+-    fun `isExpiredRedaction - detects server expiry`() {
+-        val json = """{"type":"m.room.message","content":{},"unsigned":{"redacted_because":
+-            {"type":"m.room.redaction","content":{"redacts":"${'$'}a","com.freechat.expired":true}}}}"""
+-        assertThat(Disappearing.isExpiredRedaction(json)).isTrue()
+-    }
+-
+-    @Test
+-    fun `isExpiredRedaction - ignores manual redactions and live events`() {
+-        val manual = """{"content":{},"unsigned":{"redacted_because":{"content":{"redacts":"${'$'}a"}}}}"""
+-        assertThat(Disappearing.isExpiredRedaction(manual)).isFalse()
+-        assertThat(Disappearing.isExpiredRedaction("""{"content":{"body":"hi"}}""")).isFalse()
+-        assertThat(Disappearing.isExpiredRedaction(null)).isFalse()
+-    }
+-
+     @Test
+     fun `describe - presets then largest whole unit`() {
+         assertThat(Disappearing.describe(0)).isEqualTo(Disappearing.Duration.Off)
+diff --git a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt
+index e167adea11..7ca4eeb180 100644
+--- a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt
++++ b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt
+@@ -924,6 +924,8 @@ class RustMatrixClient(
+                 connection.connectTimeout = 15_000
+                 connection.readTimeout = 30_000
+                 connection.useCaches = false
++                // The access token must never follow a redirect to another host.
++                connection.instanceFollowRedirects = false
+                 connection.setRequestProperty("Authorization", "Bearer ${innerClient.session().accessToken}")
+                 connection.setRequestProperty("Accept", "application/json")
+                 if (jsonBody != null) {

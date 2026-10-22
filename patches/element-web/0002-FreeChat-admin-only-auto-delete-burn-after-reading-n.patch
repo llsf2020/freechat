@@ -1,0 +1,610 @@
+From e1e767a8164f071aad92c4d7bcd316acbb1c4d3a Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 02/12] FreeChat: admin-only auto-delete, burn after reading,
+ no deleted placeholders
+
+- Room auto-delete can only be changed by room admins (power level 100 or
+  v12 creators); others see the setting with an explanation
+- Security & Privacy (user settings): default burn-after-read delay for
+  my messages, stored as com.freechat.disappearing account data
+- Room Security & Privacy: per-chat override, or follow the default
+- Every deleted message disappears without a placeholder, like Telegram
+  (deleted thread roots stay so threads remain reachable)
+---
+ .../tabs/room/SecurityRoomSettingsTab.tsx     |   2 +
+ .../tabs/user/SecurityUserSettingsTab.tsx     |   6 +
+ .../SecurityUserSettingsTab.test.tsx.snap     | 162 ++++++++++++++++++
+ .../freechat/DisappearingMessagesSettings.tsx |   9 +-
+ apps/web/src/freechat/ReadBurnSettings.tsx    | 140 +++++++++++++++
+ apps/web/src/freechat/disappearing.test.ts    |  47 ++++-
+ apps/web/src/freechat/disappearing.ts         |  36 +++-
+ apps/web/src/freechat/i18n.ts                 |  22 +++
+ apps/web/src/shouldHideEvent.ts               |   6 +-
+ 9 files changed, 422 insertions(+), 8 deletions(-)
+ create mode 100644 apps/web/src/freechat/ReadBurnSettings.tsx
+
+diff --git a/apps/web/src/components/views/settings/tabs/room/SecurityRoomSettingsTab.tsx b/apps/web/src/components/views/settings/tabs/room/SecurityRoomSettingsTab.tsx
+index 47fdc70fb7..bc62f05dfe 100644
+--- a/apps/web/src/components/views/settings/tabs/room/SecurityRoomSettingsTab.tsx
++++ b/apps/web/src/components/views/settings/tabs/room/SecurityRoomSettingsTab.tsx
+@@ -44,6 +44,7 @@ import { shouldForceDisableEncryption } from "../../../../../utils/crypto/should
+ import { Caption } from "../../../typography/Caption";
+ import { MEGOLM_ENCRYPTION_ALGORITHM } from "../../../../../utils/crypto";
+ import DisappearingMessagesSettings from "../../../../../freechat/DisappearingMessagesSettings";
++import { RoomReadBurnSettings } from "../../../../../freechat/ReadBurnSettings";
+ 
+ interface IProps {
+     room: Room;
+@@ -586,6 +587,7 @@ export default class SecurityRoomSettingsTab extends React.Component<IProps, ISt
+                         {this.renderJoinRule()}
+                         {historySection}
+                         <DisappearingMessagesSettings room={room} />
++                        <RoomReadBurnSettings room={room} />
+                     </SettingsSection>
+                 </Form.Root>
+             </SettingsTab>
+diff --git a/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx b/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx
+index 174522522f..9e674c184c 100644
+--- a/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx
++++ b/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx
+@@ -34,6 +34,8 @@ import { SettingsSubsection, SettingsSubsectionText } from "../../shared/Setting
+ import { useOwnDevices } from "../../devices/useOwnDevices";
+ import { DiscoverySettings } from "../../discovery/DiscoverySettings";
+ import SetIntegrationManager from "../../SetIntegrationManager";
++import { GlobalReadBurnSettings } from "../../../../../freechat/ReadBurnSettings";
++import { ft } from "../../../../../freechat/i18n";
+ 
+ interface IIgnoredUserProps {
+     userId: string;
+@@ -378,6 +380,10 @@ export default class SecurityUserSettingsTab extends React.Component<EmptyObject
+                     {eventIndex}
+                 </SettingsSection>
+                 {privacySection}
++                {/* FreeChat */}
++                <SettingsSection heading={ft("burn_section")}>
++                    <GlobalReadBurnSettings />
++                </SettingsSection>
+                 {advancedSection}
+             </SettingsTab>
+         );
+diff --git a/apps/web/src/components/views/settings/tabs/user/__snapshots__/SecurityUserSettingsTab.test.tsx.snap b/apps/web/src/components/views/settings/tabs/user/__snapshots__/SecurityUserSettingsTab.test.tsx.snap
+index 35e5b2cf6e..0cc7638b95 100644
+--- a/apps/web/src/components/views/settings/tabs/user/__snapshots__/SecurityUserSettingsTab.test.tsx.snap
++++ b/apps/web/src/components/views/settings/tabs/user/__snapshots__/SecurityUserSettingsTab.test.tsx.snap
+@@ -247,6 +247,168 @@ exports[`<SecurityUserSettingsTab /> > renders security section 1`] = `
+           </div>
+         </div>
+       </div>
++      <div
++        class="mx_SettingsSection"
++      >
++        <h2
++          class="mx_Heading_h3"
++        >
++          Burn after reading
++        </h2>
++        <div
++          class="mx_SettingsSection_subSections"
++        >
++          <fieldset
++            class="mx_SettingsFieldset"
++          >
++            <legend
++              class="mx_SettingsFieldset_legend"
++            >
++              Burn my messages after they are read
++            </legend>
++            <div
++              class="mx_SettingsFieldset_description"
++            >
++              <div
++                class="mx_SettingsSubsection_text"
++              >
++                Messages you send are deleted for everyone this long after every other member has read them. Applies to messages sent from now on.
++              </div>
++            </div>
++            <div
++              class="mx_SettingsFieldset_content"
++            >
++              <label
++                class="mx_StyledRadioButton mx_StyledRadioButton_enabled mx_StyledRadioButton_checked"
++              >
++                <input
++                  checked=""
++                  id="freechatReadBurnGlobal-0"
++                  name="freechatReadBurnGlobal"
++                  type="radio"
++                  value="0"
++                />
++                <div>
++                  <div />
++                </div>
++                <div
++                  class="mx_StyledRadioButton_content"
++                >
++                  Off
++                </div>
++                <div
++                  class="mx_StyledRadioButton_spacer"
++                />
++              </label>
++              <label
++                class="mx_StyledRadioButton mx_StyledRadioButton_enabled"
++              >
++                <input
++                  id="freechatReadBurnGlobal-5"
++                  name="freechatReadBurnGlobal"
++                  type="radio"
++                  value="5"
++                />
++                <div>
++                  <div />
++                </div>
++                <div
++                  class="mx_StyledRadioButton_content"
++                >
++                  5 seconds
++                </div>
++                <div
++                  class="mx_StyledRadioButton_spacer"
++                />
++              </label>
++              <label
++                class="mx_StyledRadioButton mx_StyledRadioButton_enabled"
++              >
++                <input
++                  id="freechatReadBurnGlobal-30"
++                  name="freechatReadBurnGlobal"
++                  type="radio"
++                  value="30"
++                />
++                <div>
++                  <div />
++                </div>
++                <div
++                  class="mx_StyledRadioButton_content"
++                >
++                  30 seconds
++                </div>
++                <div
++                  class="mx_StyledRadioButton_spacer"
++                />
++              </label>
++              <label
++                class="mx_StyledRadioButton mx_StyledRadioButton_enabled"
++              >
++                <input
++                  id="freechatReadBurnGlobal-60"
++                  name="freechatReadBurnGlobal"
++                  type="radio"
++                  value="60"
++                />
++                <div>
++                  <div />
++                </div>
++                <div
++                  class="mx_StyledRadioButton_content"
++                >
++                  1 minutes
++                </div>
++                <div
++                  class="mx_StyledRadioButton_spacer"
++                />
++              </label>
++              <label
++                class="mx_StyledRadioButton mx_StyledRadioButton_enabled"
++              >
++                <input
++                  id="freechatReadBurnGlobal-300"
++                  name="freechatReadBurnGlobal"
++                  type="radio"
++                  value="300"
++                />
++                <div>
++                  <div />
++                </div>
++                <div
++                  class="mx_StyledRadioButton_content"
++                >
++                  5 minutes
++                </div>
++                <div
++                  class="mx_StyledRadioButton_spacer"
++                />
++              </label>
++              <label
++                class="mx_StyledRadioButton mx_StyledRadioButton_enabled"
++              >
++                <input
++                  id="freechatReadBurnGlobal-3600"
++                  name="freechatReadBurnGlobal"
++                  type="radio"
++                  value="3600"
++                />
++                <div>
++                  <div />
++                </div>
++                <div
++                  class="mx_StyledRadioButton_content"
++                >
++                  1 hour
++                </div>
++                <div
++                  class="mx_StyledRadioButton_spacer"
++                />
++              </label>
++            </div>
++          </fieldset>
++        </div>
++      </div>
+       <div
+         class="mx_SettingsSection"
+       >
+diff --git a/apps/web/src/freechat/DisappearingMessagesSettings.tsx b/apps/web/src/freechat/DisappearingMessagesSettings.tsx
+index 4491f37386..0b2a4c3fb2 100644
+--- a/apps/web/src/freechat/DisappearingMessagesSettings.tsx
++++ b/apps/web/src/freechat/DisappearingMessagesSettings.tsx
+@@ -19,7 +19,7 @@ import Modal from "../Modal";
+ import ErrorDialog from "../components/views/dialogs/ErrorDialog";
+ import StyledRadioGroup from "../components/views/elements/StyledRadioGroup";
+ import SettingsFieldset from "../components/views/settings/SettingsFieldset";
+-import { DISAPPEARING_EVENT_TYPE, TTL_PRESETS, formatTtl, getStateTtl } from "./disappearing";
++import { DISAPPEARING_EVENT_TYPE, TTL_PRESETS, formatTtl, getStateTtl, isRoomAdmin } from "./disappearing";
+ import { ft } from "./i18n";
+ 
+ interface Props {
+@@ -30,7 +30,7 @@ export default function DisappearingMessagesSettings({ room }: Props): JSX.Eleme
+     const client = useContext(MatrixClientContext);
+     const { ttl, canChange } = useRoomState(room, (state) => ({
+         ttl: getStateTtl(state),
+-        canChange: state.maySendStateEvent(DISAPPEARING_EVENT_TYPE, client.getSafeUserId()),
++        canChange: isRoomAdmin(state, client.getSafeUserId()),
+     }));
+     const [pending, setPending] = useState<number | null>(null);
+ 
+@@ -58,7 +58,10 @@ export default function DisappearingMessagesSettings({ room }: Props): JSX.Eleme
+     };
+ 
+     return (
+-        <SettingsFieldset legend={ft("settings_legend")} description={ft("settings_description")}>
++        <SettingsFieldset
++            legend={ft("settings_legend")}
++            description={canChange ? ft("settings_description") : `${ft("settings_description")} ${ft("admin_only")}`}
++        >
+             <StyledRadioGroup
+                 name="freechatDisappearing"
+                 value={String(pending ?? ttl)}
+diff --git a/apps/web/src/freechat/ReadBurnSettings.tsx b/apps/web/src/freechat/ReadBurnSettings.tsx
+new file mode 100644
+index 0000000000..4a94ee0bd6
+--- /dev/null
++++ b/apps/web/src/freechat/ReadBurnSettings.tsx
+@@ -0,0 +1,140 @@
++/*
++Copyright 2026 FreeChat contributors
++
++SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++Please see LICENSE files in the repository root for full details.
++*/
++
++/*
++ * FreeChat: personal burn-after-read settings.
++ *
++ * Stored as `com.freechat.disappearing` account data `{"read_ttl": seconds}`:
++ * globally as the default, and per room to override it. A room override
++ * without `read_ttl` follows the global default. The homeserver enforces it.
++ */
++
++import React, { type JSX, useCallback, useContext, useState } from "react";
++import { ClientEvent, type MatrixEvent, type Room, RoomEvent } from "matrix-js-sdk/src/matrix";
++import { logger } from "matrix-js-sdk/src/logger";
++
++import MatrixClientContext from "../contexts/MatrixClientContext";
++import { useTypedEventEmitter } from "../hooks/useEventEmitter";
++import Modal from "../Modal";
++import ErrorDialog from "../components/views/dialogs/ErrorDialog";
++import StyledRadioGroup from "../components/views/elements/StyledRadioGroup";
++import SettingsFieldset from "../components/views/settings/SettingsFieldset";
++import {
++    DISAPPEARING_EVENT_TYPE,
++    READ_TTL_PRESETS,
++    formatReadTtl,
++    getGlobalReadTtl,
++    getRoomReadTtl,
++} from "./disappearing";
++import { ft } from "./i18n";
++
++const FOLLOW_GLOBAL = "global";
++
++function presetDefinitions(current: number): Array<{ value: string; label: string }> {
++    const ttls = READ_TTL_PRESETS.includes(current) ? READ_TTL_PRESETS : [...READ_TTL_PRESETS, current];
++    return ttls.map((ttl) => ({ value: String(ttl), label: formatReadTtl(ttl) }));
++}
++
++function showError(e: unknown): void {
++    logger.error("FreeChat: failed to save burn-after-read", e);
++    Modal.createDialog(ErrorDialog, {
++        title: ft("burn_error_title"),
++        description: e instanceof Error ? e.message : String(e),
++    });
++}
++
++/** The global default, re-read whenever account data changes. */
++function useGlobalReadTtl(): number {
++    const client = useContext(MatrixClientContext);
++    const [ttl, setTtl] = useState(() => getGlobalReadTtl(client));
++    const onAccountData = useCallback(
++        (event: MatrixEvent) => {
++            if (event.getType() === DISAPPEARING_EVENT_TYPE) setTtl(getGlobalReadTtl(client));
++        },
++        [client],
++    );
++    useTypedEventEmitter(client, ClientEvent.AccountData, onAccountData);
++    return ttl;
++}
++
++/** User settings: the default for every chat. */
++export function GlobalReadBurnSettings(): JSX.Element {
++    const client = useContext(MatrixClientContext);
++    const ttl = useGlobalReadTtl();
++    const [pending, setPending] = useState<number | null>(null);
++
++    const onChange = async (value: string): Promise<void> => {
++        const next = Number(value);
++        setPending(next);
++        try {
++            await client.setAccountData(DISAPPEARING_EVENT_TYPE as any, { read_ttl: next } as any);
++        } catch (e) {
++            showError(e);
++        } finally {
++            setPending(null);
++        }
++    };
++
++    return (
++        <SettingsFieldset legend={ft("burn_legend")} description={ft("burn_description")}>
++            <StyledRadioGroup
++                name="freechatReadBurnGlobal"
++                value={String(pending ?? ttl)}
++                onChange={onChange}
++                disabled={pending !== null}
++                definitions={presetDefinitions(ttl)}
++            />
++        </SettingsFieldset>
++    );
++}
++
++/** Room settings: override the default for this chat, or follow it. */
++export function RoomReadBurnSettings({ room }: { room: Room }): JSX.Element {
++    const client = useContext(MatrixClientContext);
++    const globalTtl = useGlobalReadTtl();
++    const [override, setOverride] = useState(() => getRoomReadTtl(room));
++    const [pending, setPending] = useState<string | null>(null);
++
++    const onRoomAccountData = useCallback(
++        (event: MatrixEvent) => {
++            if (event.getType() === DISAPPEARING_EVENT_TYPE) setOverride(getRoomReadTtl(room));
++        },
++        [room],
++    );
++    useTypedEventEmitter(room, RoomEvent.AccountData, onRoomAccountData);
++
++    const current = override === undefined ? FOLLOW_GLOBAL : String(override);
++    const definitions = [
++        { value: FOLLOW_GLOBAL, label: ft("burn_follow_global", { duration: formatReadTtl(globalTtl) }) },
++        ...presetDefinitions(override ?? 0),
++    ];
++
++    const onChange = async (value: string): Promise<void> => {
++        setPending(value);
++        try {
++            // An empty object clears the override (account data cannot be deleted).
++            const content = value === FOLLOW_GLOBAL ? {} : { read_ttl: Number(value) };
++            await client.setRoomAccountData(room.roomId, DISAPPEARING_EVENT_TYPE as any, content as any);
++        } catch (e) {
++            showError(e);
++        } finally {
++            setPending(null);
++        }
++    };
++
++    return (
++        <SettingsFieldset legend={ft("burn_room_legend")} description={ft("burn_description")}>
++            <StyledRadioGroup
++                name="freechatReadBurnRoom"
++                value={pending ?? current}
++                onChange={onChange}
++                disabled={pending !== null}
++                definitions={definitions}
++            />
++        </SettingsFieldset>
++    );
++}
+diff --git a/apps/web/src/freechat/disappearing.test.ts b/apps/web/src/freechat/disappearing.test.ts
+index d6b77d775f..17655e5a06 100644
+--- a/apps/web/src/freechat/disappearing.test.ts
++++ b/apps/web/src/freechat/disappearing.test.ts
+@@ -12,7 +12,16 @@ Please see LICENSE files in the repository root for full details.
+ import { MatrixEvent } from "matrix-js-sdk/src/matrix";
+ import { describe, it, expect } from "vitest";
+ 
+-import { EXPIRED_KEY, formatTtl, isExpiredRedaction, textForDisappearingEvent } from "./disappearing";
++import {
++    EXPIRED_KEY,
++    formatReadTtl,
++    formatTtl,
++    getGlobalReadTtl,
++    getRoomReadTtl,
++    isExpiredRedaction,
++    isRoomAdmin,
++    textForDisappearingEvent,
++} from "./disappearing";
+ 
+ function redacted(redactionContent: Record<string, unknown>): MatrixEvent {
+     return new MatrixEvent({
+@@ -83,3 +92,39 @@ describe("textForDisappearingEvent", () => {
+         );
+     });
+ });
++
++describe("isRoomAdmin", () => {
++    const stateWith = (powerLevel: number | undefined) =>
++        ({ getMember: () => (powerLevel === undefined ? null : { powerLevel }) }) as any;
++
++    it("needs power level 100; creators count as Infinity", () => {
++        expect(isRoomAdmin(stateWith(100), "@a:x")).toBe(true);
++        expect(isRoomAdmin(stateWith(Infinity), "@a:x")).toBe(true);
++        expect(isRoomAdmin(stateWith(50), "@a:x")).toBe(false);
++        expect(isRoomAdmin(stateWith(undefined), "@a:x")).toBe(false);
++    });
++});
++
++describe("read ttl helpers", () => {
++    const withContent = (content: Record<string, unknown> | undefined) =>
++        content === undefined ? undefined : new MatrixEvent({ type: "com.freechat.disappearing", content });
++
++    it("reads the global default, treating missing or invalid as off", () => {
++        expect(getGlobalReadTtl({ getAccountData: () => withContent({ read_ttl: 30 }) } as any)).toBe(30);
++        expect(getGlobalReadTtl({ getAccountData: () => withContent({ read_ttl: "30" }) } as any)).toBe(0);
++        expect(getGlobalReadTtl({ getAccountData: () => undefined } as any)).toBe(0);
++    });
++
++    it("distinguishes a room override from following the default", () => {
++        expect(getRoomReadTtl({ getAccountData: () => withContent({ read_ttl: 0 }) } as any)).toBe(0);
++        expect(getRoomReadTtl({ getAccountData: () => withContent({}) } as any)).toBeUndefined();
++        expect(getRoomReadTtl({ getAccountData: () => undefined } as any)).toBeUndefined();
++    });
++
++    it("formats delays", () => {
++        expect(formatReadTtl(0)).toBe("Off");
++        expect(formatReadTtl(5)).toBe("5 seconds");
++        expect(formatReadTtl(300)).toBe("5 minutes");
++        expect(formatReadTtl(3600)).toBe("1 hour");
++    });
++});
+diff --git a/apps/web/src/freechat/disappearing.ts b/apps/web/src/freechat/disappearing.ts
+index f2d924bedc..ad9e82420f 100644
+--- a/apps/web/src/freechat/disappearing.ts
++++ b/apps/web/src/freechat/disappearing.ts
+@@ -13,7 +13,7 @@ Please see LICENSE files in the repository root for full details.
+  * "message deleted" placeholder.
+  */
+ 
+-import { type MatrixEvent, type Room, type RoomState } from "matrix-js-sdk/src/matrix";
++import { type MatrixClient, type MatrixEvent, type Room, type RoomState } from "matrix-js-sdk/src/matrix";
+ 
+ import { ft } from "./i18n";
+ 
+@@ -57,6 +57,40 @@ export function formatTtl(ttl: number): string {
+     return ft("seconds", { count: ttl });
+ }
+ 
++/** Power level needed to change the room TTL; v12 creators count as Infinity. */
++const ADMIN_LEVEL = 100;
++
++/** Only room admins may change the room TTL; the server enforces this too. */
++export function isRoomAdmin(state: RoomState, userId: string): boolean {
++    return (state.getMember(userId)?.powerLevel ?? 0) >= ADMIN_LEVEL;
++}
++
++/** Personal burn-after-read presets in seconds, zero meaning off. */
++export const READ_TTL_PRESETS: readonly number[] = [0, 5, 30, 60, 5 * 60, HOUR];
++
++function readTtlFromContent(content: Record<string, unknown> | undefined): number | undefined {
++    const ttl = content?.read_ttl;
++    return typeof ttl === "number" && Number.isFinite(ttl) && ttl >= 0 ? Math.floor(ttl) : undefined;
++}
++
++/** The user's global burn-after-read delay, zero when off. */
++export function getGlobalReadTtl(client: MatrixClient): number {
++    return readTtlFromContent(client.getAccountData(DISAPPEARING_EVENT_TYPE as any)?.getContent()) ?? 0;
++}
++
++/** The user's per-room override, or undefined when the room follows the global setting. */
++export function getRoomReadTtl(room: Room): number | undefined {
++    return readTtlFromContent(room.getAccountData(DISAPPEARING_EVENT_TYPE)?.getContent());
++}
++
++export function formatReadTtl(ttl: number): string {
++    if (ttl <= 0) return ft("off");
++    if (ttl === HOUR) return ft("hour");
++    if (ttl % HOUR === 0) return ft("hours", { count: ttl / HOUR });
++    if (ttl % 60 === 0) return ft("minutes", { count: ttl / 60 });
++    return ft("seconds", { count: ttl });
++}
++
+ /** True for a message the server deleted because it expired. */
+ export function isExpiredRedaction(ev: MatrixEvent): boolean {
+     if (!ev.isRedacted()) return false;
+diff --git a/apps/web/src/freechat/i18n.ts b/apps/web/src/freechat/i18n.ts
+index dc4eabf929..64d003ec83 100644
+--- a/apps/web/src/freechat/i18n.ts
++++ b/apps/web/src/freechat/i18n.ts
+@@ -32,6 +32,14 @@ const en = {
+     disabled: "%(sender)s turned off auto-delete.",
+     error_title: "Could not change auto-delete",
+     composer_hint: "Messages auto-delete after %(duration)s",
++    burn_section: "Burn after reading",
++    burn_legend: "Burn my messages after they are read",
++    burn_description:
++        "Messages you send are deleted for everyone this long after every other member has read them. Applies to messages sent from now on.",
++    burn_room_legend: "Burn my messages after reading in this chat",
++    burn_follow_global: "Same as my default (%(duration)s)",
++    burn_error_title: "Could not change burn-after-read",
++    admin_only: "Only room admins can change this.",
+ };
+ 
+ type Key = keyof typeof en;
+@@ -53,6 +61,13 @@ const zhHans: Record<Key, string> = {
+     disabled: "%(sender)s 关闭了自动删除。",
+     error_title: "无法修改自动删除设置",
+     composer_hint: "消息将在 %(duration)s 后自动删除",
++    burn_section: "阅后即焚",
++    burn_legend: "我的消息阅后即焚",
++    burn_description: "你发出的消息，在所有其他成员都读过之后，经过设定时间从所有人那里删除。只对之后发出的消息生效。",
++    burn_room_legend: "这个聊天里我的消息阅后即焚",
++    burn_follow_global: "跟随我的默认设置（%(duration)s）",
++    burn_error_title: "无法修改阅后即焚设置",
++    admin_only: "只有群主和管理员可以修改。",
+ };
+ 
+ const zhHant: Record<Key, string> = {
+@@ -72,6 +87,13 @@ const zhHant: Record<Key, string> = {
+     disabled: "%(sender)s 關閉了自動刪除。",
+     error_title: "無法修改自動刪除設定",
+     composer_hint: "訊息將在 %(duration)s 後自動刪除",
++    burn_section: "閱後即焚",
++    burn_legend: "我的訊息閱後即焚",
++    burn_description: "你發出的訊息，在所有其他成員都讀過之後，經過設定時間從所有人那裡刪除。只對之後發出的訊息生效。",
++    burn_room_legend: "這個聊天裡我的訊息閱後即焚",
++    burn_follow_global: "跟隨我的預設設定（%(duration)s）",
++    burn_error_title: "無法修改閱後即焚設定",
++    admin_only: "只有群主和管理員可以修改。",
+ };
+ 
+ function table(): Record<Key, string> {
+diff --git a/apps/web/src/shouldHideEvent.ts b/apps/web/src/shouldHideEvent.ts
+index c892ed835c..63d919102a 100644
+--- a/apps/web/src/shouldHideEvent.ts
++++ b/apps/web/src/shouldHideEvent.ts
+@@ -12,7 +12,6 @@ import { KnownMembership } from "matrix-js-sdk/src/types";
+ import SettingsStore from "./settings/SettingsStore";
+ import { type IRoomState } from "./components/structures/RoomView";
+ import { type SettingKey } from "./settings/Settings.tsx";
+-import { isExpiredRedaction } from "./freechat/disappearing";
+ 
+ interface IDiff {
+     isMemberEvent: boolean;
+@@ -60,8 +59,9 @@ export default function shouldHideEvent(ev: MatrixEvent, ctx?: IRoomState): bool
+         ? (name: keyof IRoomState) => ctx[name]
+         : (name: SettingKey) => SettingsStore.getValue(name, ev.getRoomId());
+ 
+-    // FreeChat: expired disappearing messages vanish without a placeholder
+-    if (isExpiredRedaction(ev)) return true;
++    // FreeChat: deleted messages vanish without a placeholder, like Telegram.
++    // Deleted thread roots stay so their threads remain reachable.
++    if (ev.isRedacted() && !ev.getThread()) return true;
+ 
+     // Hide redacted events
+     // Deleted events with a thread are always shown regardless of user preference

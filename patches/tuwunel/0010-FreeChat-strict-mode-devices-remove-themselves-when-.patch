@@ -1,0 +1,224 @@
+From a00ac40bd3de6c4ed238a024b46297f1f4cab837 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 10/14] FreeChat: strict-mode devices remove themselves when
+ idle
+
+A device with ID FCS<minutes>_<random> is deleted once its token has not been
+used for that long (plus a minute). Last use is tracked in memory only.
+---
+ src/api/router/auth.rs                        |  10 +-
+ src/service/rooms/disappearing/mod.rs         |   6 ++
+ .../rooms/disappearing/strict_device.rs       | 100 ++++++++++++++++++
+ src/service/rooms/disappearing/tests.rs       |  19 ++++
+ src/service/users/device.rs                   |   5 +
+ 5 files changed, 139 insertions(+), 1 deletion(-)
+ create mode 100644 src/service/rooms/disappearing/strict_device.rs
+
+diff --git a/src/api/router/auth.rs b/src/api/router/auth.rs
+index 6b74dd5a1..f45d480bb 100644
+--- a/src/api/router/auth.rs
++++ b/src/api/router/auth.rs
+@@ -188,7 +188,15 @@ async fn find_token(services: &Services, token: Option<&str>) -> Result<Token> {
+ 	pin_mut!(user_token, appservice_token);
+ 	match select_ok([user_token.left_future(), appservice_token.right_future()]).await {
+ 		| Err(e) if !e.is_not_found() => Err(e),
+-		| Ok((token, _)) => Ok(token),
++		| Ok((token, _)) => {
++			// FreeChat strict mode: keep idle strict devices from being removed.
++			if let Token::User((user_id, device_id, _)) = &token {
++				services
++					.disappearing
++					.note_device_use(user_id, device_id);
++			}
++			Ok(token)
++		},
+ 		| _ => Ok(Token::Invalid),
+ 	}
+ }
+diff --git a/src/service/rooms/disappearing/mod.rs b/src/service/rooms/disappearing/mod.rs
+index 175bc16b4..3792bbf16 100644
+--- a/src/service/rooms/disappearing/mod.rs
++++ b/src/service/rooms/disappearing/mod.rs
+@@ -27,6 +27,7 @@
+ 
+ pub mod join_password;
+ pub mod read_burn;
++pub mod strict_device;
+ #[cfg(test)]
+ mod tests;
+ 
+@@ -115,6 +116,7 @@ pub struct Service {
+ 	readburn_readpos: Arc<Map>,
+ 	roomid_joinpassword: Arc<Map>,
+ 	join_attempts: join_password::Attempts,
++	strict_last_use: strict_device::LastUse,
+ }
+ 
+ #[derive(Clone, Copy, Debug, Default, Deserialize)]
+@@ -133,12 +135,16 @@ fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
+ 			readburn_readpos: args.db["readburn_readpos"].clone(),
+ 			roomid_joinpassword: args.db["roomid_joinpassword"].clone(),
+ 			join_attempts: join_password::Attempts::default(),
++			strict_last_use: strict_device::LastUse::default(),
+ 		}))
+ 	}
+ 
+ 	async fn worker(self: Arc<Self>) -> Result {
+ 		let mut last_retention_sweep: Option<std::time::Instant> = None;
++		self.track_existing_strict_devices().await;
+ 		loop {
++			self.expire_strict_devices().await;
++
+ 			if let Err(e) = self.expire_due().await {
+ 				warn!("Disappearing messages sweep failed: {e}");
+ 			}
+diff --git a/src/service/rooms/disappearing/strict_device.rs b/src/service/rooms/disappearing/strict_device.rs
+new file mode 100644
+index 000000000..38093a31a
+--- /dev/null
++++ b/src/service/rooms/disappearing/strict_device.rs
+@@ -0,0 +1,100 @@
++//! FreeChat strict mode: devices that remove themselves.
++//!
++//! A client in strict mode logs in with a device ID of the form
++//! `FCS<minutes>_<random>`. Such a device is deleted, with its keys, tokens and
++//! pushers, once its access token has not been used for `<minutes>` (plus a
++//! little grace). That covers a client that could not sign out itself: a
++//! killed app, a crashed browser, a phone that is switched off or taken.
++//!
++//! When a token was last used is kept in memory only. After a restart every
++//! strict device gets one full idle period from the moment the server started.
++
++use std::{
++	collections::HashMap,
++	sync::Mutex,
++	time::{Duration, Instant},
++};
++
++use futures::StreamExt;
++use ruma::{DeviceId, OwnedDeviceId, OwnedUserId, UserId};
++use tuwunel_core::{implement, info};
++
++pub const STRICT_DEVICE_PREFIX: &str = "FCS";
++const MAX_IDLE_MINUTES: u64 = 24 * 60;
++/// Extra time on top of the idle period, so a device in the middle of a
++/// long-poll or a slow network is not cut off.
++const GRACE: Duration = Duration::from_secs(60);
++
++#[derive(Default)]
++pub(super) struct LastUse(Mutex<HashMap<(OwnedUserId, OwnedDeviceId), (Instant, Duration)>>);
++
++/// The idle period encoded in a strict device ID, or `None` for other devices.
++pub fn strict_idle(device_id: &DeviceId) -> Option<Duration> {
++	let rest = device_id.as_str().strip_prefix(STRICT_DEVICE_PREFIX)?;
++	let (minutes, random) = rest.split_once('_')?;
++	if random.is_empty() || minutes.is_empty() || !minutes.bytes().all(|b| b.is_ascii_digit()) {
++		return None;
++	}
++	let minutes: u64 = minutes.parse().ok()?;
++	(1..=MAX_IDLE_MINUTES)
++		.contains(&minutes)
++		.then(|| Duration::from_secs(minutes * 60))
++}
++
++/// Records that a strict device just used its access token.
++#[implement(super::Service)]
++pub fn note_device_use(&self, user_id: &UserId, device_id: &DeviceId) {
++	let Some(idle) = strict_idle(device_id) else {
++		return;
++	};
++	self.strict_last_use
++		.0
++		.lock()
++		.expect("locked")
++		.insert((user_id.to_owned(), device_id.to_owned()), (Instant::now(), idle));
++}
++
++/// At startup: give every strict device already in the database one idle
++/// period from now.
++#[implement(super::Service)]
++pub(super) async fn track_existing_strict_devices(&self) {
++	let users = &self.services.users;
++	let mut found = Vec::new();
++	let mut local_users = users.list_local_users().boxed();
++	while let Some(user_id) = local_users.next().await {
++		let mut devices = users.all_device_ids(user_id).boxed();
++		while let Some(device_id) = devices.next().await {
++			if strict_idle(device_id).is_some() {
++				found.push((user_id.to_owned(), device_id.to_owned()));
++			}
++		}
++	}
++	for (user_id, device_id) in found {
++		self.note_device_use(&user_id, &device_id);
++	}
++}
++
++/// Deletes strict devices that have been idle for too long.
++#[implement(super::Service)]
++pub(super) async fn expire_strict_devices(&self) {
++	let expired: Vec<_> = {
++		let mut last_use = self.strict_last_use.0.lock().expect("locked");
++		let expired: Vec<_> = last_use
++			.iter()
++			.filter(|(_, (at, idle))| at.elapsed() >= idle.saturating_add(GRACE))
++			.map(|(key, _)| key.clone())
++			.collect();
++		for key in &expired {
++			last_use.remove(key);
++		}
++		expired
++	};
++
++	for (user_id, device_id) in expired {
++		info!("Removing idle strict-mode device");
++		self.services
++			.users
++			.remove_device(&user_id, &device_id)
++			.await;
++	}
++}
+diff --git a/src/service/rooms/disappearing/tests.rs b/src/service/rooms/disappearing/tests.rs
+index c53e0af07..068b8c76b 100644
+--- a/src/service/rooms/disappearing/tests.rs
++++ b/src/service/rooms/disappearing/tests.rs
+@@ -82,3 +82,22 @@ fn expiry_takes_the_earlier_of_room_ttl_and_server_cap() {
+ 	assert_eq!(effective_ttl(60, 3600), Some(60));
+ 	assert_eq!(effective_ttl(7200, 3600), Some(3600));
+ }
++
++#[test]
++fn strict_device_ids_carry_their_idle_time() {
++	use std::time::Duration;
++
++	use ruma::device_id;
++
++	use super::strict_device::strict_idle;
++
++	assert_eq!(strict_idle(device_id!("FCS5_ab12")), Some(Duration::from_secs(300)));
++	assert_eq!(strict_idle(device_id!("FCS1440_x")), Some(Duration::from_secs(86400)));
++	assert_eq!(strict_idle(device_id!("FCS0_x")), None);
++	assert_eq!(strict_idle(device_id!("FCS1441_x")), None);
++	assert_eq!(strict_idle(device_id!("FCS5_")), None);
++	assert_eq!(strict_idle(device_id!("FCS_x")), None);
++	assert_eq!(strict_idle(device_id!("FCSx5_y")), None);
++	assert_eq!(strict_idle(device_id!("ABCDEFGH")), None);
++	assert_eq!(strict_idle(device_id!("fcs5_x")), None);
++}
+diff --git a/src/service/users/device.rs b/src/service/users/device.rs
+index 1b0e6402d..e0e1e4b8f 100644
+--- a/src/service/users/device.rs
++++ b/src/service/users/device.rs
+@@ -243,6 +243,11 @@ pub async fn set_access_token(
+ 		"Caller must supply an access_token >= {TOKEN_LENGTH} chars."
+ 	);
+ 
++	// FreeChat strict mode: a new token starts the device's idle period.
++	self.services
++		.disappearing
++		.note_device_use(user_id, device_id);
++
+ 	if let Some(refresh_token) = refresh_token {
+ 		self.set_refresh_token(user_id, device_id, refresh_token)
+ 			.await?;

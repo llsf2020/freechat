@@ -1,0 +1,642 @@
+From 9d4e8cbc3caa5c582ba4d1569b55f1dc3d1bb110 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 01/12] FreeChat: disappearing messages
+
+- Room setting (Security & Privacy) to pick a TTL via the
+  com.freechat.disappearing state event
+- Timeline notice when the TTL changes
+- Hide messages the server expired (com.freechat.expired) without a
+  'message deleted' placeholder
+- List attachment MXCs in plaintext (com.freechat.media) on encrypted
+  events so the server can delete the files on expiry
+
+New code lives in apps/web/src/freechat/; upstream files only get
+small hooks.
+---
+ apps/web/src/MatrixClientPeg.ts               |  2 +
+ apps/web/src/TextForEvent.tsx                 |  4 +
+ .../tabs/room/SecurityRoomSettingsTab.tsx     |  2 +
+ apps/web/src/events/EventTileFactory.tsx      |  5 ++
+ .../freechat/DisappearingMessagesSettings.tsx | 71 +++++++++++++++
+ apps/web/src/freechat/disappearing.test.ts    | 85 ++++++++++++++++++
+ apps/web/src/freechat/disappearing.ts         | 72 ++++++++++++++++
+ apps/web/src/freechat/i18n.ts                 | 86 +++++++++++++++++++
+ apps/web/src/freechat/mediaHint.test.ts       | 78 +++++++++++++++++
+ apps/web/src/freechat/mediaHint.ts            | 65 ++++++++++++++
+ apps/web/src/shouldHideEvent.ts               |  4 +
+ 11 files changed, 474 insertions(+)
+ create mode 100644 apps/web/src/freechat/DisappearingMessagesSettings.tsx
+ create mode 100644 apps/web/src/freechat/disappearing.test.ts
+ create mode 100644 apps/web/src/freechat/disappearing.ts
+ create mode 100644 apps/web/src/freechat/i18n.ts
+ create mode 100644 apps/web/src/freechat/mediaHint.test.ts
+ create mode 100644 apps/web/src/freechat/mediaHint.ts
+
+diff --git a/apps/web/src/MatrixClientPeg.ts b/apps/web/src/MatrixClientPeg.ts
+index 1f1209a915..bcbf0f1494 100644
+--- a/apps/web/src/MatrixClientPeg.ts
++++ b/apps/web/src/MatrixClientPeg.ts
+@@ -27,6 +27,7 @@ import PlatformPeg from "./PlatformPeg";
+ import SdkConfig from "./SdkConfig";
+ import { setDeviceIsolationMode } from "./settings/controllers/DeviceIsolationModeController.ts";
+ import { initialiseDehydrationIfEnabled } from "./utils/device/dehydration";
++import { installMediaHint } from "./freechat/mediaHint";
+ 
+ export interface MatrixClientPegAssignOpts {
+     /**
+@@ -295,6 +296,7 @@ class MatrixClientPegClass implements IMatrixClientPeg {
+         MatrixActionCreators.start(this.matrixClient);
+         MatrixClientBackedSettingsHandler.matrixClient = this.matrixClient;
+         MatrixClientBackedController.matrixClient = this.matrixClient;
++        installMediaHint(this.matrixClient); // FreeChat
+ 
+         return opts;
+     }
+diff --git a/apps/web/src/TextForEvent.tsx b/apps/web/src/TextForEvent.tsx
+index 63896bb7de..706c1f91df 100644
+--- a/apps/web/src/TextForEvent.tsx
++++ b/apps/web/src/TextForEvent.tsx
+@@ -41,6 +41,7 @@ import { getSenderName } from "./utils/event/getSenderName";
+ import PosthogTrackers from "./PosthogTrackers.ts";
+ import { ElementCallEventType } from "./call-types.ts";
+ import Spoiler from "./components/views/elements/Spoiler.tsx";
++import { DISAPPEARING_EVENT_TYPE, textForDisappearingEvent } from "./freechat/disappearing";
+ 
+ function getRoomMemberDisplayname(client: MatrixClient, event: MatrixEvent, userId = event.getSender()): string {
+     const roomId = event.getRoomId();
+@@ -954,6 +955,9 @@ for (const evType of ALL_RULE_TYPES) {
+     stateHandlers[evType] = textForMjolnirEvent;
+ }
+ 
++// FreeChat: disappearing messages TTL changes
++stateHandlers[DISAPPEARING_EVENT_TYPE] = textForDisappearingEvent;
++
+ // Add both stable and unstable m.call events
+ for (const evType of ElementCallEventType.names) {
+     stateHandlers[evType] = textForCallEvent;
+diff --git a/apps/web/src/components/views/settings/tabs/room/SecurityRoomSettingsTab.tsx b/apps/web/src/components/views/settings/tabs/room/SecurityRoomSettingsTab.tsx
+index 0c6f6a03a7..47fdc70fb7 100644
+--- a/apps/web/src/components/views/settings/tabs/room/SecurityRoomSettingsTab.tsx
++++ b/apps/web/src/components/views/settings/tabs/room/SecurityRoomSettingsTab.tsx
+@@ -43,6 +43,7 @@ import SdkConfig from "../../../../../SdkConfig";
+ import { shouldForceDisableEncryption } from "../../../../../utils/crypto/shouldForceDisableEncryption";
+ import { Caption } from "../../../typography/Caption";
+ import { MEGOLM_ENCRYPTION_ALGORITHM } from "../../../../../utils/crypto";
++import DisappearingMessagesSettings from "../../../../../freechat/DisappearingMessagesSettings";
+ 
+ interface IProps {
+     room: Room;
+@@ -584,6 +585,7 @@ export default class SecurityRoomSettingsTab extends React.Component<IProps, ISt
+                         </SettingsFieldset>
+                         {this.renderJoinRule()}
+                         {historySection}
++                        <DisappearingMessagesSettings room={room} />
+                     </SettingsSection>
+                 </Form.Root>
+             </SettingsTab>
+diff --git a/apps/web/src/events/EventTileFactory.tsx b/apps/web/src/events/EventTileFactory.tsx
+index 82970ec52d..515dfcd420 100644
+--- a/apps/web/src/events/EventTileFactory.tsx
++++ b/apps/web/src/events/EventTileFactory.tsx
+@@ -58,6 +58,7 @@ import { ViewSourceEventViewModel } from "../viewmodels/room/timeline/event-tile
+ import { ElementCallEventType } from "../call-types";
+ import { RootCallTileViewModel } from "../viewmodels/room/timeline/event-tile/call/RootCallTileViewModel";
+ import { SDKContext } from "../contexts/SDKContext";
++import { DISAPPEARING_EVENT_TYPE } from "../freechat/disappearing";
+ 
+ // Subset of EventTile's IProps plus some mixins
+ export interface EventTileTypeProps extends Pick<
+@@ -250,6 +251,9 @@ for (const evType of ElementCallEventType.names) {
+     STATE_EVENT_TILE_TYPES.set(evType, CallEventFactory);
+ }
+ 
++// FreeChat: disappearing messages TTL changes
++STATE_EVENT_TILE_TYPES.set(DISAPPEARING_EVENT_TYPE, TextualEventFactory);
++
+ // Add all the Mjolnir stuff to the renderer too
+ for (const evType of ALL_RULE_TYPES) {
+     STATE_EVENT_TILE_TYPES.set(evType, TextualEventFactory);
+@@ -271,6 +275,7 @@ const SINGULAR_STATE_EVENTS = new Set([
+     EventType.RoomTombstone,
+     EventType.RoomJoinRules,
+     EventType.RoomGuestAccess,
++    DISAPPEARING_EVENT_TYPE, // FreeChat
+ ]);
+ 
+ /**
+diff --git a/apps/web/src/freechat/DisappearingMessagesSettings.tsx b/apps/web/src/freechat/DisappearingMessagesSettings.tsx
+new file mode 100644
+index 0000000000..4491f37386
+--- /dev/null
++++ b/apps/web/src/freechat/DisappearingMessagesSettings.tsx
+@@ -0,0 +1,71 @@
++/*
++Copyright 2026 FreeChat contributors
++
++SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++Please see LICENSE files in the repository root for full details.
++*/
++
++/*
++ * FreeChat: room setting to pick the disappearing-messages TTL.
++ */
++
++import React, { type JSX, useContext, useState } from "react";
++import { type Room } from "matrix-js-sdk/src/matrix";
++import { logger } from "matrix-js-sdk/src/logger";
++
++import MatrixClientContext from "../contexts/MatrixClientContext";
++import { useRoomState } from "../hooks/useRoomState";
++import Modal from "../Modal";
++import ErrorDialog from "../components/views/dialogs/ErrorDialog";
++import StyledRadioGroup from "../components/views/elements/StyledRadioGroup";
++import SettingsFieldset from "../components/views/settings/SettingsFieldset";
++import { DISAPPEARING_EVENT_TYPE, TTL_PRESETS, formatTtl, getStateTtl } from "./disappearing";
++import { ft } from "./i18n";
++
++interface Props {
++    room: Room;
++}
++
++export default function DisappearingMessagesSettings({ room }: Props): JSX.Element {
++    const client = useContext(MatrixClientContext);
++    const { ttl, canChange } = useRoomState(room, (state) => ({
++        ttl: getStateTtl(state),
++        canChange: state.maySendStateEvent(DISAPPEARING_EVENT_TYPE, client.getSafeUserId()),
++    }));
++    const [pending, setPending] = useState<number | null>(null);
++
++    const definitions = TTL_PRESETS.map((p) => ({ value: String(p.ttl), label: p.label() }));
++    // A TTL set by another client that is not a preset still shows as selected.
++    if (!TTL_PRESETS.some((p) => p.ttl === ttl)) {
++        definitions.push({ value: String(ttl), label: formatTtl(ttl) });
++    }
++
++    const onChange = async (value: string): Promise<void> => {
++        const next = Number(value);
++        setPending(next);
++        try {
++            // Ruma/Matrix custom state type; js-sdk types it as a known key only.
++            await client.sendStateEvent(room.roomId, DISAPPEARING_EVENT_TYPE as any, { ttl: next }, "");
++        } catch (e) {
++            logger.error("FreeChat: failed to set disappearing TTL", e);
++            Modal.createDialog(ErrorDialog, {
++                title: ft("error_title"),
++                description: e instanceof Error ? e.message : String(e),
++            });
++        } finally {
++            setPending(null);
++        }
++    };
++
++    return (
++        <SettingsFieldset legend={ft("settings_legend")} description={ft("settings_description")}>
++            <StyledRadioGroup
++                name="freechatDisappearing"
++                value={String(pending ?? ttl)}
++                onChange={onChange}
++                disabled={!canChange || pending !== null}
++                definitions={definitions}
++            />
++        </SettingsFieldset>
++    );
++}
+diff --git a/apps/web/src/freechat/disappearing.test.ts b/apps/web/src/freechat/disappearing.test.ts
+new file mode 100644
+index 0000000000..d6b77d775f
+--- /dev/null
++++ b/apps/web/src/freechat/disappearing.test.ts
+@@ -0,0 +1,85 @@
++/*
++Copyright 2026 FreeChat contributors
++
++SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++Please see LICENSE files in the repository root for full details.
++*/
++
++/*
++ * FreeChat: disappearing messages helpers.
++ */
++
++import { MatrixEvent } from "matrix-js-sdk/src/matrix";
++import { describe, it, expect } from "vitest";
++
++import { EXPIRED_KEY, formatTtl, isExpiredRedaction, textForDisappearingEvent } from "./disappearing";
++
++function redacted(redactionContent: Record<string, unknown>): MatrixEvent {
++    return new MatrixEvent({
++        type: "m.room.message",
++        event_id: "$msg",
++        sender: "@a:example.org",
++        content: {},
++        unsigned: {
++            redacted_because: {
++                type: "m.room.redaction",
++                event_id: "$redaction",
++                sender: "@a:example.org",
++                origin_server_ts: 0,
++                content: { redacts: "$msg", ...redactionContent },
++            } as any,
++        },
++    });
++}
++
++describe("isExpiredRedaction", () => {
++    it("is true for a server expiry redaction", () => {
++        expect(isExpiredRedaction(redacted({ [EXPIRED_KEY]: true }))).toBe(true);
++    });
++
++    it("is false for a manual redaction", () => {
++        expect(isExpiredRedaction(redacted({}))).toBe(false);
++    });
++
++    it("is false for a live message", () => {
++        const ev = new MatrixEvent({ type: "m.room.message", content: { body: "hi", msgtype: "m.text" } });
++        expect(isExpiredRedaction(ev)).toBe(false);
++    });
++});
++
++describe("formatTtl", () => {
++    it("uses preset labels", () => {
++        expect(formatTtl(3600)).toBe("1 hour");
++        expect(formatTtl(86400)).toBe("1 day");
++    });
++
++    it("falls back to the largest whole unit", () => {
++        expect(formatTtl(2 * 86400)).toBe("2 days");
++        expect(formatTtl(2 * 3600)).toBe("2 hours");
++        expect(formatTtl(300)).toBe("5 minutes");
++        expect(formatTtl(45)).toBe("45 seconds");
++    });
++});
++
++describe("textForDisappearingEvent", () => {
++    const stateEvent = (content: Record<string, unknown>): MatrixEvent =>
++        new MatrixEvent({
++            type: "com.freechat.disappearing",
++            state_key: "",
++            sender: "@alice:example.org",
++            content,
++        });
++
++    it("describes enabling", () => {
++        expect(textForDisappearingEvent(stateEvent({ ttl: 604800 }))!()).toBe(
++            "@alice:example.org set messages to auto-delete after 1 week.",
++        );
++    });
++
++    it("describes disabling, including invalid content", () => {
++        expect(textForDisappearingEvent(stateEvent({ ttl: 0 }))!()).toBe("@alice:example.org turned off auto-delete.");
++        expect(textForDisappearingEvent(stateEvent({ ttl: "x" }))!()).toBe(
++            "@alice:example.org turned off auto-delete.",
++        );
++    });
++});
+diff --git a/apps/web/src/freechat/disappearing.ts b/apps/web/src/freechat/disappearing.ts
+new file mode 100644
+index 0000000000..f2d924bedc
+--- /dev/null
++++ b/apps/web/src/freechat/disappearing.ts
+@@ -0,0 +1,72 @@
++/*
++Copyright 2026 FreeChat contributors
++
++SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++Please see LICENSE files in the repository root for full details.
++*/
++
++/*
++ * FreeChat: disappearing messages.
++ *
++ * The homeserver enforces expiry by redacting messages; the client only lets
++ * users pick a TTL, explains it, and hides expired messages without a
++ * "message deleted" placeholder.
++ */
++
++import { type MatrixEvent, type Room, type RoomState } from "matrix-js-sdk/src/matrix";
++
++import { ft } from "./i18n";
++
++export const DISAPPEARING_EVENT_TYPE = "com.freechat.disappearing";
++export const EXPIRED_KEY = "com.freechat.expired";
++export const MEDIA_KEY = "com.freechat.media";
++
++const HOUR = 3600;
++const DAY = 24 * HOUR;
++
++/** TTL presets offered in the UI, in seconds. Zero means off. */
++export const TTL_PRESETS: ReadonlyArray<{ ttl: number; label: () => string }> = [
++    { ttl: 0, label: () => ft("off") },
++    { ttl: HOUR, label: () => ft("hour") },
++    { ttl: DAY, label: () => ft("day") },
++    { ttl: 7 * DAY, label: () => ft("week") },
++    { ttl: 30 * DAY, label: () => ft("month") },
++];
++
++function ttlFromContent(content: Record<string, unknown> | undefined): number {
++    const ttl = content?.ttl;
++    return typeof ttl === "number" && Number.isFinite(ttl) && ttl > 0 ? Math.floor(ttl) : 0;
++}
++
++/** The room's current TTL in seconds, zero when disabled. */
++export function getStateTtl(state: RoomState): number {
++    return ttlFromContent(state.getStateEvents(DISAPPEARING_EVENT_TYPE, "")?.getContent());
++}
++
++export function getRoomTtl(room: Room): number {
++    return getStateTtl(room.currentState);
++}
++
++/** Human-readable duration, preferring the preset labels. */
++export function formatTtl(ttl: number): string {
++    const preset = TTL_PRESETS.find((p) => p.ttl === ttl);
++    if (preset) return preset.label();
++    if (ttl % DAY === 0) return ft("days", { count: ttl / DAY });
++    if (ttl % HOUR === 0) return ft("hours", { count: ttl / HOUR });
++    if (ttl % 60 === 0) return ft("minutes", { count: ttl / 60 });
++    return ft("seconds", { count: ttl });
++}
++
++/** True for a message the server deleted because it expired. */
++export function isExpiredRedaction(ev: MatrixEvent): boolean {
++    if (!ev.isRedacted()) return false;
++    const because = ev.getUnsigned().redacted_because as { content?: Record<string, unknown> } | undefined;
++    return because?.content?.[EXPIRED_KEY] === true;
++}
++
++/** Timeline text for a TTL change. */
++export function textForDisappearingEvent(ev: MatrixEvent): (() => string) | null {
++    const sender = ev.sender?.name || ev.getSender() || "";
++    const ttl = ttlFromContent(ev.getContent());
++    return () => (ttl ? ft("changed", { sender, duration: formatTtl(ttl) }) : ft("disabled", { sender }));
++}
+diff --git a/apps/web/src/freechat/i18n.ts b/apps/web/src/freechat/i18n.ts
+new file mode 100644
+index 0000000000..dc4eabf929
+--- /dev/null
++++ b/apps/web/src/freechat/i18n.ts
+@@ -0,0 +1,86 @@
++/*
++Copyright 2026 FreeChat contributors
++
++SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++Please see LICENSE files in the repository root for full details.
++*/
++
++/*
++ * FreeChat: strings for FreeChat-only features.
++ *
++ * Kept out of the upstream en_EN.json/zh_Hans.json so syncing upstream
++ * translations never conflicts with ours.
++ */
++
++import { getCurrentLanguage } from "../languageHandler";
++
++const en = {
++    settings_legend: "Auto-delete messages",
++    settings_description:
++        "New messages are deleted for everyone, on every device and on the server, after the chosen time. Messages sent earlier are not affected.",
++    off: "Off",
++    hour: "1 hour",
++    day: "1 day",
++    week: "1 week",
++    month: "1 month",
++    custom: "%(duration)s",
++    seconds: "%(count)s seconds",
++    minutes: "%(count)s minutes",
++    hours: "%(count)s hours",
++    days: "%(count)s days",
++    changed: "%(sender)s set messages to auto-delete after %(duration)s.",
++    disabled: "%(sender)s turned off auto-delete.",
++    error_title: "Could not change auto-delete",
++    composer_hint: "Messages auto-delete after %(duration)s",
++};
++
++type Key = keyof typeof en;
++
++const zhHans: Record<Key, string> = {
++    settings_legend: "自动删除消息",
++    settings_description: "新消息会在设定时间后，从所有人的所有设备和服务器上删除。开启前发出的消息不受影响。",
++    off: "关闭",
++    hour: "1 小时",
++    day: "1 天",
++    week: "1 周",
++    month: "1 个月",
++    custom: "%(duration)s",
++    seconds: "%(count)s 秒",
++    minutes: "%(count)s 分钟",
++    hours: "%(count)s 小时",
++    days: "%(count)s 天",
++    changed: "%(sender)s 将消息设置为 %(duration)s 后自动删除。",
++    disabled: "%(sender)s 关闭了自动删除。",
++    error_title: "无法修改自动删除设置",
++    composer_hint: "消息将在 %(duration)s 后自动删除",
++};
++
++const zhHant: Record<Key, string> = {
++    settings_legend: "自動刪除訊息",
++    settings_description: "新訊息會在設定時間後，從所有人的所有裝置和伺服器上刪除。開啟前發出的訊息不受影響。",
++    off: "關閉",
++    hour: "1 小時",
++    day: "1 天",
++    week: "1 週",
++    month: "1 個月",
++    custom: "%(duration)s",
++    seconds: "%(count)s 秒",
++    minutes: "%(count)s 分鐘",
++    hours: "%(count)s 小時",
++    days: "%(count)s 天",
++    changed: "%(sender)s 將訊息設定為 %(duration)s 後自動刪除。",
++    disabled: "%(sender)s 關閉了自動刪除。",
++    error_title: "無法修改自動刪除設定",
++    composer_hint: "訊息將在 %(duration)s 後自動刪除",
++};
++
++function table(): Record<Key, string> {
++    const lang = (getCurrentLanguage() ?? "en").toLowerCase();
++    if (lang === "zh-hant" || lang === "zh-tw" || lang === "zh-hk") return zhHant;
++    if (lang.startsWith("zh")) return zhHans;
++    return en;
++}
++
++export function ft(key: Key, vars: Record<string, string | number> = {}): string {
++    return table()[key].replace(/%\((\w+)\)s/g, (match, name: string) => (name in vars ? String(vars[name]) : match));
++}
+diff --git a/apps/web/src/freechat/mediaHint.test.ts b/apps/web/src/freechat/mediaHint.test.ts
+new file mode 100644
+index 0000000000..43edb79566
+--- /dev/null
++++ b/apps/web/src/freechat/mediaHint.test.ts
+@@ -0,0 +1,78 @@
++/*
++Copyright 2026 FreeChat contributors
++
++SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++Please see LICENSE files in the repository root for full details.
++*/
++
++/*
++ * FreeChat: plaintext media hint on encrypted events.
++ */
++
++import { MatrixEvent } from "matrix-js-sdk/src/matrix";
++import { describe, it, expect, vi } from "vitest";
++
++import { MEDIA_KEY } from "./disappearing";
++import { addMediaHint, contentMxcs, installMediaHint } from "./mediaHint";
++
++function encryptedEvent(clearContent: Record<string, unknown>): MatrixEvent {
++    const ev = new MatrixEvent({
++        type: "m.room.encrypted",
++        room_id: "!r:example.org",
++        content: { algorithm: "m.megolm.v1.aes-sha2", ciphertext: "AAAA" },
++    });
++    // Simulate a decrypted / just-encrypted local echo.
++    vi.spyOn(ev, "getContent").mockReturnValue(clearContent);
++    return ev;
++}
++
++describe("contentMxcs", () => {
++    it("collects attachment and thumbnail URIs, deduplicated", () => {
++        expect(
++            contentMxcs({
++                file: { url: "mxc://s/a" },
++                info: { thumbnail_file: { url: "mxc://s/t" }, thumbnail_url: "mxc://s/a" },
++            }),
++        ).toEqual(["mxc://s/a", "mxc://s/t"]);
++    });
++
++    it("ignores non-mxc values", () => {
++        expect(contentMxcs({ url: "https://x", body: "hi" })).toEqual([]);
++    });
++});
++
++describe("addMediaHint", () => {
++    it("adds the hint to encrypted media", () => {
++        const ev = encryptedEvent({ msgtype: "m.image", file: { url: "mxc://s/img" } });
++        addMediaHint(ev);
++        expect(ev.getWireContent()[MEDIA_KEY]).toEqual(["mxc://s/img"]);
++    });
++
++    it("leaves encrypted text alone", () => {
++        const ev = encryptedEvent({ msgtype: "m.text", body: "hi" });
++        addMediaHint(ev);
++        expect(ev.getWireContent()[MEDIA_KEY]).toBeUndefined();
++    });
++
++    it("leaves unencrypted events alone", () => {
++        const ev = new MatrixEvent({ type: "m.room.message", content: { url: "mxc://s/a" } });
++        addMediaHint(ev);
++        expect(ev.getWireContent()[MEDIA_KEY]).toBeUndefined();
++    });
++});
++
++describe("installMediaHint", () => {
++    it("wraps the send function once and passes arguments through", async () => {
++        const send = vi.fn().mockResolvedValue({ event_id: "$e" });
++        const client = { sendEventHttpRequest: send } as any;
++
++        installMediaHint(client);
++        installMediaHint(client);
++
++        const ev = encryptedEvent({ file: { url: "mxc://s/f" } });
++        await expect(client.sendEventHttpRequest(ev, { q: 1 })).resolves.toEqual({ event_id: "$e" });
++        expect(send).toHaveBeenCalledTimes(1);
++        expect(send).toHaveBeenCalledWith(ev, { q: 1 });
++        expect(ev.getWireContent()[MEDIA_KEY]).toEqual(["mxc://s/f"]);
++    });
++});
+diff --git a/apps/web/src/freechat/mediaHint.ts b/apps/web/src/freechat/mediaHint.ts
+new file mode 100644
+index 0000000000..22b416e002
+--- /dev/null
++++ b/apps/web/src/freechat/mediaHint.ts
+@@ -0,0 +1,65 @@
++/*
++Copyright 2026 FreeChat contributors
++
++SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++Please see LICENSE files in the repository root for full details.
++*/
++
++/*
++ * FreeChat: plaintext media hint on encrypted events.
++ *
++ * The homeserver cannot read the MXC URIs inside an encrypted attachment, so
++ * it could never delete the file when the message disappears. Before an
++ * encrypted event goes over the wire we list its MXCs under
++ * `com.freechat.media` in the plaintext envelope. Only the opaque media IDs
++ * are exposed; the files themselves stay encrypted.
++ *
++ * matrix-js-sdk has no public hook for this, so we wrap its private
++ * `sendEventHttpRequest`, the single point every send (direct or scheduled)
++ * goes through after encryption. If an upstream js-sdk update renames it, the
++ * wrapper logs a warning and sending keeps working without the hint.
++ */
++
++import { type MatrixClient, type MatrixEvent } from "matrix-js-sdk/src/matrix";
++import { logger } from "matrix-js-sdk/src/logger";
++
++import { MEDIA_KEY } from "./disappearing";
++
++type SendFn = (event: MatrixEvent, ...rest: unknown[]) => Promise<unknown>;
++
++/** MXC URIs an attachment-bearing content references. */
++export function contentMxcs(content: Record<string, any>): string[] {
++    const candidates = [content.url, content.file?.url, content.info?.thumbnail_url, content.info?.thumbnail_file?.url];
++    const mxcs = candidates.filter((u): u is string => typeof u === "string" && u.startsWith("mxc://"));
++    return [...new Set(mxcs)];
++}
++
++/** Adds the hint to an encrypted event's wire content, if it has media. */
++export function addMediaHint(event: MatrixEvent): void {
++    if (!event.isEncrypted()) return;
++    const mxcs = contentMxcs(event.getContent());
++    if (mxcs.length) event.getWireContent()[MEDIA_KEY] = mxcs;
++}
++
++const INSTALLED = Symbol("freechatMediaHint");
++
++export function installMediaHint(client: MatrixClient): void {
++    const target = client as unknown as { sendEventHttpRequest?: SendFn; [INSTALLED]?: boolean };
++    if (target[INSTALLED]) return;
++    target[INSTALLED] = true;
++
++    const original = target.sendEventHttpRequest;
++    if (typeof original !== "function") {
++        logger.warn("FreeChat: js-sdk sendEventHttpRequest not found; encrypted media will not be auto-deleted");
++        return;
++    }
++
++    target.sendEventHttpRequest = function (this: unknown, event: MatrixEvent, ...rest: unknown[]) {
++        try {
++            addMediaHint(event);
++        } catch (e) {
++            logger.warn("FreeChat: failed to add media hint", e);
++        }
++        return original.call(this, event, ...rest);
++    };
++}
+diff --git a/apps/web/src/shouldHideEvent.ts b/apps/web/src/shouldHideEvent.ts
+index 64a0e1f0f9..c892ed835c 100644
+--- a/apps/web/src/shouldHideEvent.ts
++++ b/apps/web/src/shouldHideEvent.ts
+@@ -12,6 +12,7 @@ import { KnownMembership } from "matrix-js-sdk/src/types";
+ import SettingsStore from "./settings/SettingsStore";
+ import { type IRoomState } from "./components/structures/RoomView";
+ import { type SettingKey } from "./settings/Settings.tsx";
++import { isExpiredRedaction } from "./freechat/disappearing";
+ 
+ interface IDiff {
+     isMemberEvent: boolean;
+@@ -59,6 +60,9 @@ export default function shouldHideEvent(ev: MatrixEvent, ctx?: IRoomState): bool
+         ? (name: keyof IRoomState) => ctx[name]
+         : (name: SettingKey) => SettingsStore.getValue(name, ev.getRoomId());
+ 
++    // FreeChat: expired disappearing messages vanish without a placeholder
++    if (isExpiredRedaction(ev)) return true;
++
+     // Hide redacted events
+     // Deleted events with a thread are always shown regardless of user preference
+     // to make sure that a thread can be accessible even if the root message is deleted

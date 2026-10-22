@@ -1,0 +1,228 @@
+From 1a9a140ae6596f0880b06157dcef584d855596d6 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 09/14] FreeChat: server-wide retention cap
+ (FREECHAT_MAX_RETENTION_SECS)
+
+New messages expire at the earlier of the room TTL and the cap; an hourly
+sweep (and one at startup) purges older history in every room, keeping state.
+---
+ src/service/rooms/disappearing/mod.rs   | 124 ++++++++++++++++++++++--
+ src/service/rooms/disappearing/tests.rs |  11 ++-
+ 2 files changed, 126 insertions(+), 9 deletions(-)
+
+diff --git a/src/service/rooms/disappearing/mod.rs b/src/service/rooms/disappearing/mod.rs
+index d53732daf..175bc16b4 100644
+--- a/src/service/rooms/disappearing/mod.rs
++++ b/src/service/rooms/disappearing/mod.rs
+@@ -18,6 +18,11 @@
+ //! Only room admins (power level 100, or creators in room v12+) may change the
+ //! room TTL; in direct chats both members are admins.
+ //!
++//! The operator can also cap how long the server keeps any message with
++//! `FREECHAT_MAX_RETENTION_SECS`: every message then expires by that age at the
++//! latest, and an hourly sweep purges anything older, including messages sent
++//! before the cap was set. Room state is never purged.
++//!
+ //! Users can also burn their own messages after reading: see [`read_burn`].
+ 
+ pub mod join_password;
+@@ -30,7 +35,9 @@
+ use async_trait::async_trait;
+ use futures::{StreamExt, TryStreamExt};
+ use ruma::{
+-	CanonicalJsonObject, CanonicalJsonValue, EventId, Int, Mxc, OwnedEventId, RoomId, UserId,
++	CanonicalJsonObject, CanonicalJsonValue, EventId, Int, MilliSecondsSinceUnixEpoch, Mxc,
++	OwnedEventId, OwnedRoomId, RoomId, UInt, UserId,
++	api::Direction,
+ 	events::{StateEventType, TimelineEventType, room::power_levels::UserPowerLevel},
+ 	int,
+ };
+@@ -77,6 +84,30 @@ pub fn always_required_state() -> HashSet<(StateEventType, StateKey)> {
+ /// How often the worker checks for expired messages.
+ const INTERVAL: Duration = Duration::from_secs(5);
+ 
++/// How often the server-wide retention cap is enforced on old history.
++const RETENTION_SWEEP: Duration = Duration::from_secs(60 * 60);
++
++/// Server-wide cap on message age in seconds, zero when unset. Read once from
++/// `FREECHAT_MAX_RETENTION_SECS`; changing it takes a restart.
++pub fn max_retention() -> u64 {
++	static CAP: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
++	*CAP.get_or_init(|| {
++		std::env::var("FREECHAT_MAX_RETENTION_SECS")
++			.ok()
++			.and_then(|secs| secs.trim().parse().ok())
++			.unwrap_or(0)
++	})
++}
++
++/// Lifetime in seconds of a new message: the shorter of the room TTL and the
++/// server cap, if either applies.
++fn effective_ttl(room_ttl: u64, cap: u64) -> Option<u64> {
++	[room_ttl, cap]
++		.into_iter()
++		.filter(|ttl| *ttl != 0)
++		.min()
++}
++
+ pub struct Service {
+ 	services: Arc<crate::services::OnceServices>,
+ 	expiresat_eventid: Arc<Map>,
+@@ -106,11 +137,21 @@ fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
+ 	}
+ 
+ 	async fn worker(self: Arc<Self>) -> Result {
++		let mut last_retention_sweep: Option<std::time::Instant> = None;
+ 		loop {
+ 			if let Err(e) = self.expire_due().await {
+ 				warn!("Disappearing messages sweep failed: {e}");
+ 			}
+ 
++			if max_retention() != 0
++				&& last_retention_sweep.is_none_or(|at| at.elapsed() >= RETENTION_SWEEP)
++			{
++				if let Err(e) = self.enforce_retention().await {
++					warn!("Retention sweep failed: {e}");
++				}
++				last_retention_sweep = Some(std::time::Instant::now());
++			}
++
+ 			tokio::select! {
+ 				() = tokio::time::sleep(INTERVAL) => {},
+ 				() = self.services.server.until_shutdown() => return Ok(())
+@@ -137,7 +178,11 @@ pub async fn annotate(&self, pdu: &PduEvent, pdu_json: &mut CanonicalJsonObject)
+ 		0
+ 	};
+ 
+-	if ttl == 0 && read_ttl == 0 {
++	let sent_ms = u64::from(pdu.origin_server_ts().get());
++	let expires_at = effective_ttl(ttl, max_retention())
++		.map(|secs| sent_ms.saturating_add(secs.saturating_mul(1000)));
++
++	if expires_at.is_none() && read_ttl == 0 {
+ 		return;
+ 	}
+ 
+@@ -149,9 +194,8 @@ pub async fn annotate(&self, pdu: &PduEvent, pdu_json: &mut CanonicalJsonObject)
+ 		return;
+ 	};
+ 
+-	if ttl != 0 {
+-		let sent_ms = u64::from(pdu.origin_server_ts().get());
+-		unsigned.insert(EXPIRES_AT_KEY.into(), int(sent_ms.saturating_add(ttl.saturating_mul(1000))));
++	if let Some(expires_at) = expires_at {
++		unsigned.insert(EXPIRES_AT_KEY.into(), int(expires_at));
+ 	}
+ 
+ 	if read_ttl != 0 {
+@@ -170,9 +214,10 @@ pub async fn schedule(&self, pdu: &PduEvent) {
+ 	}
+ 
+ 	let ttl = self.room_ttl(pdu.room_id()).await;
+-	if ttl != 0 {
+-		let sent_secs = u64::from(pdu.origin_server_ts().as_secs());
+-		self.expire_at(sent_secs.saturating_add(ttl), pdu.event_id());
++	let sent_secs = u64::from(pdu.origin_server_ts().as_secs());
++	if let Some(ttl) = effective_ttl(ttl, max_retention()) {
++		let at = sent_secs.saturating_add(ttl);
++		self.expire_at(at, pdu.event_id());
+ 	}
+ 
+ 	self.schedule_read_burn(pdu).await;
+@@ -245,6 +290,69 @@ async fn expire_due(&self) -> Result {
+ 	Ok(())
+ }
+ 
++/// Purges every message older than the server-wide cap from every room.
++///
++/// History strictly before the first message newer than the cutoff goes
++/// through the timeline's history purge, which keeps room state. A room whose
++/// newest message is itself too old has that message expired individually, so
++/// the room's forward extremity moves back and the room keeps working.
++#[implement(Service)]
++async fn enforce_retention(&self) -> Result {
++	let cap = max_retention();
++	if cap == 0 {
++		return Ok(());
++	}
++
++	let cutoff_ms = now().as_millis().saturating_sub(u128::from(cap) * 1000);
++	let cutoff = MilliSecondsSinceUnixEpoch(UInt::new_saturating(u64::try_from(cutoff_ms).unwrap_or(u64::MAX)));
++
++	let rooms: Vec<OwnedRoomId> = self
++		.services
++		.metadata
++		.iter_ids()
++		.map(ToOwned::to_owned)
++		.collect()
++		.await;
++
++	let mut purged = 0_usize;
++	for room_id in rooms {
++		let timeline = &self.services.timeline;
++		let until = match timeline
++			.get_pdu_id_near_ts(&room_id, cutoff, Direction::Forward)
++			.await
++		{
++			| Ok((_, pdu_id)) => pdu_id.count,
++			| Err(_) => {
++				// Everything is older than the cutoff: keep only the newest event for
++				// now, then expire it on its own if it is a message.
++				let Ok(latest) = timeline.latest_pdu_in_room(&room_id).await else {
++					continue;
++				};
++				let Ok(count) = timeline.get_pdu_count(latest.event_id()).await else {
++					continue;
++				};
++				if is_expirable(&latest) {
++					self.expire_at(0, latest.event_id());
++				}
++				count
++			},
++		};
++
++		purged = purged.saturating_add(
++			timeline
++				.purge_history(&room_id, until, true)
++				.await
++				.unwrap_or(0),
++		);
++	}
++
++	if purged > 0 {
++		debug_info!(purged, "Retention sweep removed old messages");
++	}
++
++	Ok(())
++}
++
+ /// Purges one expired event and deletes the media it referenced.
+ ///
+ /// When the event is the room's newest, the room's forward extremity moves
+diff --git a/src/service/rooms/disappearing/tests.rs b/src/service/rooms/disappearing/tests.rs
+index 3cba3ee1a..c53e0af07 100644
+--- a/src/service/rooms/disappearing/tests.rs
++++ b/src/service/rooms/disappearing/tests.rs
+@@ -1,7 +1,7 @@
+ use ruma::{CanonicalJsonObject, room_id};
+ use serde_json::json;
+ 
+-use super::{Content, content_mxcs, read_burn::read_ttl_for};
++use super::{Content, content_mxcs, effective_ttl, read_burn::read_ttl_for};
+ 
+ fn object(value: serde_json::Value) -> CanonicalJsonObject {
+ 	serde_json::from_value(value).expect("valid canonical object")
+@@ -73,3 +73,12 @@ fn read_ttl_is_lenient() {
+ 	assert_eq!(read_ttl_for(&json!({ "read_ttl": "30" }), room_id!("!a:x")), 0);
+ 	assert_eq!(read_ttl_for(&json!(null), room_id!("!a:x")), 0);
+ }
++
++#[test]
++fn expiry_takes_the_earlier_of_room_ttl_and_server_cap() {
++	assert_eq!(effective_ttl(0, 0), None);
++	assert_eq!(effective_ttl(60, 0), Some(60));
++	assert_eq!(effective_ttl(0, 3600), Some(3600));
++	assert_eq!(effective_ttl(60, 3600), Some(60));
++	assert_eq!(effective_ttl(7200, 3600), Some(3600));
++}

@@ -1,0 +1,319 @@
+From 12d0156b52ab3cf63ec120cd1a53f14032debcfd Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 05/12] FreeChat: delete disappearing messages locally from
+ server markers
+
+The server now purges expired messages without a redaction, so the client
+removes its own copy:
+- unsigned.com.freechat.expires_at hides and removes the message on time,
+  offline too
+- unsigned.com.freechat.read_ttl starts once every other member has read it
+  (public receipts)
+- while online, an ExpiryManager asks the server which marked messages
+  still exist (existing_events) and drops purged ones, covering private
+  receipts and clock drift
+---
+ apps/web/src/MatrixClientPeg.ts      |   2 +
+ apps/web/src/freechat/api.ts         |  12 ++
+ apps/web/src/freechat/expiry.test.ts |  63 +++++++++++
+ apps/web/src/freechat/expiry.ts      | 157 +++++++++++++++++++++++++++
+ apps/web/src/shouldHideEvent.ts      |   4 +
+ 5 files changed, 238 insertions(+)
+ create mode 100644 apps/web/src/freechat/expiry.test.ts
+ create mode 100644 apps/web/src/freechat/expiry.ts
+
+diff --git a/apps/web/src/MatrixClientPeg.ts b/apps/web/src/MatrixClientPeg.ts
+index bcbf0f1494..2d1a41ab87 100644
+--- a/apps/web/src/MatrixClientPeg.ts
++++ b/apps/web/src/MatrixClientPeg.ts
+@@ -28,6 +28,7 @@ import SdkConfig from "./SdkConfig";
+ import { setDeviceIsolationMode } from "./settings/controllers/DeviceIsolationModeController.ts";
+ import { initialiseDehydrationIfEnabled } from "./utils/device/dehydration";
+ import { installMediaHint } from "./freechat/mediaHint";
++import { installExpiry } from "./freechat/expiry";
+ 
+ export interface MatrixClientPegAssignOpts {
+     /**
+@@ -297,6 +298,7 @@ class MatrixClientPegClass implements IMatrixClientPeg {
+         MatrixClientBackedSettingsHandler.matrixClient = this.matrixClient;
+         MatrixClientBackedController.matrixClient = this.matrixClient;
+         installMediaHint(this.matrixClient); // FreeChat
++        installExpiry(this.matrixClient); // FreeChat
+ 
+         return opts;
+     }
+diff --git a/apps/web/src/freechat/api.ts b/apps/web/src/freechat/api.ts
+index a835685880..db7642d296 100644
+--- a/apps/web/src/freechat/api.ts
++++ b/apps/web/src/freechat/api.ts
+@@ -54,3 +54,15 @@ export async function joinWithPassword(client: MatrixClient, roomId: string, pas
+ 
+ /** Minimum length the server accepts. */
+ export const MIN_JOIN_PASSWORD_LENGTH = 6;
++
++/** Which of the given events still exist on the server; purged ones are omitted. Members only. */
++export async function existingEvents(client: MatrixClient, roomId: string, eventIds: string[]): Promise<Set<string>> {
++    const res = await client.http.authedRequest<{ existing: string[] }>(
++        Method.Post,
++        roomPath(roomId, "existing_events"),
++        undefined,
++        { event_ids: eventIds },
++        { prefix: PREFIX },
++    );
++    return new Set(res.existing);
++}
+diff --git a/apps/web/src/freechat/expiry.test.ts b/apps/web/src/freechat/expiry.test.ts
+new file mode 100644
+index 0000000000..a2f09f17a7
+--- /dev/null
++++ b/apps/web/src/freechat/expiry.test.ts
+@@ -0,0 +1,63 @@
++/*
++Copyright 2026 FreeChat contributors
++
++SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++Please see LICENSE files in the repository root for full details.
++*/
++
++import { MatrixEvent } from "matrix-js-sdk/src/matrix";
++import { describe, it, expect } from "vitest";
++
++import { EXPIRES_AT_KEY, READ_TTL_KEY, expiryOf, isExpired, isMarked } from "./expiry";
++
++function anEvent(unsigned: Record<string, unknown>, sender = "@a:x"): MatrixEvent {
++    return new MatrixEvent({
++        type: "m.room.message",
++        event_id: "$e",
++        room_id: "!r:x",
++        sender,
++        content: { msgtype: "m.text", body: "hi" },
++        unsigned: unsigned as any,
++    });
++}
++
++/** A room where `read` lists members who read the event, with receipt timestamps. */
++function aRoom(members: string[], read: Record<string, number>) {
++    return {
++        getJoinedMembers: () => members.map((userId) => ({ userId })),
++        hasUserReadEvent: (userId: string) => userId in read || userId === "@a:x",
++        getReadReceiptForUserId: (userId: string) => (userId in read ? { data: { ts: read[userId] } } : null),
++    } as any;
++}
++
++describe("expiry markers", () => {
++    it("recognises marked events", () => {
++        expect(isMarked(anEvent({ [EXPIRES_AT_KEY]: 1000 }))).toBe(true);
++        expect(isMarked(anEvent({ [READ_TTL_KEY]: 5 }))).toBe(true);
++        expect(isMarked(anEvent({}))).toBe(false);
++        expect(isMarked(anEvent({ [EXPIRES_AT_KEY]: "1000" }))).toBe(false);
++    });
++
++    it("uses the room expiry as is, which works offline", () => {
++        const ev = anEvent({ [EXPIRES_AT_KEY]: 5000 });
++        expect(expiryOf(ev, null)).toBe(5000);
++        expect(isExpired(ev, null, 4999)).toBe(false);
++        expect(isExpired(ev, null, 5000)).toBe(true);
++    });
++
++    it("starts burn after reading only once every other member read it", () => {
++        const ev = anEvent({ [READ_TTL_KEY]: 5 });
++        expect(expiryOf(ev, aRoom(["@a:x", "@b:x", "@c:x"], { "@b:x": 1000 }))).toBeNull();
++        expect(expiryOf(ev, aRoom(["@a:x", "@b:x", "@c:x"], { "@b:x": 1000, "@c:x": 3000 }))).toBe(8000);
++    });
++
++    it("does not burn while nobody else is in the room", () => {
++        expect(expiryOf(anEvent({ [READ_TTL_KEY]: 5 }), aRoom(["@a:x"], {}))).toBeNull();
++    });
++
++    it("takes whichever comes first", () => {
++        const ev = anEvent({ [EXPIRES_AT_KEY]: 4000, [READ_TTL_KEY]: 5 });
++        expect(expiryOf(ev, aRoom(["@a:x", "@b:x"], { "@b:x": 1000 }))).toBe(4000);
++        expect(expiryOf(ev, aRoom(["@a:x", "@b:x"], { "@b:x": -3000 }))).toBe(2000);
++    });
++});
+diff --git a/apps/web/src/freechat/expiry.ts b/apps/web/src/freechat/expiry.ts
+new file mode 100644
+index 0000000000..4e0794c712
+--- /dev/null
++++ b/apps/web/src/freechat/expiry.ts
+@@ -0,0 +1,157 @@
++/*
++Copyright 2026 FreeChat contributors
++
++SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++Please see LICENSE files in the repository root for full details.
++*/
++
++/*
++ * FreeChat: delete disappearing messages locally.
++ *
++ * The server purges expired messages without leaving a redaction, so devices
++ * delete their own copies:
++ *  - `unsigned.com.freechat.expires_at` (room auto-delete) gives the exact time,
++ *    which works offline;
++ *  - `unsigned.com.freechat.read_ttl` (burn after reading) starts once every
++ *    other member has read the message, as far as this device can tell from
++ *    public receipts;
++ *  - while online, the device asks the server which marked messages still
++ *    exist and drops the rest (covers private read receipts and any drift).
++ */
++
++import { ClientEvent, type MatrixClient, type MatrixEvent, type Room, SyncState } from "matrix-js-sdk/src/matrix";
++import { logger } from "matrix-js-sdk/src/logger";
++
++import { existingEvents } from "./api";
++
++export const EXPIRES_AT_KEY = "com.freechat.expires_at";
++export const READ_TTL_KEY = "com.freechat.read_ttl";
++
++/** How often online devices check which marked messages the server purged. */
++const CHECK_INTERVAL_MS = 30_000;
++/** Most event IDs per server check, matching the server limit. */
++const CHECK_BATCH = 500;
++
++function positive(value: unknown): number | null {
++    return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
++}
++
++/** Whether the server marked this event as disappearing. */
++export function isMarked(ev: MatrixEvent): boolean {
++    const unsigned = ev.getUnsigned() as Record<string, unknown>;
++    return positive(unsigned[EXPIRES_AT_KEY]) !== null || positive(unsigned[READ_TTL_KEY]) !== null;
++}
++
++/** When this device should delete the event, in ms since the epoch, or null if not (yet) known. */
++export function expiryOf(ev: MatrixEvent, room: Room | null | undefined): number | null {
++    const unsigned = ev.getUnsigned() as Record<string, unknown>;
++    let at = positive(unsigned[EXPIRES_AT_KEY]);
++
++    const readTtl = positive(unsigned[READ_TTL_KEY]);
++    const eventId = ev.getId();
++    if (readTtl !== null && room && eventId) {
++        const others = room
++            .getJoinedMembers()
++            .map((m) => m.userId)
++            .filter((userId) => userId !== ev.getSender());
++        if (others.length > 0 && others.every((userId) => room.hasUserReadEvent(userId, eventId))) {
++            const readAt = Math.max(
++                ...others.map((userId) => room.getReadReceiptForUserId(userId, true)?.data.ts ?? Date.now()),
++            );
++            const burnAt = readAt + readTtl * 1000;
++            at = at === null ? burnAt : Math.min(at, burnAt);
++        }
++    }
++
++    return at;
++}
++
++export function isExpired(ev: MatrixEvent, room: Room | null | undefined, now = Date.now()): boolean {
++    const at = expiryOf(ev, room);
++    return at !== null && at <= now;
++}
++
++/** Keeps removing expired and purged messages from the rooms this client holds. */
++export class ExpiryManager {
++    private timer: ReturnType<typeof setTimeout> | null = null;
++    private checking = false;
++
++    public constructor(private readonly client: MatrixClient) {}
++
++    public start(): void {
++        this.client.on(ClientEvent.Sync, this.onSync);
++        this.schedule(0);
++    }
++
++    public stop(): void {
++        this.client.off(ClientEvent.Sync, this.onSync);
++        if (this.timer) clearTimeout(this.timer);
++        this.timer = null;
++    }
++
++    private readonly onSync = (state: SyncState, prev: SyncState | null): void => {
++        // Right after (re)connecting, catch up with what the server purged meanwhile.
++        if (state === SyncState.Syncing && prev !== SyncState.Syncing) this.schedule(0);
++    };
++
++    private schedule(delayMs: number): void {
++        if (this.timer) clearTimeout(this.timer);
++        this.timer = setTimeout(() => void this.sweep(), delayMs);
++    }
++
++    /** Removes what expired locally, asks the server about the rest, then sleeps until the next expiry. */
++    public async sweep(): Promise<void> {
++        if (this.checking) return;
++        this.checking = true;
++        let next = CHECK_INTERVAL_MS;
++        try {
++            const now = Date.now();
++            for (const room of this.client.getRooms()) {
++                const marked = room
++                    .getLiveTimeline()
++                    .getEvents()
++                    .filter((ev) => isMarked(ev) && ev.getId() && !ev.getId()!.startsWith("~"));
++                if (marked.length === 0) continue;
++
++                const pending: MatrixEvent[] = [];
++                for (const ev of marked) {
++                    const at = expiryOf(ev, room);
++                    if (at !== null && at <= now) {
++                        room.removeEvent(ev.getId()!);
++                    } else {
++                        pending.push(ev);
++                        if (at !== null) next = Math.min(next, Math.max(at - now, 250));
++                    }
++                }
++
++                if (pending.length > 0 && this.client.getSyncState() === SyncState.Syncing) {
++                    await this.dropPurged(room, pending);
++                }
++            }
++        } catch (e) {
++            logger.warn("FreeChat: disappearing messages sweep failed", e);
++        } finally {
++            this.checking = false;
++            this.schedule(next);
++        }
++    }
++
++    private async dropPurged(room: Room, events: MatrixEvent[]): Promise<void> {
++        for (let i = 0; i < events.length; i += CHECK_BATCH) {
++            const batch = events.slice(i, i + CHECK_BATCH).map((ev) => ev.getId()!);
++            const existing = await existingEvents(this.client, room.roomId, batch);
++            for (const eventId of batch) {
++                if (!existing.has(eventId)) room.removeEvent(eventId);
++            }
++        }
++    }
++}
++
++const MANAGERS = new WeakMap<MatrixClient, ExpiryManager>();
++
++export function installExpiry(client: MatrixClient): void {
++    if (MANAGERS.has(client)) return;
++    const manager = new ExpiryManager(client);
++    MANAGERS.set(client, manager);
++    manager.start();
++}
+diff --git a/apps/web/src/shouldHideEvent.ts b/apps/web/src/shouldHideEvent.ts
+index 63d919102a..820d70189e 100644
+--- a/apps/web/src/shouldHideEvent.ts
++++ b/apps/web/src/shouldHideEvent.ts
+@@ -12,6 +12,8 @@ import { KnownMembership } from "matrix-js-sdk/src/types";
+ import SettingsStore from "./settings/SettingsStore";
+ import { type IRoomState } from "./components/structures/RoomView";
+ import { type SettingKey } from "./settings/Settings.tsx";
++import { MatrixClientPeg } from "./MatrixClientPeg";
++import { isExpired, isMarked } from "./freechat/expiry";
+ 
+ interface IDiff {
+     isMemberEvent: boolean;
+@@ -62,6 +64,8 @@ export default function shouldHideEvent(ev: MatrixEvent, ctx?: IRoomState): bool
+     // FreeChat: deleted messages vanish without a placeholder, like Telegram.
+     // Deleted thread roots stay so their threads remain reachable.
+     if (ev.isRedacted() && !ev.getThread()) return true;
++    // FreeChat: disappearing messages vanish on time, even offline.
++    if (isMarked(ev) && isExpired(ev, MatrixClientPeg.get()?.getRoom(ev.getRoomId()))) return true;
+ 
+     // Hide redacted events
+     // Deleted events with a thread are always shown regardless of user preference

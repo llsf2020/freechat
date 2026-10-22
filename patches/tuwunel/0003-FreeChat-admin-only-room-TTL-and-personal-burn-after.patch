@@ -1,0 +1,457 @@
+From eb5ea1d6862796984df0e5efdf2aa5f8dd93a9de Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 03/14] FreeChat: admin-only room TTL and personal
+ burn-after-read
+
+- Only power level 100 (or v12 creators) may set com.freechat.disappearing;
+  enforced in the client state API. Direct chats make both members admins.
+- Users may set com.freechat.disappearing account data {"read_ttl": N},
+  globally and per room (0 = off there, no field = follow global). Their
+  messages wait until every other joined member has read them (public
+  receipt or private read marker, at or after the event), then expire N
+  seconds later through the regular expiry path.
+---
+ src/api/client/state.rs                     |   8 +-
+ src/database/maps.rs                        |  13 ++
+ src/service/rooms/disappearing/mod.rs       |  59 ++++-
+ src/service/rooms/disappearing/read_burn.rs | 225 ++++++++++++++++++++
+ src/service/rooms/read_receipt/mod.rs       |  19 +-
+ 5 files changed, 311 insertions(+), 13 deletions(-)
+ create mode 100644 src/service/rooms/disappearing/read_burn.rs
+
+diff --git a/src/api/client/state.rs b/src/api/client/state.rs
+index 697747845..1cc422ad7 100644
+--- a/src/api/client/state.rs
++++ b/src/api/client/state.rs
+@@ -30,7 +30,7 @@
+ 	result::NotFound,
+ 	utils::{BoolExt, stream::TryBroadbandExt},
+ };
+-use tuwunel_service::Services;
++use tuwunel_service::{Services, rooms::disappearing};
+ 
+ use crate::{Ruma, RumaResponse, client::with_membership};
+ 
+@@ -301,6 +301,12 @@ async fn allowed_to_send_state_event(
+ 			validate_canonical_alias(services, room_id, json).await,
+ 		| StateEventType::RoomMember =>
+ 			validate_member(services, sender, room_id, state_key, json, suspended).await,
++		// FreeChat: only room admins may change auto-delete.
++		| _ if event_type.to_string() == disappearing::STATE_TYPE =>
++			services
++				.disappearing
++				.check_can_change(sender, room_id)
++				.await,
+ 		| _ => Ok(()),
+ 	}
+ }
+diff --git a/src/database/maps.rs b/src/database/maps.rs
+index 8a27adf3e..1c64d3bc4 100644
+--- a/src/database/maps.rs
++++ b/src/database/maps.rs
+@@ -184,6 +184,19 @@ pub(crate) fn descriptor(name: &str) -> &'static Descriptor {
+ 		key_size_hint: Some(64),
+ 		..descriptor::SEQUENTIAL_SMALL
+ 	},
++	Descriptor {
++		// FreeChat: messages waiting to be read before burning
++		name: "readburn_pending",
++		key_size_hint: Some(16),
++		val_size_hint: Some(8),
++		..descriptor::SEQUENTIAL_SMALL
++	},
++	Descriptor {
++		// FreeChat: read positions seen by read-burn
++		name: "readburn_readpos",
++		val_size_hint: Some(8),
++		..descriptor::RANDOM_SMALL
++	},
+ 	Descriptor {
+ 		name: "global",
+ 		..descriptor::RANDOM_SMALL
+diff --git a/src/service/rooms/disappearing/mod.rs b/src/service/rooms/disappearing/mod.rs
+index df651c796..d8c983f85 100644
+--- a/src/service/rooms/disappearing/mod.rs
++++ b/src/service/rooms/disappearing/mod.rs
+@@ -10,7 +10,13 @@
+ //! every client applies to its local store, then deletes the media it
+ //! referenced. Clients may list media MXCs under `com.freechat.media` in the
+ //! plaintext content of encrypted events so it can be found and removed.
++//!
++//! Only room admins (power level 100, or creators in room v12+) may change the
++//! room TTL; in direct chats both members are admins.
++//!
++//! Users can also burn their own messages after reading: see [`read_burn`].
+ 
++pub mod read_burn;
+ #[cfg(test)]
+ mod tests;
+ 
+@@ -19,13 +25,15 @@
+ use async_trait::async_trait;
+ use futures::{StreamExt, TryStreamExt};
+ use ruma::{
+-	CanonicalJsonObject, CanonicalJsonValue, EventId, Mxc, OwnedEventId, OwnedUserId, UserId,
+-	events::{StateEventType, TimelineEventType},
++	CanonicalJsonObject, CanonicalJsonValue, EventId, Mxc, OwnedEventId, OwnedUserId, RoomId,
++	UserId,
++	events::{StateEventType, TimelineEventType, room::power_levels::UserPowerLevel},
++	int,
+ };
+ use serde::Deserialize;
+ use serde_json::{json, value::to_raw_value};
+ use tuwunel_core::{
+-	Result, debug, debug_info, implement,
++	Err, Result, debug, debug_info, implement,
+ 	matrix::{
+ 		StateKey,
+ 		event::Event,
+@@ -61,6 +69,8 @@ pub fn always_required_state() -> HashSet<(StateEventType, StateKey)> {
+ pub struct Service {
+ 	services: Arc<crate::services::OnceServices>,
+ 	expiresat_eventid: Arc<Map>,
++	readburn_pending: Arc<Map>,
++	readburn_readpos: Arc<Map>,
+ }
+ 
+ #[derive(Clone, Copy, Debug, Default, Deserialize)]
+@@ -75,6 +85,8 @@ fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
+ 		Ok(Arc::new(Self {
+ 			services: args.services.clone(),
+ 			expiresat_eventid: args.db["expiresat_eventid"].clone(),
++			readburn_pending: args.db["readburn_pending"].clone(),
++			readburn_readpos: args.db["readburn_readpos"].clone(),
+ 		}))
+ 	}
+ 
+@@ -94,7 +106,8 @@ async fn worker(self: Arc<Self>) -> Result {
+ 	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
+ }
+ 
+-/// Schedules a freshly appended event for expiry if its room has a TTL set.
++/// Schedules a freshly appended event for expiry if its room has a TTL set,
++/// and for burning after read if its sender asked for that.
+ ///
+ /// Called from the timeline append path while the room's state lock is held.
+ #[implement(Service)]
+@@ -104,20 +117,44 @@ pub async fn schedule(&self, pdu: &PduEvent) {
+ 	}
+ 
+ 	let ttl = self.room_ttl(pdu.room_id()).await;
+-	if ttl == 0 {
+-		return;
++	if ttl != 0 {
++		let sent_secs = u64::from(pdu.origin_server_ts().as_secs());
++		self.expire_at(sent_secs.saturating_add(ttl), pdu.event_id());
+ 	}
+ 
+-	let sent_secs = u64::from(pdu.origin_server_ts().as_secs());
+-	let expires_at = sent_secs.saturating_add(ttl);
++	self.schedule_read_burn(pdu).await;
++}
++
++/// Queues `event_id` for redaction at `at` (seconds since the epoch).
++#[implement(Service)]
++fn expire_at(&self, at: u64, event_id: &EventId) {
++	self.expiresat_eventid.put_raw((at, event_id), []);
++}
++
++/// Rejects a TTL change from anyone below admin level.
++///
++/// Called by the client API before a `com.freechat.disappearing` state event
++/// is built.
++#[implement(Service)]
++pub async fn check_can_change(&self, sender: &UserId, room_id: &RoomId) -> Result {
++	let level = self
++		.services
++		.state_accessor
++		.get_power_levels(room_id)
++		.await
++		.map(|power_levels| power_levels.for_user(sender))?;
++
++	// Power level 100 is admin; v12+ creators rank above every integer level.
++	if level >= UserPowerLevel::from(int!(100)) {
++		return Ok(());
++	}
+ 
+-	self.expiresat_eventid
+-		.put_raw((expires_at, pdu.event_id()), []);
++	Err!(Request(Forbidden("Only room admins can change auto-delete.")))
+ }
+ 
+ /// Returns the room's current TTL in seconds, zero when disabled.
+ #[implement(Service)]
+-pub async fn room_ttl(&self, room_id: &ruma::RoomId) -> u64 {
++pub async fn room_ttl(&self, room_id: &RoomId) -> u64 {
+ 	self.services
+ 		.state_accessor
+ 		.room_state_get_content::<Content>(room_id, &StateEventType::from(STATE_TYPE), "")
+diff --git a/src/service/rooms/disappearing/read_burn.rs b/src/service/rooms/disappearing/read_burn.rs
+new file mode 100644
+index 000000000..01e0a4e9d
+--- /dev/null
++++ b/src/service/rooms/disappearing/read_burn.rs
+@@ -0,0 +1,225 @@
++//! FreeChat: burn your own messages once they have been read.
++//!
++//! A user sets `com.freechat.disappearing` account data with content
++//! `{"read_ttl": <seconds>}`: globally as their default, and in a room to
++//! override it there (`"read_ttl": 0` turns it off in that room; content
++//! without `read_ttl` follows the global default).
++//!
++//! Each message sent while it is on waits in `readburn_pending` until every
++//! other joined member has read it, meaning their read receipt or private read
++//! marker reached it or a later event. It then expires `read_ttl` seconds
++//! later through the regular expiry index. Read positions are tracked in
++//! `readburn_readpos` from the moment this feature saw them.
++
++use futures::StreamExt;
++use ruma::{
++	EventId, OwnedUserId, RoomId, UserId,
++	events::receipt::{ReceiptEvent, ReceiptType},
++};
++use serde::Deserialize;
++use tuwunel_core::{
++	debug, implement,
++	matrix::{
++		event::Event,
++		pdu::{PduCount, PduEvent, PduId, RawPduId},
++	},
++	utils::{ReadyExt, time::now},
++};
++use tuwunel_database::{Deserialized, Interfix};
++
++use super::STATE_TYPE;
++
++#[derive(Deserialize)]
++struct AccountDataEvent {
++	#[serde(default)]
++	content: Personal,
++}
++
++#[derive(Default, Deserialize)]
++struct Personal {
++	read_ttl: Option<u64>,
++}
++
++/// The sender's effective read-burn delay in seconds, zero when off.
++#[implement(super::Service)]
++pub async fn personal_read_ttl(&self, room_id: &RoomId, user_id: &UserId) -> u64 {
++	match self.read_ttl_setting(Some(room_id), user_id).await {
++		| Some(ttl) => ttl,
++		| None => self
++			.read_ttl_setting(None, user_id)
++			.await
++			.unwrap_or(0),
++	}
++}
++
++/// The `read_ttl` stored in room (or global, when `room_id` is none) account
++/// data, if that data sets one.
++#[implement(super::Service)]
++async fn read_ttl_setting(&self, room_id: Option<&RoomId>, user_id: &UserId) -> Option<u64> {
++	self.services
++		.account_data
++		.get_raw(room_id, user_id, STATE_TYPE)
++		.await
++		.deserialized::<AccountDataEvent>()
++		.ok()
++		.and_then(|event| event.content.read_ttl)
++}
++
++/// Queues a freshly appended local message for burning after read.
++#[implement(super::Service)]
++pub(super) async fn schedule_read_burn(&self, pdu: &PduEvent) {
++	if !self.services.globals.user_is_local(pdu.sender()) {
++		return;
++	}
++
++	let ttl = self
++		.personal_read_ttl(pdu.room_id(), pdu.sender())
++		.await;
++	if ttl == 0 {
++		return;
++	}
++
++	let Some(PduId { shortroomid, count: PduCount::Normal(count) }) =
++		self.pdu_id(pdu.event_id()).await
++	else {
++		return;
++	};
++
++	self.readburn_pending
++		.put((shortroomid, count), ttl);
++}
++
++/// Records that `user_id` has read up to the event at `count` in `room_id`.
++#[implement(super::Service)]
++pub async fn note_read(&self, room_id: &RoomId, user_id: &UserId, count: u64) {
++	if count <= self.read_position(room_id, user_id).await {
++		return;
++	}
++
++	self.readburn_readpos
++		.put((room_id, user_id), count);
++
++	self.release_read(room_id, count).await;
++}
++
++/// Records the reads carried by a public receipt from `user_id`.
++#[implement(super::Service)]
++pub async fn note_receipt(&self, user_id: &UserId, room_id: &RoomId, receipt: &ReceiptEvent) {
++	for (event_id, receipts) in &receipt.content.0 {
++		let by_user = [ReceiptType::Read, ReceiptType::ReadPrivate]
++			.iter()
++			.filter_map(|kind| receipts.get(kind))
++			.any(|users| users.contains_key(user_id));
++
++		if by_user {
++			self.note_read_event(room_id, user_id, event_id)
++				.await;
++		}
++	}
++}
++
++#[implement(super::Service)]
++async fn note_read_event(&self, room_id: &RoomId, user_id: &UserId, event_id: &EventId) {
++	let Ok(shortroomid) = self.services.short.get_shortroomid(room_id).await else {
++		return;
++	};
++
++	if let Some(PduId { shortroomid: event_room, count: PduCount::Normal(count) }) =
++		self.pdu_id(event_id).await
++		&& event_room == shortroomid
++	{
++		self.note_read(room_id, user_id, count).await;
++	}
++}
++
++/// Starts the countdown for every pending message up to `up_to` that all
++/// other joined members have now read.
++#[implement(super::Service)]
++async fn release_read(&self, room_id: &RoomId, up_to: u64) {
++	let Ok(shortroomid) = self.services.short.get_shortroomid(room_id).await else {
++		return;
++	};
++
++	let pending: Vec<((u64, u64), u64)> = self
++		.readburn_pending
++		.stream_prefix(&(shortroomid, Interfix))
++		.ready_filter_map(Result::ok)
++		.collect()
++		.await;
++
++	let pending: Vec<(u64, u64)> = pending
++		.into_iter()
++		.filter(|&((_, count), _)| count <= up_to)
++		.map(|((_, count), ttl)| (count, ttl))
++		.collect();
++
++	if pending.is_empty() {
++		return;
++	}
++
++	let members: Vec<OwnedUserId> = self
++		.services
++		.state_cache
++		.room_members(room_id)
++		.map(ToOwned::to_owned)
++		.collect()
++		.await;
++
++	for (count, ttl) in pending {
++		let pdu_id: RawPduId = PduId { shortroomid, count: PduCount::Normal(count) }.into();
++		let Ok(pdu) = self.services.timeline.get_pdu_from_id(&pdu_id).await else {
++			self.readburn_pending.del((shortroomid, count));
++			continue;
++		};
++
++		if self.read_by_all_others(room_id, &members, pdu.sender(), count).await {
++			debug!(event_id = %pdu.event_id(), ttl, "Read by everyone; burning after delay");
++			self.expire_at(now().as_secs().saturating_add(ttl), pdu.event_id());
++			self.readburn_pending.del((shortroomid, count));
++		}
++	}
++}
++
++/// Whether every member except `sender` has read up to `count`. False when
++/// nobody else is in the room yet.
++#[implement(super::Service)]
++async fn read_by_all_others(
++	&self,
++	room_id: &RoomId,
++	members: &[OwnedUserId],
++	sender: &UserId,
++	count: u64,
++) -> bool {
++	let mut anyone_else = false;
++	for member in members {
++		if member == sender {
++			continue;
++		}
++
++		anyone_else = true;
++		if self.read_position(room_id, member).await < count {
++			return false;
++		}
++	}
++
++	anyone_else
++}
++
++#[implement(super::Service)]
++async fn read_position(&self, room_id: &RoomId, user_id: &UserId) -> u64 {
++	self.readburn_readpos
++		.qry(&(room_id, user_id))
++		.await
++		.deserialized()
++		.unwrap_or(0)
++}
++
++#[implement(super::Service)]
++async fn pdu_id(&self, event_id: &EventId) -> Option<PduId> {
++	self.services
++		.timeline
++		.get_pdu_id(event_id)
++		.await
++		.ok()
++		.map(PduId::from)
++}
+diff --git a/src/service/rooms/read_receipt/mod.rs b/src/service/rooms/read_receipt/mod.rs
+index 19ebb43a8..f439151f0 100644
+--- a/src/service/rooms/read_receipt/mod.rs
++++ b/src/service/rooms/read_receipt/mod.rs
+@@ -107,6 +107,12 @@ pub async fn readreceipt_update(
+ 			return false;
+ 		}
+ 
++		// FreeChat: read receipts start read-burn countdowns.
++		self.services
++			.disappearing
++			.note_receipt(user_id, room_id, event)
++			.await;
++
+ 		self.services
+ 			.sending
+ 			.send_edu_room_appservices(room_id, |buf| {
+@@ -386,7 +392,18 @@ pub fn readreceipts_since_fallible<'a>(
+ 	/// position at or behind the stored one writes nothing.
+ 	#[tracing::instrument(skip(self), level = "debug", name = "set_private")]
+ 	pub async fn private_read_set(&self, private_read: PrivateRead<'_>) -> bool {
+-		self.db.private_read_set(private_read).await
++		let (room_id, user_id, count) = (private_read.room_id, private_read.user_id, private_read.count);
++		let advanced = self.db.private_read_set(private_read).await;
++
++		// FreeChat: private read markers start read-burn countdowns too.
++		if advanced {
++			self.services
++				.disappearing
++				.note_read(room_id, user_id, count)
++				.await;
++		}
++
++		advanced
+ 	}
+ 
+ 	/// Returns the private read marker PDU count.

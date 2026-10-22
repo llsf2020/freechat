@@ -1,0 +1,105 @@
+From 680581bf4d6c13cd7004cbb9cef792797fea0fbb Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 11/12] FreeChat: drop the unused expired-redaction helper;
+ describe purging
+
+---
+ apps/web/src/freechat/disappearing.test.ts | 35 ----------------------
+ apps/web/src/freechat/disappearing.ts      | 14 ++-------
+ 2 files changed, 3 insertions(+), 46 deletions(-)
+
+diff --git a/apps/web/src/freechat/disappearing.test.ts b/apps/web/src/freechat/disappearing.test.ts
+index 55ba7e49c5..a023baaf34 100644
+--- a/apps/web/src/freechat/disappearing.test.ts
++++ b/apps/web/src/freechat/disappearing.test.ts
+@@ -13,50 +13,15 @@ import { MatrixEvent } from "matrix-js-sdk/src/matrix";
+ import { describe, it, expect } from "vitest";
+ 
+ import {
+-    EXPIRED_KEY,
+     formatReadTtl,
+     formatTtl,
+     getGlobalReadTtl,
+     roomReadTtl,
+-    isExpiredRedaction,
+     isRoomAdmin,
+     withRoomReadTtl,
+     textForDisappearingEvent,
+ } from "./disappearing";
+ 
+-function redacted(redactionContent: Record<string, unknown>): MatrixEvent {
+-    return new MatrixEvent({
+-        type: "m.room.message",
+-        event_id: "$msg",
+-        sender: "@a:example.org",
+-        content: {},
+-        unsigned: {
+-            redacted_because: {
+-                type: "m.room.redaction",
+-                event_id: "$redaction",
+-                sender: "@a:example.org",
+-                origin_server_ts: 0,
+-                content: { redacts: "$msg", ...redactionContent },
+-            } as any,
+-        },
+-    });
+-}
+-
+-describe("isExpiredRedaction", () => {
+-    it("is true for a server expiry redaction", () => {
+-        expect(isExpiredRedaction(redacted({ [EXPIRED_KEY]: true }))).toBe(true);
+-    });
+-
+-    it("is false for a manual redaction", () => {
+-        expect(isExpiredRedaction(redacted({}))).toBe(false);
+-    });
+-
+-    it("is false for a live message", () => {
+-        const ev = new MatrixEvent({ type: "m.room.message", content: { body: "hi", msgtype: "m.text" } });
+-        expect(isExpiredRedaction(ev)).toBe(false);
+-    });
+-});
+-
+ describe("formatTtl", () => {
+     it("uses preset labels", () => {
+         expect(formatTtl(3600)).toBe("1 hour");
+diff --git a/apps/web/src/freechat/disappearing.ts b/apps/web/src/freechat/disappearing.ts
+index 49ede073bd..a14d660f16 100644
+--- a/apps/web/src/freechat/disappearing.ts
++++ b/apps/web/src/freechat/disappearing.ts
+@@ -8,9 +8,9 @@ Please see LICENSE files in the repository root for full details.
+ /*
+  * FreeChat: disappearing messages.
+  *
+- * The homeserver enforces expiry by redacting messages; the client only lets
+- * users pick a TTL, explains it, and hides expired messages without a
+- * "message deleted" placeholder.
++ * The homeserver purges expired messages without leaving a redaction; the client
++ * lets users pick a TTL, explains it, and removes its own copies (see
++ * expiry.ts) without a "message deleted" placeholder.
+  */
+ 
+ import { type MatrixClient, type MatrixEvent, type Room, type RoomState } from "matrix-js-sdk/src/matrix";
+@@ -18,7 +18,6 @@ import { type MatrixClient, type MatrixEvent, type Room, type RoomState } from "
+ import { ft } from "./i18n";
+ 
+ export const DISAPPEARING_EVENT_TYPE = "com.freechat.disappearing";
+-export const EXPIRED_KEY = "com.freechat.expired";
+ export const MEDIA_KEY = "com.freechat.media";
+ /** Room privacy options, admin-only: `{"block_screenshots": true}`. */
+ export const PRIVACY_EVENT_TYPE = "com.freechat.privacy";
+@@ -112,13 +111,6 @@ export function formatReadTtl(ttl: number): string {
+     return ft("seconds", { count: ttl });
+ }
+ 
+-/** True for a message the server deleted because it expired. */
+-export function isExpiredRedaction(ev: MatrixEvent): boolean {
+-    if (!ev.isRedacted()) return false;
+-    const because = ev.getUnsigned().redacted_because as { content?: Record<string, unknown> } | undefined;
+-    return because?.content?.[EXPIRED_KEY] === true;
+-}
+-
+ /** Timeline text for a TTL change. */
+ export function textForDisappearingEvent(ev: MatrixEvent): (() => string) | null {
+     const sender = ev.sender?.name || ev.getSender() || "";

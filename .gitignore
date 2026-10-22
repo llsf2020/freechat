@@ -1,0 +1,6 @@
+forks/
+dev/data/
+dev/bin/
+*.log
+dev/ios-logs/
+__pycache__/

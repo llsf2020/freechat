@@ -1,0 +1,729 @@
+From f7c9e3ce5e7774ca937b57103246707ad8372b10 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 06/12] FreeChat: keep messages, drafts and sent history in
+ memory only
+
+The sync store is a MemoryStore; the legacy IndexedDB sync store and stored
+drafts are deleted at startup. Desktop no longer builds a Seshat search index.
+---
+ apps/web/src/DraftCleaner.ts                  |  8 +--
+ apps/web/src/Lifecycle.ts                     |  2 +
+ apps/web/src/SendHistoryManager.ts            |  5 +-
+ .../components/structures/MatrixChat.test.tsx | 25 +++----
+ .../components/structures/MessagePanel.tsx    |  3 +-
+ .../views/rooms/EditMessageComposer.tsx       | 17 ++---
+ .../views/rooms/MessageComposer.test.tsx      |  5 +-
+ .../views/rooms/MessageComposer.tsx           |  7 +-
+ .../views/rooms/SendMessageComposer.test.tsx  | 17 ++---
+ .../views/rooms/SendMessageComposer.tsx       |  7 +-
+ .../tabs/user/SecurityUserSettingsTab.tsx     | 12 +---
+ .../SecurityUserSettingsTab.test.tsx.snap     | 51 +-------------
+ apps/web/src/freechat/localPrivacy.test.ts    | 43 ++++++++++++
+ apps/web/src/freechat/localPrivacy.ts         | 67 +++++++++++++++++++
+ apps/web/src/utils/createMatrixClient.ts      | 14 ++--
+ .../src/vector/platform/ElectronPlatform.tsx  |  5 +-
+ 16 files changed, 171 insertions(+), 117 deletions(-)
+ create mode 100644 apps/web/src/freechat/localPrivacy.test.ts
+ create mode 100644 apps/web/src/freechat/localPrivacy.ts
+
+diff --git a/apps/web/src/DraftCleaner.ts b/apps/web/src/DraftCleaner.ts
+index 6adae6b8f4..bdf14a9f26 100644
+--- a/apps/web/src/DraftCleaner.ts
++++ b/apps/web/src/DraftCleaner.ts
+@@ -11,6 +11,7 @@ import { logger } from "matrix-js-sdk/src/logger";
+ import { MatrixClientPeg } from "./MatrixClientPeg";
+ import { EDITOR_STATE_STORAGE_PREFIX } from "./components/views/rooms/SendMessageComposer";
+ import { WYSIWYG_EDITOR_STATE_STORAGE_PREFIX } from "./components/views/rooms/MessageComposer";
++import { draftStorage } from "./freechat/localPrivacy";
+ 
+ // The key used to persist the the timestamp we last cleaned up drafts
+ export const DRAFT_LAST_CLEANUP_KEY = "mx_draft_cleanup";
+@@ -57,9 +58,8 @@ function shouldCleanupDrafts(): boolean {
+  * Clear all drafts for the CIDER and WYSIWYG editors if the room does not exist in the known rooms.
+  */
+ function cleaupDrafts(): void {
+-    for (let i = 0; i < localStorage.length; i++) {
+-        const keyName = localStorage.key(i);
+-        if (!keyName) continue;
++    // FreeChat: drafts live in memory (freechat/localPrivacy.ts).
++    for (const keyName of draftStorage.keys()) {
+         let roomId: string | undefined = undefined;
+         if (keyName.startsWith(EDITOR_STATE_STORAGE_PREFIX)) {
+             roomId = keyName.slice(EDITOR_STATE_STORAGE_PREFIX.length).split("_$")[0];
+@@ -72,7 +72,7 @@ function cleaupDrafts(): void {
+         const room = MatrixClientPeg.safeGet().getRoom(roomId);
+         if (!room) {
+             logger.debug(`Removing draft for unknown room with key ${keyName}`);
+-            localStorage.removeItem(keyName);
++            draftStorage.removeItem(keyName);
+         }
+     }
+ }
+diff --git a/apps/web/src/Lifecycle.ts b/apps/web/src/Lifecycle.ts
+index 68d9d17415..5dadfb097d 100644
+--- a/apps/web/src/Lifecycle.ts
++++ b/apps/web/src/Lifecycle.ts
+@@ -69,6 +69,7 @@ import { clearUploadedMediaCache } from "./utils/UploadedMediaCache";
+ import { CallStatusListener } from "./CallStatusListener.ts";
+ import { CallStore } from "./stores/CallStore.ts";
+ import { ModuleApi } from "./modules/Api.ts";
++import { draftStorage } from "./freechat/localPrivacy";
+ 
+ const HOMESERVER_URL_KEY = "mx_hs_url";
+ const ID_SERVER_URL_KEY = "mx_is_url";
+@@ -1191,6 +1192,7 @@ export async function clearStorage(opts?: { deleteEverything?: boolean }): Promi
+     }
+ 
+     window.sessionStorage?.clear();
++    draftStorage.clear();
+ 
+     // create a temporary client to clear out the persistent stores.
+     const cli = createMatrixClient({
+diff --git a/apps/web/src/SendHistoryManager.ts b/apps/web/src/SendHistoryManager.ts
+index 149dbe42d2..dc6a32a8a5 100644
+--- a/apps/web/src/SendHistoryManager.ts
++++ b/apps/web/src/SendHistoryManager.ts
+@@ -12,6 +12,7 @@ import { logger } from "matrix-js-sdk/src/logger";
+ 
+ import { type SerializedPart } from "./editor/parts";
+ import type EditorModel from "./editor/model";
++import { draftStorage } from "./freechat/localPrivacy";
+ 
+ interface IHistoryItem {
+     parts: SerializedPart[];
+@@ -31,7 +32,7 @@ export default class SendHistoryManager {
+         let index = 0;
+         let itemJSON;
+ 
+-        while ((itemJSON = sessionStorage.getItem(`${this.prefix}[${index}]`))) {
++        while ((itemJSON = draftStorage.getItem(`${this.prefix}[${index}]`))) {
+             try {
+                 this.history.push(JSON.parse(itemJSON));
+             } catch (e) {
+@@ -57,7 +58,7 @@ export default class SendHistoryManager {
+         this.history.push(item);
+         this.currentIndex = this.history.length;
+         this.lastIndex += 1;
+-        sessionStorage.setItem(`${this.prefix}[${this.lastIndex}]`, JSON.stringify(item));
++        draftStorage.setItem(`${this.prefix}[${this.lastIndex}]`, JSON.stringify(item));
+     }
+ 
+     public getItem(offset: number): IHistoryItem {
+diff --git a/apps/web/src/components/structures/MatrixChat.test.tsx b/apps/web/src/components/structures/MatrixChat.test.tsx
+index bc4fe59e70..6fe71c8009 100644
+--- a/apps/web/src/components/structures/MatrixChat.test.tsx
++++ b/apps/web/src/components/structures/MatrixChat.test.tsx
+@@ -80,6 +80,7 @@ import UserSettingsDialog from "../../components/views/dialogs/UserSettingsDialo
+ import { SDKContextClass } from "../../contexts/SDKContextClass";
+ import { type QrLoginCredentials } from "../../components/views/auth/LoginWithQR.tsx";
+ import { storeAuthContext } from "../../utils/oauth/persistOAuthSettings.ts";
++import { draftStorage } from "../../freechat/localPrivacy";
+ 
+ // Stub out ThemeWatcher as the necessary bits for themes are done in element-web's index.html and thus are lacking here,
+ // plus JSDOM's implementation of CSSStyleDeclaration has a bunch of differences to real browsers which cause issues.
+@@ -817,41 +818,41 @@ describe("<MatrixChat />", () => {
+             const room = new Room(roomId, mockClient, userId);
+             const timestamp = 2345678901234;
+             beforeEach(() => {
+-                localStorage.setItem(`mx_cider_state_${unknownRoomId}`, "fake_content");
+-                localStorage.setItem(`mx_cider_state_${roomId}`, "fake_content");
++                draftStorage.setItem(`mx_cider_state_${unknownRoomId}`, "fake_content");
++                draftStorage.setItem(`mx_cider_state_${roomId}`, "fake_content");
+                 mockClient.getRoom.mockImplementation((id) => [room].find((room) => room.roomId === id) || null);
+             });
+             it("should clean up drafts", async () => {
+                 Date.now = vi.fn(() => timestamp);
+-                localStorage.setItem(`mx_cider_state_${roomId}`, "fake_content");
+-                localStorage.setItem(`mx_cider_state_${unknownRoomId}`, "fake_content");
++                draftStorage.setItem(`mx_cider_state_${roomId}`, "fake_content");
++                draftStorage.setItem(`mx_cider_state_${unknownRoomId}`, "fake_content");
+                 await getComponentAndWaitForReady();
+                 mockClient.emit(ClientEvent.Sync, SyncState.Syncing, SyncState.Syncing);
+                 // let things settle
+                 await flushPromises();
+-                expect(localStorage.getItem(`mx_cider_state_${roomId}`)).not.toBeNull();
+-                expect(localStorage.getItem(`mx_cider_state_${unknownRoomId}`)).toBeNull();
++                expect(draftStorage.getItem(`mx_cider_state_${roomId}`)).not.toBeNull();
++                expect(draftStorage.getItem(`mx_cider_state_${unknownRoomId}`)).toBeNull();
+             });
+ 
+             it("should clean up wysiwyg drafts", async () => {
+                 Date.now = vi.fn(() => timestamp);
+-                localStorage.setItem(`mx_wysiwyg_state_${roomId}`, "fake_content");
+-                localStorage.setItem(`mx_wysiwyg_state_${unknownRoomId}`, "fake_content");
++                draftStorage.setItem(`mx_wysiwyg_state_${roomId}`, "fake_content");
++                draftStorage.setItem(`mx_wysiwyg_state_${unknownRoomId}`, "fake_content");
+                 await getComponentAndWaitForReady();
+                 mockClient.emit(ClientEvent.Sync, SyncState.Syncing, SyncState.Syncing);
+                 // let things settle
+                 await flushPromises();
+-                expect(localStorage.getItem(`mx_wysiwyg_state_${roomId}`)).not.toBeNull();
+-                expect(localStorage.getItem(`mx_wysiwyg_state_${unknownRoomId}`)).toBeNull();
++                expect(draftStorage.getItem(`mx_wysiwyg_state_${roomId}`)).not.toBeNull();
++                expect(draftStorage.getItem(`mx_wysiwyg_state_${unknownRoomId}`)).toBeNull();
+             });
+ 
+             it("should not clean up drafts before expiry", async () => {
+                 // Set the last cleanup to the recent past
+-                localStorage.setItem(`mx_cider_state_${unknownRoomId}`, "fake_content");
++                draftStorage.setItem(`mx_cider_state_${unknownRoomId}`, "fake_content");
+                 localStorage.setItem(DRAFT_LAST_CLEANUP_KEY, String(timestamp - 100));
+                 await getComponentAndWaitForReady();
+                 mockClient.emit(ClientEvent.Sync, SyncState.Syncing, SyncState.Syncing);
+-                expect(localStorage.getItem(`mx_cider_state_${unknownRoomId}`)).not.toBeNull();
++                expect(draftStorage.getItem(`mx_cider_state_${unknownRoomId}`)).not.toBeNull();
+             });
+         });
+ 
+diff --git a/apps/web/src/components/structures/MessagePanel.tsx b/apps/web/src/components/structures/MessagePanel.tsx
+index 95fce40f4c..0f0d6925fc 100644
+--- a/apps/web/src/components/structures/MessagePanel.tsx
++++ b/apps/web/src/components/structures/MessagePanel.tsx
+@@ -45,6 +45,7 @@ import { getEventDisplayInfo } from "../../utils/EventRenderingUtils";
+ import { type IReadReceiptPosition } from "../views/rooms/ReadReceiptMarker";
+ import { haveRendererForEvent } from "../../events/EventTileFactory";
+ import { editorRoomKey } from "../../Editing";
++import { draftStorage } from "../../freechat/localPrivacy";
+ import { hasThreadSummary } from "../../utils/EventUtils";
+ import { type BaseGrouper } from "./grouper/BaseGrouper";
+ import { MainGrouper } from "./grouper/MainGrouper";
+@@ -596,7 +597,7 @@ export default class MessagePanel extends React.Component<IProps, IState> {
+         }
+ 
+         try {
+-            return localStorage.getItem(editorRoomKey(this.props.room.roomId, this.context.timelineRenderingType));
++            return draftStorage.getItem(editorRoomKey(this.props.room.roomId, this.context.timelineRenderingType));
+         } catch (err) {
+             logger.error(err);
+             return null;
+diff --git a/apps/web/src/components/views/rooms/EditMessageComposer.tsx b/apps/web/src/components/views/rooms/EditMessageComposer.tsx
+index a98654d4e8..858ed02568 100644
+--- a/apps/web/src/components/views/rooms/EditMessageComposer.tsx
++++ b/apps/web/src/components/views/rooms/EditMessageComposer.tsx
+@@ -46,6 +46,7 @@ import type DocumentOffset from "../../../editor/offset";
+ import { attachMentions, attachRelation } from "../../../utils/messages";
+ import { filterBoolean } from "../../../utils/arrays";
+ import { MatrixClientPeg } from "../../../MatrixClientPeg";
++import { draftStorage } from "../../../freechat/localPrivacy";
+ 
+ // exported for tests
+ export function createEditContent(
+@@ -203,8 +204,8 @@ class EditMessageComposer extends React.Component<IEditMessageComposerProps, ISt
+     };
+ 
+     private endEdit(): void {
+-        localStorage.removeItem(this.editorRoomKey);
+-        localStorage.removeItem(this.editorStateKey);
++        draftStorage.removeItem(this.editorRoomKey);
++        draftStorage.removeItem(this.editorStateKey);
+ 
+         // close the event editing and focus composer
+         dis.dispatch({
+@@ -240,11 +241,11 @@ class EditMessageComposer extends React.Component<IEditMessageComposerProps, ISt
+     };
+ 
+     private get shouldSaveStoredEditorState(): boolean {
+-        return localStorage.getItem(this.editorRoomKey) !== null;
++        return draftStorage.getItem(this.editorRoomKey) !== null;
+     }
+ 
+     private restoreStoredEditorState(partCreator: PartCreator): Part[] | undefined {
+-        const json = localStorage.getItem(this.editorStateKey);
++        const json = draftStorage.getItem(this.editorStateKey);
+         if (json) {
+             try {
+                 const { parts: serializedParts } = JSON.parse(json);
+@@ -257,16 +258,16 @@ class EditMessageComposer extends React.Component<IEditMessageComposerProps, ISt
+     }
+ 
+     private clearPreviousEdit(): void {
+-        if (localStorage.getItem(this.editorRoomKey)) {
+-            localStorage.removeItem(`mx_edit_state_${localStorage.getItem(this.editorRoomKey)}`);
++        if (draftStorage.getItem(this.editorRoomKey)) {
++            draftStorage.removeItem(`mx_edit_state_${draftStorage.getItem(this.editorRoomKey)}`);
+         }
+     }
+ 
+     private saveStoredEditorState = (): void => {
+         const item = SendHistoryManager.createItem(this.model);
+         this.clearPreviousEdit();
+-        localStorage.setItem(this.editorRoomKey, this.props.editState.getEvent().getId()!);
+-        localStorage.setItem(this.editorStateKey, JSON.stringify(item));
++        draftStorage.setItem(this.editorRoomKey, this.props.editState.getEvent().getId()!);
++        draftStorage.setItem(this.editorStateKey, JSON.stringify(item));
+     };
+ 
+     private isContentModified(newContent: RoomMessageEventContent): boolean {
+diff --git a/apps/web/src/components/views/rooms/MessageComposer.test.tsx b/apps/web/src/components/views/rooms/MessageComposer.test.tsx
+index abfe476d4e..7d8fe2de90 100644
+--- a/apps/web/src/components/views/rooms/MessageComposer.test.tsx
++++ b/apps/web/src/components/views/rooms/MessageComposer.test.tsx
+@@ -42,6 +42,7 @@ import { TimelineRenderingType, type RoomContextType } from "../../../contexts/R
+ import { RoomUploadContextProvider } from "../../../viewmodels/room/RoomUploadViewModel.tsx";
+ import { SDKContext } from "../../../contexts/SDKContext.ts";
+ import { SDKContextClass } from "../../../contexts/SDKContextClass.ts";
++import { draftStorage } from "../../../freechat/localPrivacy";
+ 
+ const openStickerPicker = async (): Promise<void> => {
+     await userEvent.click(screen.getByLabelText("More options"));
+@@ -110,13 +111,13 @@ describe("MessageComposer", () => {
+         await flushPromises();
+ 
+         // assert there is state persisted
+-        expect(localStorage.getItem(key)).toBeNull();
++        expect(draftStorage.getItem(key)).toBeNull();
+ 
+         // ensure the right state was persisted to localStorage
+         unmount();
+ 
+         // assert the persisted state
+-        expect(JSON.parse(localStorage.getItem(key)!)).toStrictEqual({
++        expect(JSON.parse(draftStorage.getItem(key)!)).toStrictEqual({
+             content: messageText,
+             isRichText: true,
+         });
+diff --git a/apps/web/src/components/views/rooms/MessageComposer.tsx b/apps/web/src/components/views/rooms/MessageComposer.tsx
+index 44fe239ea5..b493b94871 100644
+--- a/apps/web/src/components/views/rooms/MessageComposer.tsx
++++ b/apps/web/src/components/views/rooms/MessageComposer.tsx
+@@ -64,6 +64,7 @@ import { MessageComposerUrlPreviewViewModel } from "../../../viewmodels/composer
+ import { useScopedRoomContext } from "../../../contexts/ScopedRoomContext";
+ import PlatformPeg from "../../../PlatformPeg";
+ import { ModuleApi } from "../../../modules/Api";
++import { draftStorage } from "../../../freechat/localPrivacy";
+ 
+ // The prefix used when persisting editor drafts to localstorage.
+ export const WYSIWYG_EDITOR_STATE_STORAGE_PREFIX = "mx_wysiwyg_state_";
+@@ -176,7 +177,7 @@ export class MessageComposer extends React.Component<IProps, IState> {
+     }
+ 
+     private restoreWysiwygEditorState(): WysiwygComposerState | undefined {
+-        const json = localStorage.getItem(this.editorStateKey);
++        const json = draftStorage.getItem(this.editorStateKey);
+         if (json) {
+             try {
+                 const state: WysiwygComposerState = JSON.parse(json);
+@@ -197,7 +198,7 @@ export class MessageComposer extends React.Component<IProps, IState> {
+                 isRichText: isRichTextEnabled,
+                 replyEventId: replyEventId,
+             };
+-            localStorage.setItem(this.editorStateKey, JSON.stringify(item));
++            draftStorage.setItem(this.editorStateKey, JSON.stringify(item));
+         } else {
+             this.clearStoredEditorState();
+         }
+@@ -210,7 +211,7 @@ export class MessageComposer extends React.Component<IProps, IState> {
+     };
+ 
+     private clearStoredEditorState(): void {
+-        localStorage.removeItem(this.editorStateKey);
++        draftStorage.removeItem(this.editorStateKey);
+     }
+ 
+     private get voiceRecording(): VoiceMessageRecording | undefined {
+diff --git a/apps/web/src/components/views/rooms/SendMessageComposer.test.tsx b/apps/web/src/components/views/rooms/SendMessageComposer.test.tsx
+index 663bcd9b10..a37d783a88 100644
+--- a/apps/web/src/components/views/rooms/SendMessageComposer.test.tsx
++++ b/apps/web/src/components/views/rooms/SendMessageComposer.test.tsx
+@@ -33,6 +33,7 @@ import { MessageComposerUrlPreviewViewModel } from "../../../viewmodels/composer
+ import { SDKContext } from "../../../contexts/SDKContext.ts";
+ import { UrlPreviewApi } from "../../../modules/UrlPreviewApi.ts";
+ import { attachUrlPreviews } from "../../../utils/messages";
++import { draftStorage } from "../../../freechat/localPrivacy";
+ 
+ vi.mock("../../../utils/local-room", () => ({
+     doMaybeLocalRoomAction: vi.fn(),
+@@ -184,7 +185,7 @@ describe("<SendMessageComposer/>", () => {
+         const spyDispatcher = vi.spyOn(defaultDispatcher, "dispatch");
+ 
+         beforeEach(() => {
+-            localStorage.clear();
++            draftStorage.clear();
+             // Note: unlike Jest, Vitest's mockReset() on a spy restores call-through to the
+             // original implementation rather than stubbing it out, so re-apply a no-op
+             // implementation to avoid a stray real dispatch crashing the test worker later.
+@@ -237,11 +238,11 @@ describe("<SendMessageComposer/>", () => {
+             const key = "mx_cider_state_myfakeroom";
+ 
+             expect(container.textContent).toBe("Test Text");
+-            expect(localStorage.getItem(key)).toBeNull();
++            expect(draftStorage.getItem(key)).toBeNull();
+ 
+             // ensure the right state was persisted to localStorage
+             unmount();
+-            expect(JSON.parse(localStorage.getItem(key)!)).toStrictEqual({
++            expect(JSON.parse(draftStorage.getItem(key)!)).toStrictEqual({
+                 parts: [{ type: "plain", text: "Test Text" }],
+                 replyEventId: mockEvent.getId(),
+             });
+@@ -257,7 +258,7 @@ describe("<SendMessageComposer/>", () => {
+ 
+             // now try with localStorage wiped out
+             unmount();
+-            localStorage.removeItem(key);
++            draftStorage.removeItem(key);
+             ({ container } = getComponent(props));
+             expect(container.textContent).toBe("");
+         });
+@@ -275,7 +276,7 @@ describe("<SendMessageComposer/>", () => {
+ 
+             // the replacement composer should persist the draft again when it unmounts
+             unmount();
+-            expect(JSON.parse(localStorage.getItem("mx_cider_state_myfakeroom")!)).toStrictEqual({
++            expect(JSON.parse(draftStorage.getItem("mx_cider_state_myfakeroom")!)).toStrictEqual({
+                 parts: [{ type: "plain", text: "Notes from call" }],
+             });
+         });
+@@ -288,11 +289,11 @@ describe("<SendMessageComposer/>", () => {
+             const key = "mx_cider_state_myfakeroom";
+ 
+             expect(container.textContent).toBe("Hello World");
+-            expect(localStorage.getItem(key)).toBeNull();
++            expect(draftStorage.getItem(key)).toBeNull();
+ 
+             // ensure the right state was persisted to localStorage
+             window.dispatchEvent(new Event("beforeunload"));
+-            expect(JSON.parse(localStorage.getItem(key)!)).toStrictEqual({
++            expect(JSON.parse(draftStorage.getItem(key)!)).toStrictEqual({
+                 parts: [{ type: "plain", text: "Hello World" }],
+             });
+         });
+@@ -314,7 +315,7 @@ describe("<SendMessageComposer/>", () => {
+             });
+ 
+             expect(container.textContent).toBe("");
+-            const str = sessionStorage.getItem(`mx_cider_history_${mockRoom.roomId}[0]`)!;
++            const str = draftStorage.getItem(`mx_cider_history_${mockRoom.roomId}[0]`)!;
+             expect(JSON.parse(str)).toStrictEqual({
+                 parts: [{ type: "plain", text: "This is a message" }],
+                 replyEventId: mockEvent.getId(),
+diff --git a/apps/web/src/components/views/rooms/SendMessageComposer.tsx b/apps/web/src/components/views/rooms/SendMessageComposer.tsx
+index 9d67309c58..427332bee7 100644
+--- a/apps/web/src/components/views/rooms/SendMessageComposer.tsx
++++ b/apps/web/src/components/views/rooms/SendMessageComposer.tsx
+@@ -69,6 +69,7 @@ import { type RoomUploadViewModel, useRoomUploadViewModel } from "../../../viewm
+ import { type MessageComposerUrlPreviewViewModel } from "../../../viewmodels/composer/MessageComposerUrlPreviewViewModel";
+ import { linksIn } from "../../../utils/UrlUtils";
+ import { type MessageComposerUrlPreviewSnapshot } from "@element-hq/web-shared-components";
++import { draftStorage } from "../../../freechat/localPrivacy";
+ 
+ // The prefix used when persisting editor drafts to localstorage.
+ export const EDITOR_STATE_STORAGE_PREFIX = "mx_cider_state_";
+@@ -534,7 +535,7 @@ export class SendMessageComposer extends React.Component<ISendMessageComposerPro
+     }
+ 
+     private clearStoredEditorState(): void {
+-        localStorage.removeItem(this.editorStateKey);
++        draftStorage.removeItem(this.editorStateKey);
+     }
+ 
+     private restoreStoredEditorState(partCreator: PartCreator): Part[] | null {
+@@ -543,7 +544,7 @@ export class SendMessageComposer extends React.Component<ISendMessageComposerPro
+             return null;
+         }
+ 
+-        const json = localStorage.getItem(this.editorStateKey);
++        const json = draftStorage.getItem(this.editorStateKey);
+         if (json) {
+             try {
+                 const { parts: serializedParts, replyEventId } = JSON.parse(json);
+@@ -572,7 +573,7 @@ export class SendMessageComposer extends React.Component<ISendMessageComposerPro
+     private saveStoredEditorState = (): void => {
+         if (this.shouldSaveStoredEditorState()) {
+             const item = SendHistoryManager.createItem(this.model, this.props.replyToEvent);
+-            localStorage.setItem(this.editorStateKey, JSON.stringify(item));
++            draftStorage.setItem(this.editorStateKey, JSON.stringify(item));
+         } else {
+             this.clearStoredEditorState();
+         }
+diff --git a/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx b/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx
+index 9e674c184c..3828a9d250 100644
+--- a/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx
++++ b/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx
+@@ -23,7 +23,6 @@ import SettingsStore from "../../../../../settings/SettingsStore";
+ import { UIFeature } from "../../../../../settings/UIFeature";
+ import { type ActionPayload } from "../../../../../dispatcher/payloads";
+ import SettingsFlag from "../../../elements/SettingsFlag";
+-import EventIndexPanel from "../../EventIndexPanel";
+ import InlineSpinner from "../../../elements/InlineSpinner";
+ import { PosthogAnalytics } from "../../../../../PosthogAnalytics";
+ import { showDialog as showAnalyticsLearnMoreDialog } from "../../../dialogs/AnalyticsLearnMoreDialog";
+@@ -291,12 +290,6 @@ export default class SecurityUserSettingsTab extends React.Component<EmptyObject
+     public render(): React.ReactNode {
+         const secureBackup = <SecureBackup />;
+ 
+-        const eventIndex = (
+-            <SettingsSubsection heading={_t("settings|security|message_search_section")}>
+-                <EventIndexPanel />
+-            </SettingsSubsection>
+-        );
+-
+         let warning;
+         if (!privateShouldBeEncrypted(MatrixClientPeg.safeGet())) {
+             warning = (
+@@ -375,10 +368,7 @@ export default class SecurityUserSettingsTab extends React.Component<EmptyObject
+             <SettingsTab>
+                 {warning}
+                 <SetIntegrationManager />
+-                <SettingsSection heading={_t("settings|security|encryption_section")}>
+-                    {secureBackup}
+-                    {eventIndex}
+-                </SettingsSection>
++                <SettingsSection heading={_t("settings|security|encryption_section")}>{secureBackup}</SettingsSection>
+                 {privacySection}
+                 {/* FreeChat */}
+                 <SettingsSection heading={ft("burn_section")}>
+diff --git a/apps/web/src/components/views/settings/tabs/user/__snapshots__/SecurityUserSettingsTab.test.tsx.snap b/apps/web/src/components/views/settings/tabs/user/__snapshots__/SecurityUserSettingsTab.test.tsx.snap
+index 0cc7638b95..1c5d7197a9 100644
+--- a/apps/web/src/components/views/settings/tabs/user/__snapshots__/SecurityUserSettingsTab.test.tsx.snap
++++ b/apps/web/src/components/views/settings/tabs/user/__snapshots__/SecurityUserSettingsTab.test.tsx.snap
+@@ -117,56 +117,7 @@ exports[`<SecurityUserSettingsTab /> > renders security section 1`] = `
+         </h2>
+         <div
+           class="mx_SettingsSection_subSections"
+-        >
+-          <div
+-            class="mx_SettingsSubsection"
+-          >
+-            <div
+-              class="mx_SettingsSubsectionHeading"
+-            >
+-              <h3
+-                class="mx_Heading_h4 mx_SettingsSubsectionHeading_heading"
+-              >
+-                Message search
+-              </h3>
+-            </div>
+-            <div
+-              class="mx_SettingsSubsection_content"
+-            >
+-              <div
+-                class="mx_SettingsSubsection_text"
+-              >
+-                <span>
+-                  Element can't securely cache encrypted messages locally while running in a web browser. Use 
+-                  <a
+-                    class="mx_ExternalLink"
+-                    href="https://element.io/download"
+-                    rel="noreferrer noopener"
+-                    target="_blank"
+-                  >
+-                    Element Desktop
+-                    <svg
+-                      class="mx_ExternalLink_icon"
+-                      fill="currentColor"
+-                      height="1em"
+-                      viewBox="0 0 24 24"
+-                      width="1em"
+-                      xmlns="http://www.w3.org/2000/svg"
+-                    >
+-                      <path
+-                        d="M5 3h6a1 1 0 1 1 0 2H5v14h14v-6a1 1 0 1 1 2 0v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2"
+-                      />
+-                      <path
+-                        d="M15 3h5a1 1 0 0 1 1 1v5a1 1 0 1 1-2 0V6.414l-6.293 6.293a1 1 0 0 1-1.414-1.414L17.586 5H15a1 1 0 1 1 0-2"
+-                      />
+-                    </svg>
+-                  </a>
+-                   for encrypted messages to appear in search results.
+-                </span>
+-              </div>
+-            </div>
+-          </div>
+-        </div>
++        />
+       </div>
+       <div
+         class="mx_SettingsSection"
+diff --git a/apps/web/src/freechat/localPrivacy.test.ts b/apps/web/src/freechat/localPrivacy.test.ts
+new file mode 100644
+index 0000000000..f856e2b681
+--- /dev/null
++++ b/apps/web/src/freechat/localPrivacy.test.ts
+@@ -0,0 +1,43 @@
++/*
++Copyright 2026 FreeChat contributors
++
++SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++Please see LICENSE files in the repository root for full details.
++*/
++
++// @vitest-environment happy-dom
++
++import { afterEach, describe, expect, it, vi } from "vitest";
++
++import { draftStorage, purgePersistedMessages } from "./localPrivacy";
++
++describe("localPrivacy", () => {
++    afterEach(() => {
++        localStorage.clear();
++        vi.unstubAllGlobals();
++    });
++
++    it("keeps drafts in memory, not in localStorage", () => {
++        draftStorage.setItem("mx_cider_state_!room:x", "secret draft");
++        expect(draftStorage.getItem("mx_cider_state_!room:x")).toBe("secret draft");
++        expect(localStorage.getItem("mx_cider_state_!room:x")).toBeNull();
++        draftStorage.removeItem("mx_cider_state_!room:x");
++        expect(draftStorage.getItem("mx_cider_state_!room:x")).toBeNull();
++    });
++
++    it("deletes drafts and the sync store an older build left on disk", () => {
++        const deleteDatabase = vi.fn();
++        vi.stubGlobal("indexedDB", { deleteDatabase });
++        localStorage.setItem("mx_cider_state_!a:x", "old");
++        localStorage.setItem("mx_wysiwyg_state_!a:x", "old");
++        localStorage.setItem("mx_edit_room_!a:x_Room", "$ev");
++        localStorage.setItem("mx_edit_state_$ev", "old");
++        localStorage.setItem("mx_access_token", "keep");
++
++        purgePersistedMessages();
++
++        expect(deleteDatabase).toHaveBeenCalledWith("riot-web-sync");
++        expect(localStorage.length).toBe(1);
++        expect(localStorage.getItem("mx_access_token")).toBe("keep");
++    });
++});
+diff --git a/apps/web/src/freechat/localPrivacy.ts b/apps/web/src/freechat/localPrivacy.ts
+new file mode 100644
+index 0000000000..d86093a801
+--- /dev/null
++++ b/apps/web/src/freechat/localPrivacy.ts
+@@ -0,0 +1,67 @@
++/*
++Copyright 2026 FreeChat contributors
++
++SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++Please see LICENSE files in the repository root for full details.
++*/
++
++/*
++ * FreeChat: keep message content off the device's disk.
++ *
++ * - The sync store (rooms, timelines, latest messages) lives in memory only; every launch
++ *   starts from a fresh sync. Only the crypto store (keys) is persisted.
++ * - Composer drafts and the sent-message history (arrow-up recall) live in memory only.
++ * - Data an older build may have written (the IndexedDB sync store, drafts in localStorage)
++ *   is deleted at startup.
++ */
++
++import { logger } from "matrix-js-sdk/src/logger";
++
++const LEGACY_SYNC_STORE = "riot-web-sync";
++const DRAFT_PREFIXES = ["mx_cider_state_", "mx_wysiwyg_state_", "mx_edit_room_", "mx_edit_state_"];
++
++class MemoryStorage {
++    private readonly items = new Map<string, string>();
++
++    public getItem(key: string): string | null {
++        return this.items.get(key) ?? null;
++    }
++
++    public setItem(key: string, value: string): void {
++        this.items.set(key, String(value));
++    }
++
++    public removeItem(key: string): void {
++        this.items.delete(key);
++    }
++
++    public keys(): string[] {
++        return [...this.items.keys()];
++    }
++
++    public clear(): void {
++        this.items.clear();
++    }
++}
++
++/** Replaces `localStorage` / `sessionStorage` for drafts and sent history. Cleared on logout and reload. */
++export const draftStorage = new MemoryStorage();
++
++/** Removes message content an earlier build left on disk. Safe to call on every start. */
++export function purgePersistedMessages(): void {
++    try {
++        globalThis.indexedDB?.deleteDatabase(LEGACY_SYNC_STORE);
++    } catch (e) {
++        logger.warn("FreeChat: could not delete the legacy sync store", e);
++    }
++    try {
++        const stale: string[] = [];
++        for (let i = 0; i < localStorage.length; i++) {
++            const key = localStorage.key(i);
++            if (key && DRAFT_PREFIXES.some((prefix) => key.startsWith(prefix))) stale.push(key);
++        }
++        stale.forEach((key) => localStorage.removeItem(key));
++    } catch (e) {
++        logger.warn("FreeChat: could not clear stored drafts", e);
++    }
++}
+diff --git a/apps/web/src/utils/createMatrixClient.ts b/apps/web/src/utils/createMatrixClient.ts
+index 8c29633c96..14841788b2 100644
+--- a/apps/web/src/utils/createMatrixClient.ts
++++ b/apps/web/src/utils/createMatrixClient.ts
+@@ -13,7 +13,6 @@ import {
+     MemoryCryptoStore,
+     MemoryStore,
+     IndexedDBCryptoStore,
+-    IndexedDBStore,
+     LocalStorageCryptoStore,
+     RoomNameType,
+     type RoomNameState,
+@@ -23,7 +22,7 @@ import {
+ import { VerificationMethod } from "matrix-js-sdk/src/types";
+ import { logger } from "matrix-js-sdk/src/logger";
+ 
+-import indexeddbWorkerFactory from "../workers/indexeddbWorkerFactory";
++import { purgePersistedMessages } from "../freechat/localPrivacy";
+ import SettingsStore from "../settings/SettingsStore";
+ import { crossSigningCallbacks } from "../SecurityManager";
+ import IdentityAuthClient from "../IdentityAuthClient";
+@@ -180,14 +179,9 @@ export function createMatrixClient(opts: ICreateClientOpts): MatrixClient {
+         useAuthorizationHeader: true,
+     };
+ 
+-    if (indexedDB && localStorage) {
+-        storeOpts.store = new IndexedDBStore({
+-            indexedDB: indexedDB,
+-            dbName: "riot-web-sync",
+-            localStorage,
+-            workerFactory: indexeddbWorkerFactory,
+-        });
+-    } else if (localStorage) {
++    // FreeChat: messages are kept in memory only; see freechat/localPrivacy.ts.
++    purgePersistedMessages();
++    if (localStorage) {
+         storeOpts.store = new MemoryStore({ localStorage });
+     }
+ 
+diff --git a/apps/web/src/vector/platform/ElectronPlatform.tsx b/apps/web/src/vector/platform/ElectronPlatform.tsx
+index bb9c8d2bdf..a880f22d6c 100644
+--- a/apps/web/src/vector/platform/ElectronPlatform.tsx
++++ b/apps/web/src/vector/platform/ElectronPlatform.tsx
+@@ -40,7 +40,6 @@ import { UPDATE_EVENT } from "../../stores/AsyncStore";
+ import { avatarUrlForRoom, getInitialLetter } from "../../Avatar";
+ import DesktopCapturerSourcePicker from "../../components/views/elements/DesktopCapturerSourcePicker";
+ import { MatrixClientPeg } from "../../MatrixClientPeg";
+-import { SeshatIndexManager } from "./SeshatIndexManager";
+ import { IPCManager } from "./IPCManager";
+ import { _t } from "../../languageHandler";
+ import { BadgeOverlayRenderer } from "../../favicon";
+@@ -89,7 +88,6 @@ function getUpdateCheckStatus(status: boolean | string): UpdateStatus {
+ 
+ export default class ElectronPlatform extends BasePlatform {
+     private readonly ipc = new IPCManager("ipcCall", "ipcReply");
+-    private readonly eventIndexManager: BaseEventIndexManager = new SeshatIndexManager();
+     public readonly initialised: Promise<void>;
+     private readonly electron: Electron;
+     private protocol!: string;
+@@ -418,7 +416,8 @@ export default class ElectronPlatform extends BasePlatform {
+     }
+ 
+     public getEventIndexingManager(): BaseEventIndexManager | null {
+-        return this.eventIndexManager;
++        // FreeChat: no local search index; it would write decrypted messages to disk.
++        return null;
+     }
+ 
+     public async setLanguage(preferredLangs: string[]): Promise<any> {

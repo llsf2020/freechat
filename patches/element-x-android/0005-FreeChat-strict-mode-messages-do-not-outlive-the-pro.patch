@@ -1,0 +1,1234 @@
+From a88c7545c2142d3a56161372a61d73b6c35ae70b Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 05/12] FreeChat: strict mode; messages do not outlive the
+ process
+
+Strict mode (per device, opt-in): the session is kept in memory only, its SDK
+stores are encrypted with a key that never leaves memory and deleted on the
+next start, it signs out after the chosen time in the background, and password
+sign-ins use a device ID the homeserver removes once idle. In every mode the
+event and media caches are dropped whenever a session's client is created.
+---
+ appnav/build.gradle.kts                       |   2 +
+ .../android/appnav/LoggedInFlowNode.kt        |   3 +
+ .../appnav/freechat/StrictSessionGuard.kt     |  72 ++++++++++
+ .../appnav/freechat/StrictSessionGuardTest.kt |  88 ++++++++++++
+ .../impl/freechat/StrictModePresenter.kt      |  93 +++++++++++++
+ .../impl/freechat/StrictModeView.kt           | 131 ++++++++++++++++++
+ .../impl/root/PreferencesRootNode.kt          |  24 ++--
+ .../matrix/api/freechat/StrictMode.kt         |  48 +++++++
+ .../matrix/impl/RustMatrixClientFactory.kt    |  15 ++
+ .../auth/RustMatrixAuthenticationService.kt   |  21 ++-
+ .../matrix/impl/paths/SessionPathsFactory.kt  |  17 ++-
+ .../RustMatrixAuthenticationServiceTest.kt    |   2 +
+ .../test/freechat/FakeStrictModeStore.kt      |  22 +++
+ .../impl/freechat/DataStoreStrictModeStore.kt |  49 +++++++
+ .../sessionstorage/api/StrictSessions.kt      |  20 +++
+ .../impl/DatabaseSessionStore.kt              | 115 ++++++++++-----
+ .../impl/StrictSessionStoreTest.kt            | 103 ++++++++++++++
+ .../res/values-zh-rTW/freechat_strings.xml    |   9 ++
+ .../main/res/values-zh/freechat_strings.xml   |   9 ++
+ .../src/main/res/values/freechat_strings.xml  |   9 ++
+ 20 files changed, 808 insertions(+), 44 deletions(-)
+ create mode 100644 appnav/src/main/kotlin/io/element/android/appnav/freechat/StrictSessionGuard.kt
+ create mode 100644 appnav/src/test/kotlin/io/element/android/appnav/freechat/StrictSessionGuardTest.kt
+ create mode 100644 features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/freechat/StrictModePresenter.kt
+ create mode 100644 features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/freechat/StrictModeView.kt
+ create mode 100644 libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/StrictMode.kt
+ create mode 100644 libraries/matrix/test/src/main/kotlin/io/element/android/libraries/matrix/test/freechat/FakeStrictModeStore.kt
+ create mode 100644 libraries/preferences/impl/src/main/kotlin/io/element/android/libraries/preferences/impl/freechat/DataStoreStrictModeStore.kt
+ create mode 100644 libraries/session-storage/api/src/main/kotlin/io/element/android/libraries/sessionstorage/api/StrictSessions.kt
+ create mode 100644 libraries/session-storage/impl/src/test/kotlin/io/element/android/libraries/sessionstorage/impl/StrictSessionStoreTest.kt
+
+diff --git a/appnav/build.gradle.kts b/appnav/build.gradle.kts
+index 12b95d9a09..1a4067ff2b 100644
+--- a/appnav/build.gradle.kts
++++ b/appnav/build.gradle.kts
+@@ -56,6 +56,7 @@ dependencies {
+ 
+     implementation(projects.services.apperror.api)
+     implementation(projects.services.appnavstate.api)
++    implementation(projects.services.toolbox.api) // FreeChat
+     implementation(projects.services.analytics.api)
+ 
+     testCommonDependencies(libs)
+@@ -80,5 +81,6 @@ dependencies {
+     testImplementation(projects.features.signedout.test)
+     testImplementation(projects.services.apperror.test)
+     testImplementation(projects.services.appnavstate.test)
++    testImplementation(projects.services.toolbox.test) // FreeChat
+     testImplementation(projects.services.analytics.test)
+ }
+diff --git a/appnav/src/main/kotlin/io/element/android/appnav/LoggedInFlowNode.kt b/appnav/src/main/kotlin/io/element/android/appnav/LoggedInFlowNode.kt
+index f754b369b5..af207a83b9 100644
+--- a/appnav/src/main/kotlin/io/element/android/appnav/LoggedInFlowNode.kt
++++ b/appnav/src/main/kotlin/io/element/android/appnav/LoggedInFlowNode.kt
+@@ -41,6 +41,7 @@ import com.bumble.appyx.navmodel.backstack.operation.singleTop
+ import dev.zacsweers.metro.Assisted
+ import dev.zacsweers.metro.AssistedInject
+ import io.element.android.annotations.ContributesNode
++import io.element.android.appnav.freechat.StrictSessionGuard
+ import io.element.android.appnav.loggedin.LoggedInNode
+ import io.element.android.appnav.loggedin.MediaPreviewConfigMigration
+ import io.element.android.appnav.loggedin.SendQueues
+@@ -163,6 +164,7 @@ class LoggedInFlowNode(
+     private val activeLiveLocationShareManager: ActiveLiveLocationShareManager,
+     private val customMapTilerConfigProvider: CustomMapTilerConfigProvider,
+     private val screenshotPolicy: ScreenshotPolicy, // FreeChat
++    private val strictSessionGuard: StrictSessionGuard, // FreeChat
+ ) : BaseFlowNode<LoggedInFlowNode.NavTarget>(
+     backstack = BackStack(
+         initialElement = NavTarget.Placeholder,
+@@ -228,6 +230,7 @@ class LoggedInFlowNode(
+         lifecycle.subscribe(
+             onCreate = {
+                 analyticsRoomListStateWatcher.start()
++                strictSessionGuard.start() // FreeChat
+                 appNavigationStateService.onNavigateToSession(id, matrixClient.sessionId)
+                 loggedInFlowProcessor.observeEvents(sessionCoroutineScope)
+                 matrixClient.sessionVerificationService.setListener(verificationListener)
+diff --git a/appnav/src/main/kotlin/io/element/android/appnav/freechat/StrictSessionGuard.kt b/appnav/src/main/kotlin/io/element/android/appnav/freechat/StrictSessionGuard.kt
+new file mode 100644
+index 0000000000..4264f72664
+--- /dev/null
++++ b/appnav/src/main/kotlin/io/element/android/appnav/freechat/StrictSessionGuard.kt
+@@ -0,0 +1,72 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.appnav.freechat
++
++import dev.zacsweers.metro.Inject
++import io.element.android.libraries.di.annotations.SessionCoroutineScope
++import io.element.android.libraries.matrix.api.MatrixClient
++import io.element.android.libraries.matrix.api.freechat.StrictModeStore
++import io.element.android.libraries.sessionstorage.api.SessionStore
++import io.element.android.libraries.sessionstorage.api.StrictSessions
++import io.element.android.services.appnavstate.api.AppForegroundStateService
++import io.element.android.services.toolbox.api.systemclock.SystemClock
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.flow.collectLatest
++import kotlinx.coroutines.flow.combine
++import kotlinx.coroutines.flow.distinctUntilChanged
++import kotlinx.coroutines.launch
++import timber.log.Timber
++import kotlin.time.Duration.Companion.minutes
++
++/**
++ * FreeChat strict mode: signs a strict session out once the app has been in the background for the chosen time.
++ *
++ * Time in the background is measured on the wall clock as well, because timers do not run while the device
++ * sleeps or the process is frozen: coming back after the idle time signs out at once. A process that is killed
++ * outright cannot sign out; the homeserver then deletes the device (see `StrictMode.deviceId`).
++ */
++@Inject
++class StrictSessionGuard(
++    private val client: MatrixClient,
++    private val sessionStore: SessionStore,
++    private val strictModeStore: StrictModeStore,
++    private val appForegroundStateService: AppForegroundStateService,
++    private val systemClock: SystemClock,
++    @SessionCoroutineScope private val sessionCoroutineScope: CoroutineScope,
++) {
++    fun start() {
++        sessionCoroutineScope.launch {
++            val session = sessionStore.getSession(client.sessionId.value) ?: return@launch
++            if (!StrictSessions.isStrict(session)) return@launch
++            Timber.i("FreeChat: strict session, signing out after time in the background")
++            var backgroundSince: Long? = null
++            combine(appForegroundStateService.isInForeground, appForegroundStateService.isInCall) { foreground, inCall ->
++                foreground || inCall
++            }
++                .distinctUntilChanged()
++                .collectLatest { active ->
++                    val idleMillis = strictModeStore.get().idleMinutes.minutes.inWholeMilliseconds
++                    if (active) {
++                        val since = backgroundSince
++                        backgroundSince = null
++                        if (since != null && systemClock.epochMillis() - since >= idleMillis) signOut()
++                    } else {
++                        backgroundSince = systemClock.epochMillis()
++                        delay(idleMillis)
++                        signOut()
++                    }
++                }
++        }
++    }
++
++    private suspend fun signOut() {
++        Timber.i("FreeChat: strict session idle in the background, signing out")
++        client.logout(userInitiated = true, ignoreSdkError = true)
++    }
++}
+diff --git a/appnav/src/test/kotlin/io/element/android/appnav/freechat/StrictSessionGuardTest.kt b/appnav/src/test/kotlin/io/element/android/appnav/freechat/StrictSessionGuardTest.kt
+new file mode 100644
+index 0000000000..7b93330fe0
+--- /dev/null
++++ b/appnav/src/test/kotlin/io/element/android/appnav/freechat/StrictSessionGuardTest.kt
+@@ -0,0 +1,88 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.appnav.freechat
++
++import com.google.common.truth.Truth.assertThat
++import io.element.android.libraries.matrix.api.freechat.StrictModeSettings
++import io.element.android.libraries.matrix.test.A_SESSION_ID
++import io.element.android.libraries.matrix.test.FakeMatrixClient
++import io.element.android.libraries.matrix.test.freechat.FakeStrictModeStore
++import io.element.android.libraries.sessionstorage.api.StrictSessions
++import io.element.android.libraries.sessionstorage.test.InMemorySessionStore
++import io.element.android.libraries.sessionstorage.test.aSessionData
++import io.element.android.services.appnavstate.test.FakeAppForegroundStateService
++import io.element.android.services.toolbox.test.systemclock.FakeSystemClock
++import kotlinx.coroutines.test.TestScope
++import kotlinx.coroutines.test.advanceTimeBy
++import kotlinx.coroutines.test.runCurrent
++import kotlinx.coroutines.test.runTest
++import org.junit.Test
++import kotlin.time.Duration.Companion.minutes
++import kotlin.time.Duration.Companion.seconds
++
++class StrictSessionGuardTest {
++    private val foreground = FakeAppForegroundStateService(initialForegroundValue = true)
++    private val clock = FakeSystemClock(epochMillisResult = 0)
++    private var logouts = 0
++    private val client = FakeMatrixClient(sessionId = A_SESSION_ID).apply { logoutLambda = { _, _ -> logouts++ } }
++
++    private fun TestScope.startGuard(strict: Boolean) {
++        val path = if (strict) "/files/${StrictSessions.DIR_PREFIX}1" else "/files/1"
++        StrictSessionGuard(
++            client = client,
++            sessionStore = InMemorySessionStore(listOf(aSessionData(sessionId = A_SESSION_ID.value, sessionPath = path))),
++            strictModeStore = FakeStrictModeStore(StrictModeSettings(enabled = true, idleMinutes = 5)),
++            appForegroundStateService = foreground,
++            systemClock = clock,
++            sessionCoroutineScope = backgroundScope,
++        ).start()
++        runCurrent()
++    }
++
++    @Test
++    fun `signs a strict session out after the idle time in the background`() = runTest {
++        startGuard(strict = true)
++        foreground.givenIsInForeground(false)
++        advanceTimeBy(4.minutes)
++        foreground.givenIsInForeground(true)
++        advanceTimeBy(10.minutes)
++        assertThat(logouts).isEqualTo(0)
++
++        foreground.givenIsInForeground(false)
++        advanceTimeBy(5.minutes + 10.seconds)
++        assertThat(logouts).isEqualTo(1)
++    }
++
++    @Test
++    fun `signs out at once when coming back after the idle time on the wall clock`() = runTest {
++        startGuard(strict = true)
++        foreground.givenIsInForeground(false)
++        runCurrent()
++        clock.epochMillisResult = 6.minutes.inWholeMilliseconds // the device slept: timers did not run
++        foreground.givenIsInForeground(true)
++        advanceTimeBy(10.seconds)
++        assertThat(logouts).isEqualTo(1)
++    }
++
++    @Test
++    fun `stays signed in during a call`() = runTest {
++        startGuard(strict = true)
++        foreground.updateIsInCallState(true)
++        foreground.givenIsInForeground(false)
++        advanceTimeBy(30.minutes)
++        assertThat(logouts).isEqualTo(0)
++    }
++
++    @Test
++    fun `leaves normal sessions alone`() = runTest {
++        startGuard(strict = false)
++        foreground.givenIsInForeground(false)
++        advanceTimeBy(60.minutes)
++        assertThat(logouts).isEqualTo(0)
++    }
++}
+diff --git a/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/freechat/StrictModePresenter.kt b/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/freechat/StrictModePresenter.kt
+new file mode 100644
+index 0000000000..3f49f45d83
+--- /dev/null
++++ b/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/freechat/StrictModePresenter.kt
+@@ -0,0 +1,93 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.features.preferences.impl.freechat
++
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.collectAsState
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.rememberCoroutineScope
++import androidx.compose.runtime.setValue
++import dev.zacsweers.metro.Inject
++import io.element.android.libraries.architecture.Presenter
++import io.element.android.libraries.matrix.api.MatrixClient
++import io.element.android.libraries.matrix.api.freechat.StrictModeSettings
++import io.element.android.libraries.matrix.api.freechat.StrictModeStore
++import io.element.android.libraries.sessionstorage.api.SessionStore
++import io.element.android.libraries.sessionstorage.api.StrictSessions
++import kotlinx.coroutines.launch
++
++/** FreeChat: the strict mode switch. See `StrictMode`. */
++@Inject
++class StrictModePresenter(
++    private val client: MatrixClient,
++    private val sessionStore: SessionStore,
++    private val strictModeStore: StrictModeStore,
++) : Presenter<StrictModeState> {
++    @Composable
++    override fun present(): StrictModeState {
++        val scope = rememberCoroutineScope()
++        val settings by strictModeStore.settings.collectAsState(initial = StrictModeSettings())
++        var isStrictSession by remember { mutableStateOf(false) }
++        var dialog by remember { mutableStateOf(StrictModeDialog.None) }
++
++        LaunchedEffect(Unit) {
++            isStrictSession = sessionStore.getSession(client.sessionId.value)?.let(StrictSessions::isStrict) == true
++        }
++
++        fun handleEvent(event: StrictModeEvent) {
++            when (event) {
++                StrictModeEvent.AskToEnable -> dialog = StrictModeDialog.ConfirmEnable
++                StrictModeEvent.ChooseIdleTime -> dialog = StrictModeDialog.IdleTime
++                StrictModeEvent.CloseDialog -> dialog = StrictModeDialog.None
++                StrictModeEvent.Enable -> {
++                    dialog = StrictModeDialog.None
++                    scope.launch { strictModeStore.set(settings.copy(enabled = true)) }
++                }
++                StrictModeEvent.Disable -> scope.launch { strictModeStore.set(settings.copy(enabled = false)) }
++                is StrictModeEvent.SetIdleMinutes -> {
++                    dialog = StrictModeDialog.None
++                    scope.launch { strictModeStore.set(settings.copy(idleMinutes = event.minutes)) }
++                }
++            }
++        }
++
++        return StrictModeState(
++            enabled = settings.enabled,
++            idleMinutes = settings.idleMinutes,
++            isStrictSession = isStrictSession,
++            dialog = dialog,
++            eventSink = ::handleEvent,
++        )
++    }
++}
++
++enum class StrictModeDialog { None, ConfirmEnable, IdleTime }
++
++data class StrictModeState(
++    /** Strict mode is chosen for the next sign-in on this device. */
++    val enabled: Boolean,
++    val idleMinutes: Int,
++    /** The current session was signed in with strict mode on. */
++    val isStrictSession: Boolean,
++    val dialog: StrictModeDialog,
++    val eventSink: (StrictModeEvent) -> Unit,
++)
++
++sealed interface StrictModeEvent {
++    data object AskToEnable : StrictModeEvent
++    data object ChooseIdleTime : StrictModeEvent
++    data object CloseDialog : StrictModeEvent
++
++    /** Turns strict mode on; the view then starts the sign-out, since it applies from the next sign-in. */
++    data object Enable : StrictModeEvent
++    data object Disable : StrictModeEvent
++    data class SetIdleMinutes(val minutes: Int) : StrictModeEvent
++}
+diff --git a/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/freechat/StrictModeView.kt b/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/freechat/StrictModeView.kt
+new file mode 100644
+index 0000000000..c36139b658
+--- /dev/null
++++ b/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/freechat/StrictModeView.kt
+@@ -0,0 +1,131 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.features.preferences.impl.freechat
++
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.tooling.preview.PreviewParameter
++import androidx.compose.ui.tooling.preview.PreviewParameterProvider
++import io.element.android.compound.tokens.generated.CompoundIcons
++import io.element.android.libraries.designsystem.components.dialogs.ConfirmationDialog
++import io.element.android.libraries.designsystem.components.dialogs.ListOption
++import io.element.android.libraries.designsystem.components.dialogs.SingleSelectionDialog
++import io.element.android.libraries.designsystem.components.list.ListItemContent
++import io.element.android.libraries.designsystem.components.preferences.PreferenceCategory
++import io.element.android.libraries.designsystem.preview.ElementPreview
++import io.element.android.libraries.designsystem.preview.PreviewsDayNight
++import io.element.android.libraries.designsystem.theme.components.IconSource
++import io.element.android.libraries.designsystem.theme.components.ListItem
++import io.element.android.libraries.designsystem.theme.components.Text
++import io.element.android.libraries.matrix.api.freechat.StrictMode
++import io.element.android.libraries.matrix.ui.freechat.readTtlLabel
++import io.element.android.libraries.ui.strings.CommonStrings
++import kotlinx.collections.immutable.toImmutableList
++
++/**
++ * FreeChat: settings section for strict mode.
++ *
++ * @param onSignOut starts the app's normal sign-out, which warns when the keys are not backed up.
++ */
++@Composable
++fun StrictModeSection(
++    state: StrictModeState,
++    onSignOut: () -> Unit,
++    modifier: Modifier = Modifier,
++) {
++    PreferenceCategory(modifier = modifier, title = stringResource(CommonStrings.freechat_strict_title)) {
++        ListItem(
++            leadingContent = ListItemContent.Icon(IconSource.Vector(CompoundIcons.Shield())),
++            content = { Text(stringResource(CommonStrings.freechat_strict_switch)) },
++            supportingContent = {
++                Text(
++                    stringResource(
++                        when {
++                            state.isStrictSession && !state.enabled -> CommonStrings.freechat_strict_off_pending
++                            state.isStrictSession -> CommonStrings.freechat_strict_on
++                            else -> CommonStrings.freechat_strict_description
++                        }
++                    )
++                )
++            },
++            trailingContent = ListItemContent.Switch(checked = state.isStrictSession && state.enabled),
++            onClick = {
++                when {
++                    state.isStrictSession && state.enabled -> state.eventSink(StrictModeEvent.Disable)
++                    else -> state.eventSink(StrictModeEvent.AskToEnable)
++                }
++            },
++        )
++        if (state.isStrictSession && state.enabled) {
++            ListItem(
++                leadingContent = ListItemContent.Icon(IconSource.Vector(CompoundIcons.Time())),
++                content = { Text(stringResource(CommonStrings.freechat_strict_idle)) },
++                supportingContent = { Text(readTtlLabel(state.idleMinutes * 60L)) },
++                onClick = { state.eventSink(StrictModeEvent.ChooseIdleTime) },
++            )
++        }
++    }
++
++    when (state.dialog) {
++        StrictModeDialog.None -> Unit
++        StrictModeDialog.ConfirmEnable -> ConfirmationDialog(
++            title = stringResource(CommonStrings.freechat_strict_confirm_title),
++            content = stringResource(CommonStrings.freechat_strict_confirm_body),
++            submitText = stringResource(CommonStrings.freechat_strict_confirm_button),
++            destructiveSubmit = true,
++            onSubmitClick = {
++                state.eventSink(StrictModeEvent.Enable)
++                onSignOut()
++            },
++            onDismiss = { state.eventSink(StrictModeEvent.CloseDialog) },
++        )
++        StrictModeDialog.IdleTime -> {
++            val presets = StrictMode.IDLE_PRESETS_MINUTES
++            val choices = if (state.idleMinutes in presets) presets else presets + state.idleMinutes
++            SingleSelectionDialog(
++                title = stringResource(CommonStrings.freechat_strict_idle),
++                options = choices.map { ListOption(readTtlLabel(it * 60L)) }.toImmutableList(),
++                initialSelection = choices.indexOf(state.idleMinutes),
++                onSelectOption = { index -> state.eventSink(StrictModeEvent.SetIdleMinutes(choices[index])) },
++                onDismissRequest = { state.eventSink(StrictModeEvent.CloseDialog) },
++            )
++        }
++    }
++}
++
++internal class StrictModeStateProvider : PreviewParameterProvider<StrictModeState> {
++    override val values = sequenceOf(
++        aStrictModeState(),
++        aStrictModeState(dialog = StrictModeDialog.ConfirmEnable),
++        aStrictModeState(enabled = true, isStrictSession = true),
++        aStrictModeState(enabled = true, isStrictSession = true, dialog = StrictModeDialog.IdleTime),
++        aStrictModeState(enabled = false, isStrictSession = true),
++    )
++}
++
++internal fun aStrictModeState(
++    enabled: Boolean = false,
++    idleMinutes: Int = StrictMode.DEFAULT_IDLE_MINUTES,
++    isStrictSession: Boolean = false,
++    dialog: StrictModeDialog = StrictModeDialog.None,
++    eventSink: (StrictModeEvent) -> Unit = {},
++) = StrictModeState(
++    enabled = enabled,
++    idleMinutes = idleMinutes,
++    isStrictSession = isStrictSession,
++    dialog = dialog,
++    eventSink = eventSink,
++)
++
++@PreviewsDayNight
++@Composable
++internal fun StrictModeSectionPreview(@PreviewParameter(StrictModeStateProvider::class) state: StrictModeState) =
++    ElementPreview {
++        StrictModeSection(state, onSignOut = {})
++    }
+diff --git a/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootNode.kt b/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootNode.kt
+index b823c33843..b290e5f923 100644
+--- a/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootNode.kt
++++ b/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootNode.kt
+@@ -24,6 +24,8 @@ import io.element.android.features.logout.api.direct.DirectLogoutView
+ import io.element.android.features.preferences.impl.account.PreferencesAccountCallback
+ import io.element.android.features.preferences.impl.freechat.GlobalReadBurnPresenter
+ import io.element.android.features.preferences.impl.freechat.GlobalReadBurnSection
++import io.element.android.features.preferences.impl.freechat.StrictModePresenter
++import io.element.android.features.preferences.impl.freechat.StrictModeSection
+ import io.element.android.libraries.androidutils.browser.openUrlInChromeCustomTab
+ import io.element.android.libraries.architecture.callback
+ import io.element.android.libraries.di.SessionScope
+@@ -38,6 +40,7 @@ class PreferencesRootNode(
+     private val emojiPickerRenderer: EmojiPickerRenderer,
+     private val directLogoutView: DirectLogoutView,
+     private val globalReadBurnPresenter: GlobalReadBurnPresenter, // FreeChat
++    private val strictModePresenter: StrictModePresenter, // FreeChat
+ ) : Node(buildContext, plugins = plugins) {
+     interface Callback : PreferencesAccountCallback, Plugin {
+         fun navigateToAddAccount()
+@@ -69,6 +72,13 @@ class PreferencesRootNode(
+     @Composable
+     override fun View(modifier: Modifier) {
+         val state = presenter.present()
++        val onSignOut = {
++            if (state.preferencesAccountState.directLogoutState.canDoDirectSignOut) {
++                state.preferencesAccountState.directLogoutState.eventSink(DirectLogoutEvent.Logout(ignoreSdkError = false))
++            } else {
++                callback.startSignOutFlow()
++            }
++        }
+         val activity = requireNotNull(LocalActivity.current)
+         val isDark = ElementTheme.isLightTheme.not()
+ 
+@@ -92,15 +102,13 @@ class PreferencesRootNode(
+             onManageAccountClick = { onManageAccountClick(activity, it, isDark) },
+             onOpenNotificationSettings = callback::navigateToNotificationSettings,
+             onEditProfileClick = callback::navigateToUserProfile,
+-            onSignOutClick = {
+-                if (state.preferencesAccountState.directLogoutState.canDoDirectSignOut) {
+-                    state.preferencesAccountState.directLogoutState.eventSink(DirectLogoutEvent.Logout(ignoreSdkError = false))
+-                } else {
+-                    callback.startSignOutFlow()
+-                }
+-            },
++            onSignOutClick = onSignOut,
+             onDeactivateClick = callback::startAccountDeactivationFlow,
+-            freechatSettingsView = { GlobalReadBurnSection(globalReadBurnPresenter.present()) }, // FreeChat
++            // FreeChat
++            freechatSettingsView = {
++                GlobalReadBurnSection(globalReadBurnPresenter.present())
++                StrictModeSection(strictModePresenter.present(), onSignOut = onSignOut)
++            },
+         )
+ 
+         directLogoutView.Render(state = state.preferencesAccountState.directLogoutState)
+diff --git a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/StrictMode.kt b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/StrictMode.kt
+new file mode 100644
+index 0000000000..ffe5854f52
+--- /dev/null
++++ b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/StrictMode.kt
+@@ -0,0 +1,48 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.matrix.api.freechat
++
++import io.element.android.libraries.sessionstorage.api.StrictSessions
++import kotlinx.coroutines.flow.Flow
++import java.security.SecureRandom
++
++/**
++ * FreeChat strict mode: a per-device choice to leave nothing readable on the device.
++ *
++ * A session signed in while strict mode is on:
++ * - is never written to the session database: it lives in memory only (see [StrictSessions]);
++ * - keeps its SDK stores in a session directory marked with [STRICT_SESSION_DIR_PREFIX], encrypted with a
++ *   random key that only ever exists in memory. Once the process dies the files are unreadable, and they are
++ *   deleted on the next start;
++ * - signs out after [StrictModeSettings.idleMinutes] in the background;
++ * - for password sign-ins, uses a device ID of the form `FCS<minutes>_<random>`, which the homeserver
++ *   deletes once it has been idle for that long. This covers a process that was killed before it could sign out.
++ */
++object StrictMode {
++    const val STRICT_SESSION_DIR_PREFIX = StrictSessions.DIR_PREFIX
++    const val STRICT_DEVICE_PREFIX = "FCS"
++    const val DEFAULT_IDLE_MINUTES = 5
++    val IDLE_PRESETS_MINUTES = listOf(1, 5, 15, 30, 60)
++
++    fun deviceId(idleMinutes: Int, random: SecureRandom = SecureRandom()): String {
++        val bytes = ByteArray(8).also(random::nextBytes)
++        return "$STRICT_DEVICE_PREFIX${idleMinutes}_" + bytes.joinToString("") { "%02x".format(it) }
++    }
++}
++
++data class StrictModeSettings(
++    val enabled: Boolean = false,
++    val idleMinutes: Int = StrictMode.DEFAULT_IDLE_MINUTES,
++)
++
++/** The device's strict mode choice. It says nothing about the user, so it is kept on disk. */
++interface StrictModeStore {
++    val settings: Flow<StrictModeSettings>
++    suspend fun get(): StrictModeSettings
++    suspend fun set(settings: StrictModeSettings)
++}
+diff --git a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClientFactory.kt b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClientFactory.kt
+index 9b381460a2..41f3dd558f 100644
+--- a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClientFactory.kt
++++ b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClientFactory.kt
+@@ -91,6 +91,8 @@ class RustMatrixClientFactory(
+             indexDirectory.deleteRecursively()
+         }
+ 
++        deleteMessageCaches(sessionPaths)
++
+         val client = getBaseClientBuilder(
+             sessionPaths = sessionPaths,
+             clientSecret = clientSecret,
+@@ -229,6 +231,19 @@ class RustMatrixClientFactory(
+     }
+ }
+ 
++/**
++ * FreeChat: messages do not outlive the process. The event cache (timelines) and the media cache are dropped
++ * every time a session's client is created, so the next sync fetches what still exists on the homeserver.
++ * Keys (crypto store) and room state (state store) are kept.
++ */
++internal fun deleteMessageCaches(sessionPaths: SessionPaths) {
++    listOf("matrix-sdk-event-cache", "matrix-sdk-media").forEach { name ->
++        listOf("", "-shm", "-wal").forEach { suffix ->
++            File(sessionPaths.cacheDirectory, "$name.sqlite3$suffix").delete()
++        }
++    }
++}
++
+ /**
+  * Directory holding the local message search index, under the session's file directory.
+  * Not the cache directory: the index is not disposable, and a cache wipe should not destroy it.
+diff --git a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationService.kt b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationService.kt
+index 1ae2a16d38..892d2c34b9 100644
+--- a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationService.kt
++++ b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationService.kt
+@@ -31,6 +31,9 @@ import io.element.android.libraries.matrix.api.auth.qrlogin.MatrixQrCodeLoginDat
+ import io.element.android.libraries.matrix.api.auth.qrlogin.QrCodeLoginStep
+ import io.element.android.libraries.matrix.api.core.SessionId
+ import io.element.android.libraries.matrix.api.core.UserId
++import io.element.android.libraries.matrix.api.freechat.StrictMode
++import io.element.android.libraries.matrix.api.freechat.StrictModeSettings
++import io.element.android.libraries.matrix.api.freechat.StrictModeStore
+ import io.element.android.libraries.matrix.api.paths.SessionPaths
+ import io.element.android.libraries.matrix.api.verification.SessionVerifiedStatus
+ import io.element.android.libraries.matrix.impl.ClientBuilderSlidingSync
+@@ -74,7 +77,16 @@ class RustMatrixAuthenticationService(
+     private val enterpriseService: EnterpriseService,
+     private val featureFlagService: FeatureFlagService,
+     private val clientEnterpriseHook: ClientEnterpriseHook,
++    private val strictModeStore: StrictModeStore, // FreeChat
+ ) : MatrixAuthenticationService {
++    init {
++        // FreeChat: no strict session can be alive yet in this process, so any on disk are stale.
++        sessionPathsFactory.deleteStaleStrictSessions()
++    }
++
++    // FreeChat: the strict mode settings at the time the current login attempt started.
++    private var strictLogin: StrictModeSettings? = null
++
+     // Any existing Element Classic session that we want to try to import secrets from during login.
+     private var elementClassicSession: ElementClassicSession? = null
+ 
+@@ -92,9 +104,11 @@ class RustMatrixAuthenticationService(
+         newMatrixClientObservers.add(lambda)
+     }
+ 
+-    private fun rotateSessionPath(): SessionPaths {
++    private suspend fun rotateSessionPath(): SessionPaths {
+         sessionPaths?.deleteRecursively()
+-        return sessionPathsFactory.create()
++        val strict = strictModeStore.get().takeIf { it.enabled }
++        strictLogin = strict
++        return sessionPathsFactory.create(strict = strict != null)
+             .also { sessionPaths = it }
+     }
+ 
+@@ -157,7 +171,8 @@ class RustMatrixAuthenticationService(
+                     username = username,
+                     password = password,
+                     initialDeviceName = "Element X Android",
+-                    deviceId = null,
++                    // FreeChat strict mode: the homeserver removes this device once it is idle.
++                    deviceId = strictLogin?.let { StrictMode.deviceId(it.idleMinutes) },
+                 )
+                 // Ensure that the user is not already logged in with the same account
+                 ensureNotAlreadyLoggedIn(client)
+diff --git a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/paths/SessionPathsFactory.kt b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/paths/SessionPathsFactory.kt
+index f40c134209..97ca60f828 100644
+--- a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/paths/SessionPathsFactory.kt
++++ b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/paths/SessionPathsFactory.kt
+@@ -11,6 +11,7 @@ package io.element.android.libraries.matrix.impl.paths
+ import dev.zacsweers.metro.Inject
+ import io.element.android.libraries.di.BaseDirectory
+ import io.element.android.libraries.di.CacheDirectory
++import io.element.android.libraries.matrix.api.freechat.StrictMode
+ import io.element.android.libraries.matrix.api.paths.SessionPaths
+ import java.io.File
+ import java.util.UUID
+@@ -20,11 +21,23 @@ class SessionPathsFactory(
+     @BaseDirectory private val baseDirectory: File,
+     @CacheDirectory private val cacheDirectory: File,
+ ) {
+-    fun create(): SessionPaths {
+-        val subPath = UUID.randomUUID().toString()
++    /** @param strict FreeChat: a strict-mode session, whose directories are deleted on the next start. */
++    fun create(strict: Boolean = false): SessionPaths {
++        val subPath = (if (strict) StrictMode.STRICT_SESSION_DIR_PREFIX else "") + UUID.randomUUID().toString()
+         return SessionPaths(
+             fileDirectory = File(baseDirectory, subPath),
+             cacheDirectory = File(cacheDirectory, subPath),
+         )
+     }
++
++    /**
++     * FreeChat: deletes the directories of strict-mode sessions from earlier runs of the process. Their key
++     * died with that process, so they only hold unreadable data. Call before any strict session is created.
++     */
++    fun deleteStaleStrictSessions() {
++        listOf(baseDirectory, cacheDirectory).forEach { parent ->
++            parent.listFiles { file -> file.isDirectory && file.name.startsWith(StrictMode.STRICT_SESSION_DIR_PREFIX) }
++                ?.forEach { it.deleteRecursively() }
++        }
++    }
+ }
+diff --git a/libraries/matrix/impl/src/test/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationServiceTest.kt b/libraries/matrix/impl/src/test/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationServiceTest.kt
+index d81c6021da..41fe59f2eb 100644
+--- a/libraries/matrix/impl/src/test/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationServiceTest.kt
++++ b/libraries/matrix/impl/src/test/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationServiceTest.kt
+@@ -31,6 +31,7 @@ import io.element.android.libraries.matrix.test.A_HOMESERVER_URL
+ import io.element.android.libraries.matrix.test.A_USER_ID
+ import io.element.android.libraries.matrix.test.auth.FakeOAuthRedirectUrlProvider
+ import io.element.android.libraries.matrix.test.core.aBuildMeta
++import io.element.android.libraries.matrix.test.freechat.FakeStrictModeStore
+ import io.element.android.libraries.sessionstorage.api.SessionStore
+ import io.element.android.libraries.sessionstorage.test.InMemorySessionStore
+ import io.element.android.libraries.workmanager.test.FakeWorkManagerScheduler
+@@ -270,6 +271,7 @@ class RustMatrixAuthenticationServiceTest {
+         )
+         return RustMatrixAuthenticationService(
+             sessionPathsFactory = sessionPathsFactory,
++            strictModeStore = FakeStrictModeStore(),
+             coroutineDispatchers = testCoroutineDispatchers(),
+             sessionStore = sessionStore,
+             rustMatrixClientFactory = rustMatrixClientFactory,
+diff --git a/libraries/matrix/test/src/main/kotlin/io/element/android/libraries/matrix/test/freechat/FakeStrictModeStore.kt b/libraries/matrix/test/src/main/kotlin/io/element/android/libraries/matrix/test/freechat/FakeStrictModeStore.kt
+new file mode 100644
+index 0000000000..591d561e4e
+--- /dev/null
++++ b/libraries/matrix/test/src/main/kotlin/io/element/android/libraries/matrix/test/freechat/FakeStrictModeStore.kt
+@@ -0,0 +1,22 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.matrix.test.freechat
++
++import io.element.android.libraries.matrix.api.freechat.StrictModeSettings
++import io.element.android.libraries.matrix.api.freechat.StrictModeStore
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.StateFlow
++
++class FakeStrictModeStore(initial: StrictModeSettings = StrictModeSettings()) : StrictModeStore {
++    private val state = MutableStateFlow(initial)
++    override val settings: StateFlow<StrictModeSettings> = state
++    override suspend fun get(): StrictModeSettings = state.value
++    override suspend fun set(settings: StrictModeSettings) {
++        state.value = settings
++    }
++}
+diff --git a/libraries/preferences/impl/src/main/kotlin/io/element/android/libraries/preferences/impl/freechat/DataStoreStrictModeStore.kt b/libraries/preferences/impl/src/main/kotlin/io/element/android/libraries/preferences/impl/freechat/DataStoreStrictModeStore.kt
+new file mode 100644
+index 0000000000..0d4162b623
+--- /dev/null
++++ b/libraries/preferences/impl/src/main/kotlin/io/element/android/libraries/preferences/impl/freechat/DataStoreStrictModeStore.kt
+@@ -0,0 +1,49 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.preferences.impl.freechat
++
++import androidx.datastore.preferences.core.booleanPreferencesKey
++import androidx.datastore.preferences.core.edit
++import androidx.datastore.preferences.core.intPreferencesKey
++import dev.zacsweers.metro.AppScope
++import dev.zacsweers.metro.ContributesBinding
++import dev.zacsweers.metro.SingleIn
++import io.element.android.libraries.matrix.api.freechat.StrictMode
++import io.element.android.libraries.matrix.api.freechat.StrictModeSettings
++import io.element.android.libraries.matrix.api.freechat.StrictModeStore
++import io.element.android.libraries.preferences.api.store.PreferenceDataStoreFactory
++import kotlinx.coroutines.flow.Flow
++import kotlinx.coroutines.flow.first
++import kotlinx.coroutines.flow.map
++
++private val enabledKey = booleanPreferencesKey("enabled")
++private val idleMinutesKey = intPreferencesKey("idle_minutes")
++
++@SingleIn(AppScope::class)
++@ContributesBinding(AppScope::class)
++class DataStoreStrictModeStore(
++    preferenceDataStoreFactory: PreferenceDataStoreFactory,
++) : StrictModeStore {
++    private val store = preferenceDataStoreFactory.create("freechat_strict_mode")
++
++    override val settings: Flow<StrictModeSettings> = store.data.map { prefs ->
++        StrictModeSettings(
++            enabled = prefs[enabledKey] ?: false,
++            idleMinutes = prefs[idleMinutesKey]?.takeIf { it > 0 } ?: StrictMode.DEFAULT_IDLE_MINUTES,
++        )
++    }
++
++    override suspend fun get(): StrictModeSettings = settings.first()
++
++    override suspend fun set(settings: StrictModeSettings) {
++        store.edit { prefs ->
++            prefs[enabledKey] = settings.enabled
++            prefs[idleMinutesKey] = settings.idleMinutes.takeIf { it > 0 } ?: StrictMode.DEFAULT_IDLE_MINUTES
++        }
++    }
++}
+diff --git a/libraries/session-storage/api/src/main/kotlin/io/element/android/libraries/sessionstorage/api/StrictSessions.kt b/libraries/session-storage/api/src/main/kotlin/io/element/android/libraries/sessionstorage/api/StrictSessions.kt
+new file mode 100644
+index 0000000000..7b2e4234a7
+--- /dev/null
++++ b/libraries/session-storage/api/src/main/kotlin/io/element/android/libraries/sessionstorage/api/StrictSessions.kt
+@@ -0,0 +1,20 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.sessionstorage.api
++
++/**
++ * FreeChat strict mode: sessions whose directory carries [DIR_PREFIX] live in memory only and are never
++ * written to the session database. See `io.element.android.libraries.matrix.api.freechat.StrictMode`.
++ */
++object StrictSessions {
++    const val DIR_PREFIX = "freechat-strict-"
++
++    fun isStrict(sessionData: SessionData): Boolean = isStrictPath(sessionData.sessionPath)
++
++    fun isStrictPath(sessionPath: String): Boolean = sessionPath.trimEnd('/').substringAfterLast('/').startsWith(DIR_PREFIX)
++}
+diff --git a/libraries/session-storage/impl/src/main/kotlin/io/element/android/libraries/sessionstorage/impl/DatabaseSessionStore.kt b/libraries/session-storage/impl/src/main/kotlin/io/element/android/libraries/sessionstorage/impl/DatabaseSessionStore.kt
+index 9be59e4bae..e402e0c76b 100644
+--- a/libraries/session-storage/impl/src/main/kotlin/io/element/android/libraries/sessionstorage/impl/DatabaseSessionStore.kt
++++ b/libraries/session-storage/impl/src/main/kotlin/io/element/android/libraries/sessionstorage/impl/DatabaseSessionStore.kt
+@@ -18,9 +18,13 @@ import io.element.android.libraries.core.coroutine.CoroutineDispatchers
+ import io.element.android.libraries.sessionstorage.api.LoggedInState
+ import io.element.android.libraries.sessionstorage.api.SessionData
+ import io.element.android.libraries.sessionstorage.api.SessionStore
++import io.element.android.libraries.sessionstorage.api.StrictSessions
+ import kotlinx.coroutines.flow.Flow
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.combine
+ import kotlinx.coroutines.flow.distinctUntilChanged
+ import kotlinx.coroutines.flow.map
++import kotlinx.coroutines.flow.update
+ import kotlinx.coroutines.sync.Mutex
+ import kotlinx.coroutines.sync.withLock
+ import timber.log.Timber
+@@ -33,17 +37,40 @@ class DatabaseSessionStore(
+ ) : SessionStore {
+     private val sessionDataMutex = Mutex()
+ 
++    // FreeChat strict mode: these sessions are never written to the database. See StrictSessions.
++    private val strictSessions = MutableStateFlow<Map<String, SessionData>>(emptyMap())
++
++    private fun latestOf(fromDatabase: SessionData?): SessionData? =
++        (listOfNotNull(fromDatabase) + strictSessions.value.values).maxByOrNull { it.lastUsageIndex }
++
++    /** Applies [update] to the strict session [sessionId]; false if there is none. */
++    private fun updateStrict(sessionId: String, update: (SessionData) -> SessionData): Boolean {
++        var found = false
++        strictSessions.update { sessions ->
++            val session = sessions[sessionId] ?: return@update sessions
++            found = true
++            sessions + (sessionId to update(session))
++        }
++        return found
++    }
++
+     override fun loggedInStateFlow(): Flow<LoggedInState> {
+-        return database.sessionDataQueries.selectLatest()
+-            .asFlow()
+-            .mapToOneOrNull(dispatchers.io)
++        return combine(
++            database.sessionDataQueries.selectLatest()
++                .asFlow()
++                .mapToOneOrNull(dispatchers.io)
++                .map { it?.toApiModel() },
++            strictSessions,
++        ) { fromDatabase, strict ->
++            (listOfNotNull(fromDatabase) + strict.values).maxByOrNull { it.lastUsageIndex }
++        }
+             .map {
+                 if (it == null) {
+                     LoggedInState.NotLoggedIn
+                 } else {
+                     LoggedInState.LoggedIn(
+                         sessionId = it.userId,
+-                        isTokenValid = it.isTokenValid == 1L
++                        isTokenValid = it.isTokenValid,
+                     )
+                 }
+             }
+@@ -53,21 +80,33 @@ class DatabaseSessionStore(
+     override suspend fun addSession(sessionData: SessionData) {
+         sessionDataMutex.withLock {
+             val lastUsageIndex = getLastUsageIndex()
+-            database.sessionDataQueries.insertSessionData(
+-                sessionData
+-                    .copy(
+-                        // position value does not really matter, so just use lastUsageIndex + 1 to ensure that
+-                        // the value is always greater than value of any existing account
+-                        position = lastUsageIndex + 1,
+-                        lastUsageIndex = lastUsageIndex + 1,
+-                    )
+-                    .toDbModel()
+-            )
++            val session = sessionData
++                .copy(
++                    // position value does not really matter, so just use lastUsageIndex + 1 to ensure that
++                    // the value is always greater than value of any existing account
++                    position = lastUsageIndex + 1,
++                    lastUsageIndex = lastUsageIndex + 1,
++                )
++            if (StrictSessions.isStrict(session)) {
++                strictSessions.update { it + (session.userId to session) }
++            } else {
++                database.sessionDataQueries.insertSessionData(session.toDbModel())
++            }
+         }
+     }
+ 
+     override suspend fun updateData(sessionData: SessionData) {
+         sessionDataMutex.withLock {
++            val updatedStrict = updateStrict(sessionData.userId) { old ->
++                sessionData.copy(
++                    loginTimestamp = old.loginTimestamp,
++                    position = old.position,
++                    lastUsageIndex = old.lastUsageIndex,
++                    userDisplayName = old.userDisplayName,
++                    userAvatarUrl = old.userAvatarUrl,
++                )
++            }
++            if (updatedStrict) return
+             val result = database.sessionDataQueries.selectByUserId(sessionData.userId)
+                 .executeAsOneOrNull()
+                 ?.toApiModel()
+@@ -91,6 +130,7 @@ class DatabaseSessionStore(
+ 
+     override suspend fun updateUserProfile(sessionId: String, displayName: String?, avatarUrl: String?) {
+         sessionDataMutex.withLock {
++            if (updateStrict(sessionId) { it.copy(userDisplayName = displayName, userAvatarUrl = avatarUrl) }) return
+             val result = database.sessionDataQueries.selectByUserId(sessionId)
+                 .executeAsOneOrNull()
+                 ?.toApiModel()
+@@ -114,6 +154,7 @@ class DatabaseSessionStore(
+             return
+         }
+         val lastUsageIndex = latestSession?.lastUsageIndex ?: 0
++        if (sessionDataMutex.withLock { updateStrict(sessionId) { it.copy(lastUsageIndex = lastUsageIndex + 1) } }) return
+         val result = database.sessionDataQueries.selectByUserId(sessionId)
+             .executeAsOneOrNull()
+             ?.toApiModel()
+@@ -132,25 +173,31 @@ class DatabaseSessionStore(
+     }
+ 
+     private fun getLastUsageIndex(): Long {
+-        return database.sessionDataQueries.selectLatest()
+-            .executeAsOneOrNull()
++        return latestOf(
++            database.sessionDataQueries.selectLatest()
++                .executeAsOneOrNull()
++                ?.toApiModel()
++        )
+             ?.lastUsageIndex
+             ?: -1L
+     }
+ 
+     override suspend fun getLatestSession(): SessionData? {
+         return sessionDataMutex.withLock {
+-            database.sessionDataQueries.selectLatest()
+-                .executeAsOneOrNull()
+-                ?.toApiModel()
++            latestOf(
++                database.sessionDataQueries.selectLatest()
++                    .executeAsOneOrNull()
++                    ?.toApiModel()
++            )
+         }
+     }
+ 
+     override suspend fun getSession(sessionId: String): SessionData? {
+         return sessionDataMutex.withLock {
+-            database.sessionDataQueries.selectByUserId(sessionId)
+-                .executeAsOneOrNull()
+-                ?.toApiModel()
++            strictSessions.value[sessionId]
++                ?: database.sessionDataQueries.selectByUserId(sessionId)
++                    .executeAsOneOrNull()
++                    ?.toApiModel()
+         }
+     }
+ 
+@@ -158,28 +205,34 @@ class DatabaseSessionStore(
+         return sessionDataMutex.withLock {
+             database.sessionDataQueries.selectAll()
+                 .executeAsList()
+-                .map { it.toApiModel() }
++                .map { it.toApiModel() } + strictSessions.value.values
+         }
+     }
+ 
+     override suspend fun numberOfSessions(): Int {
+         return sessionDataMutex.withLock {
+-            database.sessionDataQueries.count()
+-                .executeAsOneOrNull()
+-                ?.toInt()
+-                ?: 0
++            (
++                database.sessionDataQueries.count()
++                    .executeAsOneOrNull()
++                    ?.toInt()
++                    ?: 0
++            ) + strictSessions.value.size
+         }
+     }
+ 
+     override fun sessionsFlow(): Flow<List<SessionData>> {
+-        return database.sessionDataQueries.selectAll()
+-            .asFlow()
+-            .mapToList(dispatchers.io)
+-            .map { it.map { sessionData -> sessionData.toApiModel() } }
++        return combine(
++            database.sessionDataQueries.selectAll()
++                .asFlow()
++                .mapToList(dispatchers.io)
++                .map { it.map { sessionData -> sessionData.toApiModel() } },
++            strictSessions,
++        ) { fromDatabase, strict -> fromDatabase + strict.values }
+     }
+ 
+     override suspend fun removeSession(sessionId: String) {
+         sessionDataMutex.withLock {
++            strictSessions.update { it - sessionId }
+             database.sessionDataQueries.removeSession(sessionId)
+         }
+     }
+diff --git a/libraries/session-storage/impl/src/test/kotlin/io/element/android/libraries/sessionstorage/impl/StrictSessionStoreTest.kt b/libraries/session-storage/impl/src/test/kotlin/io/element/android/libraries/sessionstorage/impl/StrictSessionStoreTest.kt
+new file mode 100644
+index 0000000000..838c5fb5a1
+--- /dev/null
++++ b/libraries/session-storage/impl/src/test/kotlin/io/element/android/libraries/sessionstorage/impl/StrictSessionStoreTest.kt
+@@ -0,0 +1,103 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.sessionstorage.impl
++
++import app.cash.sqldelight.driver.jdbc.sqlite.JdbcSqliteDriver
++import app.cash.turbine.test
++import com.google.common.truth.Truth.assertThat
++import io.element.android.libraries.core.coroutine.CoroutineDispatchers
++import io.element.android.libraries.sessionstorage.api.LoggedInState
++import io.element.android.libraries.sessionstorage.api.StrictSessions
++import kotlinx.coroutines.ExperimentalCoroutinesApi
++import kotlinx.coroutines.test.UnconfinedTestDispatcher
++import kotlinx.coroutines.test.runTest
++import org.junit.Before
++import org.junit.Test
++
++/** FreeChat strict mode: strict sessions are served like any other but never reach the database. */
++class StrictSessionStoreTest {
++    private lateinit var database: SessionDatabase
++    private lateinit var store: DatabaseSessionStore
++
++    private val normal = aDbSessionData().toApiModel()
++    private val strict = aDbSessionData().toApiModel().copy(
++        userId = "@strict:server",
++        sessionPath = "/data/files/${StrictSessions.DIR_PREFIX}1234",
++        accessToken = "strict-token",
++    )
++
++    @OptIn(ExperimentalCoroutinesApi::class)
++    @Before
++    fun setup() {
++        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
++        SessionDatabase.Schema.create(driver)
++        database = SessionDatabase(driver)
++        store = DatabaseSessionStore(
++            database = database,
++            dispatchers = CoroutineDispatchers(
++                io = UnconfinedTestDispatcher(),
++                computation = UnconfinedTestDispatcher(),
++                main = UnconfinedTestDispatcher(),
++            )
++        )
++    }
++
++    @Test
++    fun `a strict session is never written to the database`() = runTest {
++        store.addSession(strict)
++        store.updateData(strict.copy(accessToken = "refreshed"))
++        store.updateUserProfile(strict.userId, "Alice", null)
++
++        assertThat(database.sessionDataQueries.selectAll().executeAsList()).isEmpty()
++        val session = store.getSession(strict.userId)!!
++        assertThat(session.accessToken).isEqualTo("refreshed")
++        assertThat(session.userDisplayName).isEqualTo("Alice")
++    }
++
++    @Test
++    fun `strict and normal sessions are listed together`() = runTest {
++        store.addSession(normal)
++        store.addSession(strict)
++
++        assertThat(store.getAllSessions().map { it.userId }).containsExactly(normal.userId, strict.userId)
++        assertThat(store.numberOfSessions()).isEqualTo(2)
++        assertThat(store.getLatestSession()?.userId).isEqualTo(strict.userId)
++        assertThat(database.sessionDataQueries.selectAll().executeAsList().map { it.userId }).containsExactly(normal.userId)
++
++        store.setLatestSession(normal.userId)
++        assertThat(store.getLatestSession()?.userId).isEqualTo(normal.userId)
++    }
++
++    @Test
++    fun `logged in state follows strict sessions`() = runTest {
++        store.loggedInStateFlow().test {
++            assertThat(awaitItem()).isEqualTo(LoggedInState.NotLoggedIn)
++            store.addSession(strict)
++            assertThat(awaitItem()).isEqualTo(LoggedInState.LoggedIn(sessionId = strict.userId, isTokenValid = true))
++            store.removeSession(strict.userId)
++            assertThat(awaitItem()).isEqualTo(LoggedInState.NotLoggedIn)
++        }
++    }
++
++    @Test
++    fun `sessions flow includes strict sessions`() = runTest {
++        store.sessionsFlow().test {
++            assertThat(awaitItem()).isEmpty()
++            store.addSession(strict)
++            assertThat(awaitItem().map { it.userId }).containsExactly(strict.userId)
++        }
++    }
++
++    @Test
++    fun `strict session paths are recognised`() {
++        assertThat(StrictSessions.isStrictPath("/data/files/${StrictSessions.DIR_PREFIX}abc")).isTrue()
++        assertThat(StrictSessions.isStrictPath("/data/files/${StrictSessions.DIR_PREFIX}abc/")).isTrue()
++        assertThat(StrictSessions.isStrictPath("/data/files/abc")).isFalse()
++        assertThat(StrictSessions.isStrictPath("/data/${StrictSessions.DIR_PREFIX}x/abc")).isFalse()
++    }
++}
+diff --git a/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml b/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml
+index b58da4a511..b3bbb6396f 100644
+--- a/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml
++++ b/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml
+@@ -55,4 +55,13 @@
+     <string name="freechat_block_screenshots_always">始終禁止截圖</string>
+     <string name="freechat_block_screenshots_always_description">在整個 App 裡禁止截圖和錄影，對你的所有裝置生效。</string>
+     <string name="freechat_privacy_error">無法修改截圖設定</string>
++    <string name="freechat_strict_title">嚴格模式</string>
++    <string name="freechat_strict_switch">本機什麼都不留</string>
++    <string name="freechat_strict_description">登入狀態、金鑰和訊息都只放在記憶體裡。關掉 App 或放在背景超過設定時間，就會登出。重新登入需要密碼和復原金鑰。</string>
++    <string name="freechat_strict_on">已開啟。App 放在背景超過設定時間會登出。</string>
++    <string name="freechat_strict_off_pending">下次登入起，嚴格模式關閉。</string>
++    <string name="freechat_strict_idle">放在背景多久後登出</string>
++    <string name="freechat_strict_confirm_title">開啟嚴格模式？</string>
++    <string name="freechat_strict_confirm_body">現在會登出。請確認你儲存好了復原金鑰：沒有它，重新登入後就看不到以前的加密訊息。</string>
++    <string name="freechat_strict_confirm_button">登出並開啟</string>
+ </resources>
+diff --git a/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml b/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml
+index 0a7b3c2068..8ab00e0d56 100644
+--- a/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml
++++ b/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml
+@@ -55,4 +55,13 @@
+     <string name="freechat_block_screenshots_always">始终禁止截屏</string>
+     <string name="freechat_block_screenshots_always_description">在整个 App 里禁止截屏和录屏，对你的所有设备生效。</string>
+     <string name="freechat_privacy_error">无法修改截屏设置</string>
++    <string name="freechat_strict_title">严格模式</string>
++    <string name="freechat_strict_switch">本机什么都不留</string>
++    <string name="freechat_strict_description">登录状态、密钥和消息都只放在内存里。关掉 App 或放在后台超过设定时间，就会退出登录。重新登录需要密码和恢复密钥。</string>
++    <string name="freechat_strict_on">已开启。App 放在后台超过设定时间会退出登录。</string>
++    <string name="freechat_strict_off_pending">下次登录起，严格模式关闭。</string>
++    <string name="freechat_strict_idle">放在后台多久后退出登录</string>
++    <string name="freechat_strict_confirm_title">开启严格模式？</string>
++    <string name="freechat_strict_confirm_body">现在会退出登录。请确认你保存好了恢复密钥：没有它，重新登录后就看不到以前的加密消息。</string>
++    <string name="freechat_strict_confirm_button">退出并开启</string>
+ </resources>
+diff --git a/libraries/ui-strings/src/main/res/values/freechat_strings.xml b/libraries/ui-strings/src/main/res/values/freechat_strings.xml
+index 25072b039b..e8b4b44f8d 100644
+--- a/libraries/ui-strings/src/main/res/values/freechat_strings.xml
++++ b/libraries/ui-strings/src/main/res/values/freechat_strings.xml
+@@ -60,4 +60,13 @@
+     <string name="freechat_block_screenshots_always">Always block screenshots</string>
+     <string name="freechat_block_screenshots_always_description">Block screenshots and screen recording everywhere in the app, on all your devices.</string>
+     <string name="freechat_privacy_error">Could not change the screenshot setting</string>
++    <string name="freechat_strict_title">Strict mode</string>
++    <string name="freechat_strict_switch">Leave nothing on this device</string>
++    <string name="freechat_strict_description">Your sign-in, keys and messages are kept in memory only. Closing the app or leaving it in the background signs you out. Signing in again needs your password and recovery key.</string>
++    <string name="freechat_strict_on">On. Leaving the app in the background signs you out.</string>
++    <string name="freechat_strict_off_pending">Strict mode will be off from your next sign-in.</string>
++    <string name="freechat_strict_idle">Sign out after this long in the background</string>
++    <string name="freechat_strict_confirm_title">Turn on strict mode?</string>
++    <string name="freechat_strict_confirm_body">You will be signed out now. Make sure you have your recovery key: without it, you cannot read earlier encrypted messages after signing in again.</string>
++    <string name="freechat_strict_confirm_button">Sign out and turn on</string>
+ </resources>

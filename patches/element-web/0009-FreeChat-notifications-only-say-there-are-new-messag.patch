@@ -1,0 +1,115 @@
+From 04e5bec69f12e34122cebcc4f18745ba1710ccae Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 09/12] FreeChat: notifications only say there are new messages
+
+Showing the message in notifications is now off by default, and while it is
+off the notification names neither the sender nor the room either.
+---
+ apps/web/src/Notifier.test.ts      | 15 +++++++++++++++
+ apps/web/src/Notifier.ts           |  8 ++++++++
+ apps/web/src/freechat/i18n.ts      |  3 +++
+ apps/web/src/settings/Settings.tsx |  3 ++-
+ 4 files changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/apps/web/src/Notifier.test.ts b/apps/web/src/Notifier.test.ts
+index 39866dd7fe..2fc55cd2cf 100644
+--- a/apps/web/src/Notifier.test.ts
++++ b/apps/web/src/Notifier.test.ts
+@@ -48,6 +48,7 @@ import { mkThread } from "test-utils/threads";
+ import { waitFor } from "test-utils-rtl";
+ 
+ import type BasePlatform from "./BasePlatform";
++import SdkConfig from "./SdkConfig";
+ import Notifier, { NOTIFICATION_SOUND_THROTTLE_MS } from "./Notifier";
+ import SettingsStore from "./settings/SettingsStore";
+ import ToastStore from "./stores/ToastStore";
+@@ -299,6 +300,20 @@ describe("Notifier", () => {
+             expect(MockPlatform.displayNotification).toHaveBeenCalledWith(testRoom.name, "hey", null, testRoom, event);
+         });
+ 
++        it("FreeChat: says only that there are new messages when the message body is off", () => {
++            vi.mocked(notifier.isBodyEnabled).mockReturnValue(false);
++            mockClient!.emit(ClientEvent.Sync, SyncState.Syncing, null);
++            emitLiveEvent(event);
++
++            expect(MockPlatform.displayNotification).toHaveBeenCalledWith(
++                SdkConfig.get().brand,
++                "You have new messages",
++                null,
++                testRoom,
++                event,
++            );
++        });
++
+         it("closes a desktop notification when room is marked read", () => {
+             mockClient!.emit(ClientEvent.Sync, SyncState.Syncing, null);
+             emitLiveEvent(event);
+diff --git a/apps/web/src/Notifier.ts b/apps/web/src/Notifier.ts
+index 1011d26d74..863219e741 100644
+--- a/apps/web/src/Notifier.ts
++++ b/apps/web/src/Notifier.ts
+@@ -29,6 +29,7 @@ import { type PermissionChanged as PermissionChangedEvent } from "@matrix-org/an
+ import { type SessionMembershipData, type IRTCNotificationContent } from "matrix-js-sdk/src/matrixrtc";
+ 
+ import SdkConfig from "./SdkConfig";
++import { ft } from "./freechat/i18n";
+ import PlatformPeg from "./PlatformPeg";
+ import * as TextForEvent from "./TextForEvent";
+ import * as Avatar from "./Avatar";
+@@ -270,6 +271,13 @@ export default class Notifier extends TypedEventEmitter<keyof EmittedEvents, Emi
+             avatarUrl = Avatar.avatarUrlForMember(ev.sender, 40, 40, "crop");
+         }
+ 
++        // FreeChat: without the message, say nothing about who wrote it or where either.
++        if (!this.isBodyEnabled()) {
++            title = SdkConfig.get().brand;
++            msg = ft("notification_new_messages");
++            avatarUrl = null;
++        }
++
+         const notif = plaf.displayNotification(title, msg, avatarUrl, room, ev);
+ 
+         // if displayNotification returns non-null,  the platform supports
+diff --git a/apps/web/src/freechat/i18n.ts b/apps/web/src/freechat/i18n.ts
+index 143c04b670..8e1f8d4b55 100644
+--- a/apps/web/src/freechat/i18n.ts
++++ b/apps/web/src/freechat/i18n.ts
+@@ -66,6 +66,7 @@ const en = {
+     block_screenshots_help:
+         "On Android, screenshots and screen recording are blocked for every member. iOS cannot block them and shows a warning instead. Browsers cannot block screenshots.",
+     privacy_error_title: "Could not change the screenshot setting",
++    notification_new_messages: "You have new messages",
+     strict_section: "Strict mode",
+     strict_legend: "Leave nothing on this device",
+     strict_description:
+@@ -132,6 +133,7 @@ const zhHans: Record<Key, string> = {
+     block_screenshots_help:
+         "在安卓上，所有成员在这个房间里都不能截屏和录屏。iOS 无法禁止，会改为提醒。浏览器无法禁止截屏。",
+     privacy_error_title: "无法修改截屏设置",
++    notification_new_messages: "你有新消息",
+     strict_section: "严格模式",
+     strict_legend: "本机什么都不留",
+     strict_description:
+@@ -195,6 +197,7 @@ const zhHant: Record<Key, string> = {
+     block_screenshots_help:
+         "在 Android 上，所有成員在這個房間裡都不能截圖和錄影。iOS 無法禁止，會改為提醒。瀏覽器無法禁止截圖。",
+     privacy_error_title: "無法修改截圖設定",
++    notification_new_messages: "你有新訊息",
+     strict_section: "嚴格模式",
+     strict_legend: "本機什麼都不留",
+     strict_description:
+diff --git a/apps/web/src/settings/Settings.tsx b/apps/web/src/settings/Settings.tsx
+index 8e0135e9c9..ebfd740940 100644
+--- a/apps/web/src/settings/Settings.tsx
++++ b/apps/web/src/settings/Settings.tsx
+@@ -1206,7 +1206,8 @@ export const SETTINGS: Settings = {
+     },
+     "notificationBodyEnabled": {
+         supportedLevels: LEVELS_DEVICE_ONLY_SETTINGS,
+-        default: true,
++        // FreeChat: off by default; the OS may keep notifications in its history.
++        default: false,
+         controller: new NotificationBodyEnabledController(),
+         displayName: _td("settings|notifications|show_message_desktop_notification"),
+     },

@@ -1,0 +1,299 @@
+From 87f6180e6edbc0b36a30a0ade2062c87d50627ab Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 12/14] FreeChat: delete the media clients report for
+ disappearing messages
+
+Element X encrypts attachments in matrix-rust-sdk and cannot list their MXCs in
+the event's plaintext. A new endpoint, rooms/{roomId}/event_media, lets the
+sender report them once the message is sent. Only for messages with expiry
+markers and only media the sender uploaded. The media is deleted when the
+message expires; an hourly sweep covers messages removed some other way.
+---
+ src/api/client/freechat.rs                    |  26 ++++
+ src/api/router.rs                             |   4 +
+ src/database/maps.rs                          |   5 +
+ src/service/rooms/disappearing/event_media.rs | 130 ++++++++++++++++++
+ src/service/rooms/disappearing/mod.rs         |  19 ++-
+ 5 files changed, 178 insertions(+), 6 deletions(-)
+ create mode 100644 src/service/rooms/disappearing/event_media.rs
+
+diff --git a/src/api/client/freechat.rs b/src/api/client/freechat.rs
+index 31a784277..4823f7943 100644
+--- a/src/api/client/freechat.rs
++++ b/src/api/client/freechat.rs
+@@ -129,6 +129,32 @@ pub(crate) async fn existing_events_route(
+ 	Ok(Json(json!({ "existing": existing })))
+ }
+ 
++#[derive(Deserialize)]
++pub(crate) struct EventMedia {
++	event_id: OwnedEventId,
++	mxcs: Vec<String>,
++}
++
++/// `POST /_matrix/client/unstable/com.freechat/rooms/{roomId}/event_media`
++///
++/// Records the media of the caller's own disappearing message, for clients
++/// that cannot list it in the event's plaintext, so it is deleted with the
++/// message. Ignored for messages that never expire.
++pub(crate) async fn event_media_route(
++	State(services): State<crate::State>,
++	TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
++	Path(room_id): Path<OwnedRoomId>,
++	Json(body): Json<EventMedia>,
++) -> Result<impl IntoResponse> {
++	let user = authenticate(&services, bearer.token()).await?;
++	let kept = services
++		.disappearing
++		.claim_event_media(&user, &room_id, &body.event_id, &body.mxcs)
++		.await?;
++
++	Ok(Json(json!({ "kept": kept })))
++}
++
+ /// Resolves an access token to an active local user, like the router's auth.
+ async fn authenticate(services: &crate::State, token: &str) -> Result<OwnedUserId> {
+ 	let Ok((user_id, _device_id, expires_at)) = services.users.find_from_token(token).await
+diff --git a/src/api/router.rs b/src/api/router.rs
+index f8190fad1..589babcfa 100644
+--- a/src/api/router.rs
++++ b/src/api/router.rs
+@@ -335,6 +335,10 @@ fn register_client_room_routes(router: Router<State>) -> Router<State> {
+ 			"/_matrix/client/unstable/com.freechat/rooms/{room_id}/existing_events",
+ 			post(client::freechat::existing_events_route),
+ 		)
++		.route(
++			"/_matrix/client/unstable/com.freechat/rooms/{room_id}/event_media",
++			post(client::freechat::event_media_route),
++		)
+ 		.ruma_route(&client::report_event_route)
+ 		.ruma_route(&client::report_room_route)
+ 		.ruma_route(&client::report_user_route)
+diff --git a/src/database/maps.rs b/src/database/maps.rs
+index 58560a023..d041675f6 100644
+--- a/src/database/maps.rs
++++ b/src/database/maps.rs
+@@ -184,6 +184,11 @@ pub(crate) fn descriptor(name: &str) -> &'static Descriptor {
+ 		key_size_hint: Some(64),
+ 		..descriptor::SEQUENTIAL_SMALL
+ 	},
++	Descriptor {
++		// FreeChat: media clients reported for disappearing messages
++		name: "eventid_media",
++		..descriptor::RANDOM_SMALL
++	},
+ 	Descriptor {
+ 		// FreeChat: messages waiting to be read before burning
+ 		name: "readburn_pending",
+diff --git a/src/service/rooms/disappearing/event_media.rs b/src/service/rooms/disappearing/event_media.rs
+new file mode 100644
+index 000000000..99ba328a8
+--- /dev/null
++++ b/src/service/rooms/disappearing/event_media.rs
+@@ -0,0 +1,130 @@
++//! FreeChat: media of encrypted messages that clients report after sending.
++//!
++//! Element X encrypts attachments inside matrix-rust-sdk, so it cannot add the
++//! plaintext [`super::MEDIA_KEY`] list to the event. Once the message is sent
++//! it reports the MXCs it shows for it instead, and they are deleted when the
++//! message expires. Only the sender may report, only for a message carrying
++//! expiry markers, and only media that sender uploaded; nothing is recorded
++//! for messages that never expire.
++//!
++//! Rows are `(event_id, mxc) -> sender`. Rows whose event was removed some
++//! other way (the retention sweep, a room purge) are swept hourly, and their
++//! media deleted with them.
++
++use futures::StreamExt;
++use ruma::{EventId, Mxc, OwnedEventId, OwnedUserId, RoomId, UserId};
++use tuwunel_core::{Err, Result, debug_info, implement, matrix::event::Event};
++use tuwunel_database::Interfix;
++
++use super::{EXPIRES_AT_KEY, READ_TTL_KEY};
++
++/// Most MXCs one message may report: a gallery's files and thumbnails.
++pub const MAX_EVENT_MEDIA: usize = 64;
++
++/// Records the media of the caller's own disappearing message, returning how
++/// many MXCs were kept.
++///
++/// MXCs that are malformed, remote or uploaded by someone else are skipped.
++/// An event that is missing, in another room or sent by someone else is
++/// reported as not found.
++#[implement(super::Service)]
++pub async fn claim_event_media(
++	&self,
++	user: &UserId,
++	room_id: &RoomId,
++	event_id: &EventId,
++	mxcs: &[String],
++) -> Result<usize> {
++	if mxcs.len() > MAX_EVENT_MEDIA {
++		return Err!(Request(InvalidParam("Too many media IDs.")));
++	}
++
++	let Ok(pdu) = self.services.timeline.get_pdu(event_id).await else {
++		return Err!(Request(NotFound("Event not found.")));
++	};
++
++	if pdu.room_id() != room_id || pdu.sender() != user {
++		return Err!(Request(NotFound("Event not found.")));
++	}
++
++	let marked = pdu.get_unsigned_property::<u64>(EXPIRES_AT_KEY).is_ok()
++		|| pdu.get_unsigned_property::<u64>(READ_TTL_KEY).is_ok();
++	if !marked {
++		return Ok(0);
++	}
++
++	let mut kept = 0_usize;
++	for mxc in mxcs {
++		let Ok(parsed) = Mxc::try_from(mxc.as_str()) else {
++			continue;
++		};
++
++		if !self.services.globals.server_is_ours(parsed.server_name) {
++			continue;
++		}
++
++		let uploader = self
++			.services
++			.media
++			.media_entry(&parsed)
++			.await
++			.and_then(|entry| entry.user_id);
++
++		if uploader.as_deref() != Some(user) {
++			continue;
++		}
++
++		self.eventid_media
++			.put_raw((event_id, mxc.as_str()), user.as_bytes());
++		kept = kept.saturating_add(1);
++	}
++
++	Ok(kept)
++}
++
++/// Removes and returns the media recorded for `event_id`.
++#[implement(super::Service)]
++pub(super) async fn take_event_media(&self, event_id: &EventId) -> Vec<String> {
++	let prefix = (event_id, Interfix);
++	let mxcs: Vec<String> = self
++		.eventid_media
++		.keys_prefix::<(&EventId, &str), _>(&prefix)
++		.filter_map(async |key| key.ok().map(|(_, mxc)| mxc.to_owned()))
++		.collect()
++		.await;
++
++	for mxc in &mxcs {
++		self.eventid_media.del((event_id, mxc.as_str()));
++	}
++
++	mxcs
++}
++
++/// Deletes the media of recorded events that no longer exist.
++#[implement(super::Service)]
++pub(super) async fn sweep_event_media(&self) {
++	let rows: Vec<(OwnedEventId, String, OwnedUserId)> = self
++		.eventid_media
++		.stream::<(&EventId, &str), &str>()
++		.filter_map(async |row| {
++			let ((event_id, mxc), sender) = row.ok()?;
++			Some((event_id.to_owned(), mxc.to_owned(), UserId::parse(sender).ok()?))
++		})
++		.collect()
++		.await;
++
++	let mut swept = 0_usize;
++	for (event_id, mxc, sender) in rows {
++		if self.services.timeline.get_pdu_id(&event_id).await.is_ok() {
++			continue;
++		}
++
++		self.delete_media(&mxc, &sender).await;
++		self.eventid_media.del((&*event_id, mxc.as_str()));
++		swept = swept.saturating_add(1);
++	}
++
++	if swept > 0 {
++		debug_info!(swept, "Deleted media of messages removed elsewhere");
++	}
++}
+diff --git a/src/service/rooms/disappearing/mod.rs b/src/service/rooms/disappearing/mod.rs
+index d1f6b6e2f..69b91e024 100644
+--- a/src/service/rooms/disappearing/mod.rs
++++ b/src/service/rooms/disappearing/mod.rs
+@@ -13,7 +13,8 @@
+ //! when a message expires the server simply purges it, leaving no redaction or
+ //! skeleton behind, and deletes the media it referenced. Clients may list
+ //! media MXCs under `com.freechat.media` in the plaintext content of encrypted
+-//! events so it can be found and removed.
++//! events so it can be found and removed, or report them once the message is
++//! sent: see [`event_media`].
+ //!
+ //! Only room admins (power level 100, or creators in room v12+) may change the
+ //! room TTL; in direct chats both members are admins.
+@@ -25,6 +26,7 @@
+ //!
+ //! Users can also burn their own messages after reading: see [`read_burn`].
+ 
++pub mod event_media;
+ pub mod join_password;
+ pub mod read_burn;
+ pub mod scrub;
+@@ -86,7 +88,8 @@ pub fn always_required_state() -> HashSet<(StateEventType, StateKey)> {
+ /// How often the worker checks for expired messages.
+ const INTERVAL: Duration = Duration::from_secs(5);
+ 
+-/// How often the server-wide retention cap is enforced on old history.
++/// How often the server-wide retention cap is enforced on old history, and
++/// media of messages removed outside [`Service::expire`] is deleted.
+ const RETENTION_SWEEP: Duration = Duration::from_secs(60 * 60);
+ 
+ /// Server-wide cap on message age in seconds, zero when unset. Read once from
+@@ -113,6 +116,7 @@ fn effective_ttl(room_ttl: u64, cap: u64) -> Option<u64> {
+ pub struct Service {
+ 	services: Arc<crate::services::OnceServices>,
+ 	expiresat_eventid: Arc<Map>,
++	eventid_media: Arc<Map>,
+ 	readburn_pending: Arc<Map>,
+ 	readburn_readpos: Arc<Map>,
+ 	roomid_joinpassword: Arc<Map>,
+@@ -133,6 +137,7 @@ fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
+ 		Ok(Arc::new(Self {
+ 			services: args.services.clone(),
+ 			expiresat_eventid: args.db["expiresat_eventid"].clone(),
++			eventid_media: args.db["eventid_media"].clone(),
+ 			readburn_pending: args.db["readburn_pending"].clone(),
+ 			readburn_readpos: args.db["readburn_readpos"].clone(),
+ 			roomid_joinpassword: args.db["roomid_joinpassword"].clone(),
+@@ -153,12 +158,11 @@ async fn worker(self: Arc<Self>) -> Result {
+ 				warn!("Disappearing messages sweep failed: {e}");
+ 			}
+ 
+-			if max_retention() != 0
+-				&& last_retention_sweep.is_none_or(|at| at.elapsed() >= RETENTION_SWEEP)
+-			{
++			if last_retention_sweep.is_none_or(|at| at.elapsed() >= RETENTION_SWEEP) {
+ 				if let Err(e) = self.enforce_retention().await {
+ 					warn!("Retention sweep failed: {e}");
+ 				}
++				self.sweep_event_media().await;
+ 				last_retention_sweep = Some(std::time::Instant::now());
+ 			}
+ 
+@@ -377,7 +381,10 @@ async fn expire(&self, event_id: &EventId) -> Result {
+ 		return Ok(());
+ 	};
+ 
+-	let mxcs = media_mxcs(&pdu);
++	let mut mxcs = media_mxcs(&pdu);
++	mxcs.extend(self.take_event_media(event_id).await);
++	mxcs.sort();
++	mxcs.dedup();
+ 	let room_id = pdu.room_id().to_owned();
+ 
+ 	let state_lock = self.services.state.mutex.lock(&room_id).await;

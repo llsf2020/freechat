@@ -1,0 +1,151 @@
+From 31670981f7ee3a884f7db486a7dd0e0da083a82b Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 05/14] FreeChat: security hardening from review
+
+- Purge the retained original of expired messages even when
+  save_unredacted_events is on
+- Parse read-burn settings leniently, so one malformed entry cannot
+  switch burning off everywhere
+- Bound the pending messages examined per read receipt
+---
+ src/service/rooms/disappearing/mod.rs       |  4 +++
+ src/service/rooms/disappearing/read_burn.rs | 38 +++++++++++++--------
+ src/service/rooms/disappearing/tests.rs     | 21 ++++++++++--
+ 3 files changed, 46 insertions(+), 17 deletions(-)
+
+diff --git a/src/service/rooms/disappearing/mod.rs b/src/service/rooms/disappearing/mod.rs
+index d8c983f85..be706f53d 100644
+--- a/src/service/rooms/disappearing/mod.rs
++++ b/src/service/rooms/disappearing/mod.rs
+@@ -235,6 +235,10 @@ async fn expire(&self, event_id: &EventId) -> Result {
+ 		.await?;
+ 	drop(state_lock);
+ 
++	// Never keep the plaintext original of an expired message, even when the
++	// operator left `save_unredacted_events` on.
++	self.services.retention.purge_original(event_id);
++
+ 	for mxc in mxcs {
+ 		self.delete_media(&mxc, pdu.sender()).await;
+ 	}
+diff --git a/src/service/rooms/disappearing/read_burn.rs b/src/service/rooms/disappearing/read_burn.rs
+index 40d5ea07e..69a91cff2 100644
+--- a/src/service/rooms/disappearing/read_burn.rs
++++ b/src/service/rooms/disappearing/read_burn.rs
+@@ -12,14 +12,13 @@
+ //! later through the regular expiry index. Read positions are tracked in
+ //! `readburn_readpos` from the moment this feature saw them.
+ 
+-use std::collections::BTreeMap;
+-
+ use futures::StreamExt;
+ use ruma::{
+-	EventId, OwnedRoomId, OwnedUserId, RoomId, UserId,
++	EventId, OwnedUserId, RoomId, UserId,
+ 	events::receipt::{ReceiptEvent, ReceiptType},
+ };
+ use serde::Deserialize;
++use serde_json::Value as JsonValue;
+ use tuwunel_core::{
+ 	debug, implement,
+ 	matrix::{
+@@ -32,18 +31,29 @@
+ 
+ use super::STATE_TYPE;
+ 
++/// Upper bound on pending messages examined per read receipt, so a flood of
++/// unread messages cannot make every receipt expensive. Keys are ordered by
++/// timeline position, so the oldest are released first and the rest on later
++/// receipts.
++const MAX_RELEASE_BATCH: usize = 1000;
++
+ #[derive(Deserialize)]
+ struct AccountDataEvent {
+ 	#[serde(default)]
+-	content: Personal,
++	content: JsonValue,
+ }
+ 
+-#[derive(Default, Deserialize)]
+-struct Personal {
+-	#[serde(default)]
+-	read_ttl: u64,
+-	#[serde(default)]
+-	rooms: BTreeMap<OwnedRoomId, u64>,
++/// Picks the delay for `room_id` from personal settings content. Parsed
++/// leniently: one malformed entry must not switch burning off everywhere.
++pub(super) fn read_ttl_for(content: &JsonValue, room_id: &RoomId) -> u64 {
++	let override_ttl = content
++		.get("rooms")
++		.and_then(|rooms| rooms.get(room_id.as_str()))
++		.and_then(JsonValue::as_u64);
++
++	override_ttl
++		.or_else(|| content.get("read_ttl").and_then(JsonValue::as_u64))
++		.unwrap_or(0)
+ }
+ 
+ /// The sender's effective read-burn delay in seconds, zero when off.
+@@ -54,10 +64,7 @@ pub async fn personal_read_ttl(&self, room_id: &RoomId, user_id: &UserId) -> u64
+ 		.get_raw(None, user_id, STATE_TYPE)
+ 		.await
+ 		.deserialized::<AccountDataEvent>()
+-		.map(|event| {
+-			let Personal { read_ttl, rooms } = event.content;
+-			rooms.get(room_id).copied().unwrap_or(read_ttl)
+-		})
++		.map(|event| read_ttl_for(&event.content, room_id))
+ 		.unwrap_or(0)
+ }
+ 
+@@ -140,12 +147,13 @@ async fn release_read(&self, room_id: &RoomId, up_to: u64) {
+ 		.readburn_pending
+ 		.stream_prefix(&(shortroomid, Interfix))
+ 		.ready_filter_map(Result::ok)
++		.ready_take_while(|((_, count), _)| *count <= up_to)
++		.take(MAX_RELEASE_BATCH)
+ 		.collect()
+ 		.await;
+ 
+ 	let pending: Vec<(u64, u64)> = pending
+ 		.into_iter()
+-		.filter(|&((_, count), _)| count <= up_to)
+ 		.map(|((_, count), ttl)| (count, ttl))
+ 		.collect();
+ 
+diff --git a/src/service/rooms/disappearing/tests.rs b/src/service/rooms/disappearing/tests.rs
+index 050abbaea..3cba3ee1a 100644
+--- a/src/service/rooms/disappearing/tests.rs
++++ b/src/service/rooms/disappearing/tests.rs
+@@ -1,7 +1,7 @@
+-use ruma::CanonicalJsonObject;
++use ruma::{CanonicalJsonObject, room_id};
+ use serde_json::json;
+ 
+-use super::{Content, content_mxcs};
++use super::{Content, content_mxcs, read_burn::read_ttl_for};
+ 
+ fn object(value: serde_json::Value) -> CanonicalJsonObject {
+ 	serde_json::from_value(value).expect("valid canonical object")
+@@ -56,3 +56,20 @@ fn ttl_content_defaults_to_disabled() {
+ 	let content: Content = serde_json::from_value(json!({ "ttl": 3600 })).unwrap();
+ 	assert_eq!(content.ttl, 3600);
+ }
++
++#[test]
++fn read_ttl_prefers_room_override() {
++	let content = json!({ "read_ttl": 30, "rooms": { "!a:x": 0, "!b:x": 5 } });
++	assert_eq!(read_ttl_for(&content, room_id!("!a:x")), 0);
++	assert_eq!(read_ttl_for(&content, room_id!("!b:x")), 5);
++	assert_eq!(read_ttl_for(&content, room_id!("!c:x")), 30);
++}
++
++#[test]
++fn read_ttl_is_lenient() {
++	// A malformed entry elsewhere must not disable the default.
++	let content = json!({ "read_ttl": 30, "rooms": { "bad key": "x", "!a:x": -1 } });
++	assert_eq!(read_ttl_for(&content, room_id!("!a:x")), 30);
++	assert_eq!(read_ttl_for(&json!({ "read_ttl": "30" }), room_id!("!a:x")), 0);
++	assert_eq!(read_ttl_for(&json!(null), room_id!("!a:x")), 0);
++}

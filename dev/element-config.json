@@ -1,0 +1,22 @@
+{
+    "default_server_config": {
+        "m.homeserver": {
+            "base_url": "http://localhost:8008",
+            "server_name": "localhost"
+        }
+    },
+    "disable_custom_urls": false,
+    "disable_guests": true,
+    "brand": "FreeChat",
+    "default_theme": "light",
+    "posthog": {
+        "project_api_key": "",
+        "api_host": ""
+    },
+    "privacy_policy_url": "",
+    "bug_report_endpoint_url": "",
+    "show_labs_settings": false,
+    "features": {
+        "feature_ask_to_join": true
+    }
+}

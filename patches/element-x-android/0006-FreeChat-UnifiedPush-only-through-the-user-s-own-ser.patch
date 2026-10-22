@@ -1,0 +1,140 @@
+From 05544f53116ffce7fc8af010d57292cd1cd2917b Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 06/12] FreeChat: UnifiedPush only through the user's own
+ server
+
+A pusher is registered only when both the UnifiedPush endpoint and the Matrix
+gateway are on the user's homeserver (FreeChat ships ntfy there), so neither a
+public ntfy server nor the default fallback gateway learns when messages arrive.
+---
+ .../UnifiedPushNewGatewayHandler.kt           | 17 ++++++-
+ ...DefaultUnifiedPushNewGatewayHandlerTest.kt | 46 ++++++++++++++++---
+ 2 files changed, 55 insertions(+), 8 deletions(-)
+
+diff --git a/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/UnifiedPushNewGatewayHandler.kt b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/UnifiedPushNewGatewayHandler.kt
+index d7de923a26..00dfe473de 100644
+--- a/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/UnifiedPushNewGatewayHandler.kt
++++ b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/UnifiedPushNewGatewayHandler.kt
+@@ -17,6 +17,7 @@ import io.element.android.libraries.pushproviders.api.PusherSubscriber
+ import io.element.android.libraries.pushstore.api.UserPushStoreFactory
+ import io.element.android.libraries.pushstore.api.clientsecret.PushClientSecret
+ import timber.log.Timber
++import java.net.URI
+ 
+ private val loggerTag = LoggerTag("DefaultUnifiedPushNewGatewayHandler", LoggerTag.PushLoggerTag)
+ 
+@@ -46,7 +47,17 @@ class DefaultUnifiedPushNewGatewayHandler(
+             matrixClientProvider
+                 .getOrRestore(userId)
+                 .flatMap { client ->
+-                    pusherSubscriber.registerPusher(client, endpoint, pushGateway)
++                    // FreeChat: pushes must not reveal to a third party when this user gets messages.
++                    val ownServer = client.userIdServerName().substringBefore(':')
++                    if (isOnServer(endpoint, ownServer) && isOnServer(pushGateway, ownServer)) {
++                        pusherSubscriber.registerPusher(client, endpoint, pushGateway)
++                    } else {
++                        Result.failure(
++                            IllegalStateException(
++                                "FreeChat: push must go through your own server $ownServer; set it as the default server of the ntfy app"
++                            )
++                        )
++                    }
+                 }
+                 .onFailure {
+                     Timber.tag(loggerTag.value).w(it, "Unable to register pusher")
+@@ -59,3 +70,7 @@ class DefaultUnifiedPushNewGatewayHandler(
+         }
+     }
+ }
++
++/** FreeChat: whether [url] is served by [host] itself. */
++internal fun isOnServer(url: String, host: String): Boolean =
++    runCatching { URI(url).host }.getOrNull().equals(host, ignoreCase = true)
+diff --git a/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/DefaultUnifiedPushNewGatewayHandlerTest.kt b/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/DefaultUnifiedPushNewGatewayHandlerTest.kt
+index d5f2aa8026..e13a16aaa6 100644
+--- a/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/DefaultUnifiedPushNewGatewayHandlerTest.kt
++++ b/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/DefaultUnifiedPushNewGatewayHandlerTest.kt
+@@ -67,7 +67,7 @@ class DefaultUnifiedPushNewGatewayHandlerTest {
+ 
+     @Test
+     fun `error when the registration fails`() = runTest {
+-        val aMatrixClient = FakeMatrixClient()
++        val aMatrixClient = FakeMatrixClient(userIdServerNameLambda = { "chat.example.org" })
+         val defaultUnifiedPushNewGatewayHandler = createDefaultUnifiedPushNewGatewayHandler(
+             pushClientSecret = FakePushClientSecret(
+                 getUserIdFromSecretResult = { A_USER_ID }
+@@ -81,8 +81,8 @@ class DefaultUnifiedPushNewGatewayHandlerTest {
+             matrixClientProvider = FakeMatrixClientProvider { Result.success(aMatrixClient) },
+         )
+         val result = defaultUnifiedPushNewGatewayHandler.handle(
+-            endpoint = "aEndpoint",
+-            pushGateway = "aPushGateway",
++            endpoint = OWN_ENDPOINT,
++            pushGateway = OWN_GATEWAY,
+             clientSecret = A_SECRET,
+         )
+         assertThat(result.isFailure).isTrue()
+@@ -92,7 +92,7 @@ class DefaultUnifiedPushNewGatewayHandlerTest {
+ 
+     @Test
+     fun `happy path`() = runTest {
+-        val aMatrixClient = FakeMatrixClient()
++        val aMatrixClient = FakeMatrixClient(userIdServerNameLambda = { "chat.example.org" })
+         val lambda = lambdaRecorder { _: MatrixClient, _: String, _: String ->
+             Result.success(Unit)
+         }
+@@ -109,14 +109,43 @@ class DefaultUnifiedPushNewGatewayHandlerTest {
+             matrixClientProvider = FakeMatrixClientProvider { Result.success(aMatrixClient) },
+         )
+         val result = defaultUnifiedPushNewGatewayHandler.handle(
+-            endpoint = "aEndpoint",
+-            pushGateway = "aPushGateway",
++            endpoint = OWN_ENDPOINT,
++            pushGateway = OWN_GATEWAY,
+             clientSecret = A_SECRET,
+         )
+         assertThat(result).isEqualTo(Result.success(Unit))
+         lambda.assertions()
+             .isCalledOnce()
+-            .with(value(aMatrixClient), value("aEndpoint"), value("aPushGateway"))
++            .with(value(aMatrixClient), value(OWN_ENDPOINT), value(OWN_GATEWAY))
++    }
++
++    @Test
++    fun `FreeChat - refuses a push endpoint or gateway that is not on the user's own server`() = runTest {
++        val lambda = lambdaRecorder { _: MatrixClient, _: String, _: String -> Result.success(Unit) }
++        val handler = createDefaultUnifiedPushNewGatewayHandler(
++            pushClientSecret = FakePushClientSecret(getUserIdFromSecretResult = { A_USER_ID }),
++            userPushStoreFactory = FakeUserPushStoreFactory(
++                userPushStore = { FakeUserPushStore(pushProviderName = UnifiedPushConfig.NAME) }
++            ),
++            pusherSubscriber = FakePusherSubscriber(registerPusherResult = lambda),
++            matrixClientProvider = FakeMatrixClientProvider {
++                Result.success(FakeMatrixClient(userIdServerNameLambda = { "chat.example.org" }))
++            },
++        )
++        val viaNtfySh = handler.handle("https://ntfy.sh/upAbc?up=1", "https://ntfy.sh/_matrix/push/v1/notify", A_SECRET)
++        val viaFallbackGateway = handler.handle(OWN_ENDPOINT, "https://matrix.gateway.unifiedpush.org/_matrix/push/v1/notify", A_SECRET)
++        val lookalike = handler.handle("https://chat.example.org.evil.com/upAbc", OWN_GATEWAY, A_SECRET)
++
++        assertThat(viaNtfySh.isFailure).isTrue()
++        assertThat(viaFallbackGateway.isFailure).isTrue()
++        assertThat(lookalike.isFailure).isTrue()
++        lambda.assertions().isNeverCalled()
++    }
++
++    @Test
++    fun `FreeChat - a server name with a port is compared by host`() {
++        assertThat(isOnServer("http://localhost:8099/upAbc", "localhost")).isTrue()
++        assertThat(isOnServer("not a url", "localhost")).isFalse()
+     }
+ 
+     private fun createDefaultUnifiedPushNewGatewayHandler(
+@@ -133,3 +162,6 @@ class DefaultUnifiedPushNewGatewayHandlerTest {
+         )
+     }
+ }
++
++private const val OWN_ENDPOINT = "https://chat.example.org/upAbc123?up=1"
++private const val OWN_GATEWAY = "https://chat.example.org/_matrix/push/v1/notify"

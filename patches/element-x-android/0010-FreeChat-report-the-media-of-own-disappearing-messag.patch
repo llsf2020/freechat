@@ -1,0 +1,207 @@
+From c085bd0eb18e18c96963b0aa424572ca3faa6d15 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 10/12] FreeChat: report the media of own disappearing messages
+
+The SDK encrypts attachments itself, so after sending, the MXCs of the
+message's files and thumbnails go to the server's event_media endpoint, which
+deletes them when the message expires.
+---
+ .../freechat/DisappearingTimelineFilter.kt    | 64 ++++++++++++++++++-
+ .../DisappearingTimelineFilterTest.kt         | 28 ++++++++
+ .../matrix/api/freechat/FreeChatApi.kt        | 22 +++++++
+ 3 files changed, 113 insertions(+), 1 deletion(-)
+
+diff --git a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilter.kt b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilter.kt
+index 113d6e5a92..c0df0134fe 100644
+--- a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilter.kt
++++ b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilter.kt
+@@ -10,12 +10,23 @@ package io.element.android.features.messages.impl.timeline.freechat
+ import dev.zacsweers.metro.ContributesBinding
+ import dev.zacsweers.metro.Inject
+ import io.element.android.features.messages.impl.timeline.model.TimelineItem
++import io.element.android.features.messages.impl.timeline.model.event.TimelineItemAttachmentsContent
++import io.element.android.features.messages.impl.timeline.model.event.TimelineItemEventContent
++import io.element.android.features.messages.impl.timeline.model.event.TimelineItemEventContentWithAttachment
++import io.element.android.features.messages.impl.timeline.model.event.TimelineItemFileContent
++import io.element.android.features.messages.impl.timeline.model.event.TimelineItemGalleryContent
++import io.element.android.features.messages.impl.timeline.model.event.TimelineItemImageContent
++import io.element.android.features.messages.impl.timeline.model.event.TimelineItemStickerContent
++import io.element.android.features.messages.impl.timeline.model.event.TimelineItemVideoContent
+ import io.element.android.libraries.di.SessionScope
+ import io.element.android.libraries.matrix.api.MatrixClient
+ import io.element.android.libraries.matrix.api.core.EventId
+ import io.element.android.libraries.matrix.api.core.RoomId
+ import io.element.android.libraries.matrix.api.freechat.ExpiryMarkers
++import io.element.android.libraries.matrix.api.freechat.FreeChatHttpException
+ import io.element.android.libraries.matrix.api.freechat.existingEvents
++import io.element.android.libraries.matrix.api.freechat.reportEventMedia
++import io.element.android.libraries.matrix.api.media.MediaSource
+ import kotlinx.collections.immutable.toImmutableList
+ import kotlinx.coroutines.delay
+ import kotlinx.coroutines.flow.Flow
+@@ -33,6 +44,8 @@ import timber.log.Timber
+  * The server purges expired messages without leaving a redaction. `unsigned.com.freechat.expires_at`
+  * (room auto-delete) is honoured to the second, even offline. Messages that burn after reading, whose
+  * expiry this device cannot compute, are dropped once the server says they no longer exist.
++ *
++ * It also reports the media of the user's own disappearing messages, so the server deletes the files with them.
+  */
+ interface DisappearingTimelineFilter {
+     fun filter(roomId: RoomId, items: Flow<List<TimelineItem>>): Flow<List<TimelineItem>>
+@@ -54,6 +67,19 @@ class DefaultDisappearingTimelineFilter(
+         val markers = MarkerCache()
+ 
+         launch { items.collect { latest.value = it } }
++        launch {
++            val reported = HashSet<EventId>()
++            latest.collect { list ->
++                for ((eventId, mxcs) in mediaToReport(list, System.currentTimeMillis(), reported, markers::of)) {
++                    reported += eventId
++                    client.reportEventMedia(roomId, eventId, mxcs).onFailure {
++                        // Retry on the next timeline update unless the server answered; it refuses for good.
++                        if (it !is FreeChatHttpException) reported -= eventId
++                        Timber.w(it, "FreeChat: reporting media failed in $roomId")
++                    }
++                }
++            }
++        }
+         launch {
+             while (true) {
+                 val pending = latest.value.markedEventIds(markers, System.currentTimeMillis()) - purged.value
+@@ -115,7 +141,40 @@ internal fun hideExpired(
+     }
+ }
+ 
+-private fun List<TimelineItem>.markedEventIds(markers: MarkerCache, now: Long): Set<EventId> =
++/** The user's own sent disappearing messages with media not reported yet, and the MXCs of each. */
++internal fun mediaToReport(
++    items: List<TimelineItem>,
++    now: Long,
++    reported: Set<EventId>,
++    markersOf: (TimelineItem.Event) -> ExpiryMarkers,
++): Map<EventId, List<String>> =
++    items.events()
++        .filter { it.isMine && it.content.isMedia }
++        .mapNotNull { event ->
++            val eventId = event.eventId?.takeUnless { it in reported } ?: return@mapNotNull null
++            val m = markersOf(event)
++            val expiresAt = m.expiresAt
++            if (!m.isMarked || (expiresAt != null && expiresAt <= now)) return@mapNotNull null
++            mediaMxcs(event.content).takeIf { it.isNotEmpty() }?.let { eventId to it }
++        }
++        .toMap()
++
++/** MXCs of a message's files and thumbnails; for encrypted media they are the IDs of the encrypted files. */
++internal fun mediaMxcs(content: TimelineItemEventContent): List<String> {
++    val sources: List<MediaSource?> = when (content) {
++        is TimelineItemImageContent -> listOf(content.mediaSource, content.thumbnailSource)
++        is TimelineItemVideoContent -> listOf(content.mediaSource, content.thumbnailSource)
++        is TimelineItemFileContent -> listOf(content.mediaSource, content.thumbnailSource)
++        is TimelineItemStickerContent -> listOf(content.mediaSource, content.thumbnailSource)
++        is TimelineItemEventContentWithAttachment -> listOf(content.mediaSource)
++        is TimelineItemGalleryContent -> content.items.flatMap { listOf(it.mediaSource, it.thumbnailSource) }
++        is TimelineItemAttachmentsContent -> content.attachments.flatMap { listOf(it.mediaSource, it.thumbnailSource) }
++        else -> emptyList()
++    }
++    return sources.mapNotNull { it?.safeUrl?.takeIf { url -> url.startsWith("mxc://") } }.distinct()
++}
++
++private fun List<TimelineItem>.events(): List<TimelineItem.Event> =
+     flatMap { item ->
+         when (item) {
+             is TimelineItem.Event -> listOf(item)
+@@ -123,6 +182,9 @@ private fun List<TimelineItem>.markedEventIds(markers: MarkerCache, now: Long):
+             is TimelineItem.Virtual -> emptyList()
+         }
+     }
++
++private fun List<TimelineItem>.markedEventIds(markers: MarkerCache, now: Long): Set<EventId> =
++    events()
+         .filter { event ->
+             val m = markers.of(event)
+             val expiresAt = m.expiresAt
+diff --git a/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilterTest.kt b/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilterTest.kt
+index 2ad3501b89..a5033ae1e3 100644
+--- a/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilterTest.kt
++++ b/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilterTest.kt
+@@ -11,9 +11,12 @@ import com.google.common.truth.Truth.assertThat
+ import io.element.android.features.messages.impl.timeline.aTimelineItemDebugInfo
+ import io.element.android.features.messages.impl.timeline.aTimelineItemEvent
+ import io.element.android.features.messages.impl.timeline.model.TimelineItem
++import io.element.android.features.messages.impl.timeline.model.event.aTimelineItemFileContent
++import io.element.android.features.messages.impl.timeline.model.event.aTimelineItemImageContent
+ import io.element.android.libraries.matrix.api.core.EventId
+ import io.element.android.libraries.matrix.api.core.UniqueId
+ import io.element.android.libraries.matrix.api.freechat.ExpiryMarkers
++import io.element.android.libraries.matrix.api.media.MediaSource
+ import kotlinx.collections.immutable.persistentListOf
+ import org.junit.Test
+ 
+@@ -57,4 +60,29 @@ class DisappearingTimelineFilterTest {
+         val group = TimelineItem.GroupedEvents(UniqueId("g"), persistentListOf(timed, burn), persistentListOf())
+         assertThat(hideExpired(listOf(group), now = 9999, purged = setOf(EventId("\$burn")), markersOf = ::markers)).isEmpty()
+     }
++
++    private val image = aTimelineItemImageContent().copy(
++        mediaSource = MediaSource("mxc://server/main", json = "{}"),
++        thumbnailSource = MediaSource("mxc://server/thumb#auto"),
++    )
++
++    @Test
++    fun `media of files and thumbnails, only mxc`() {
++        assertThat(mediaMxcs(image)).containsExactly("mxc://server/main", "mxc://server/thumb").inOrder()
++        assertThat(mediaMxcs(aTimelineItemFileContent().copy(mediaSource = MediaSource("https://x/y")))).isEmpty()
++    }
++
++    @Test
++    fun `only own sent disappearing media is reported, once`() {
++        val timedJson = aTimelineItemDebugInfo(originalJson = json("""{"com.freechat.expires_at":5000}"""))
++        val mine = aTimelineItemEvent(eventId = EventId("\$mine"), isMine = true, content = image, debugInfo = timedJson)
++        val theirs = aTimelineItemEvent(eventId = EventId("\$theirs"), content = image, debugInfo = timedJson)
++        val kept = aTimelineItemEvent(eventId = EventId("\$kept"), isMine = true, content = image)
++        val items = listOf(mine, theirs, kept)
++
++        assertThat(mediaToReport(items, now = 0, reported = emptySet(), markersOf = ::markers))
++            .containsExactly(EventId("\$mine"), listOf("mxc://server/main", "mxc://server/thumb"))
++        assertThat(mediaToReport(items, now = 0, reported = setOf(EventId("\$mine")), markersOf = ::markers)).isEmpty()
++        assertThat(mediaToReport(items, now = 5000, reported = emptySet(), markersOf = ::markers)).isEmpty()
++    }
+ }
+diff --git a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/FreeChatApi.kt b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/FreeChatApi.kt
+index eac9caf41a..aa20708d3e 100644
+--- a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/FreeChatApi.kt
++++ b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/FreeChatApi.kt
+@@ -38,6 +38,11 @@ object FreeChatApi {
+ 
+     fun existingEventsPath(roomId: RoomId) = "/rooms/${encode(roomId.value)}/existing_events"
+ 
++    fun eventMediaPath(roomId: RoomId) = "/rooms/${encode(roomId.value)}/event_media"
++
++    /** Most media one message may report; the server rejects more. */
++    const val MAX_EVENT_MEDIA = 64
++
+     /** True only for a real JSON `true`; strings and anything malformed count as off. */
+     fun blockScreenshotsFromContent(contentJson: String?): Boolean {
+         val value = runCatching { Json.parseToJsonElement(contentJson ?: return false).jsonObject["block_screenshots"] }.getOrNull()
+@@ -94,3 +99,20 @@ suspend fun MatrixClient.existingEvents(roomId: RoomId, eventIds: Set<EventId>):
+             .toSet()
+     }
+ }
++
++/**
++ * Tells the server which media the user's own disappearing message [eventId] uses, so the files are deleted when it
++ * expires. The SDK encrypts attachments itself, so their IDs cannot go in the event's plaintext. Returns how many the
++ * server kept: none for messages that never expire.
++ */
++suspend fun MatrixClient.reportEventMedia(roomId: RoomId, eventId: EventId, mxcs: List<String>): Result<Int> {
++    val body = JsonObject(
++        mapOf(
++            "event_id" to JsonPrimitive(eventId.value),
++            "mxcs" to JsonArray(mxcs.take(FreeChatApi.MAX_EVENT_MEDIA).map(::JsonPrimitive)),
++        )
++    ).toString()
++    return freechatRequest("POST", FreeChatApi.eventMediaPath(roomId), body).mapCatching { response ->
++        (Json.parseToJsonElement(response).jsonObject["kept"] as? JsonPrimitive)?.longOrNull?.toInt() ?: 0
++    }
++}

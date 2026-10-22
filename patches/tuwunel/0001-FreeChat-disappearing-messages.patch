@@ -1,0 +1,471 @@
+From c96bfdd234cfb785c7f0d040b676dfa2191c4b9b Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 01/14] FreeChat: disappearing messages
+
+Rooms opt in with the com.freechat.disappearing state event
+({"ttl": seconds}). Messages appended while a TTL is set are indexed
+by expiry time in the new expiresat_eventid map; a worker redacts them
+as their original sender (marking the redaction com.freechat.expired)
+and deletes media the sender uploaded, including MXCs listed in the
+plaintext com.freechat.media hint on encrypted events.
+---
+ src/database/maps.rs                    |   6 +
+ src/service/rooms/disappearing/mod.rs   | 308 ++++++++++++++++++++++++
+ src/service/rooms/disappearing/tests.rs |  58 +++++
+ src/service/rooms/mod.rs                |   1 +
+ src/service/rooms/timeline/append.rs    |   3 +
+ src/service/services.rs                 |   3 +
+ 6 files changed, 379 insertions(+)
+ create mode 100644 src/service/rooms/disappearing/mod.rs
+ create mode 100644 src/service/rooms/disappearing/tests.rs
+
+diff --git a/src/database/maps.rs b/src/database/maps.rs
+index 06d58158c..8a27adf3e 100644
+--- a/src/database/maps.rs
++++ b/src/database/maps.rs
+@@ -178,6 +178,12 @@ pub(crate) fn descriptor(name: &str) -> &'static Descriptor {
+ 		index_size: 512,
+ 		..descriptor::RANDOM
+ 	},
++	Descriptor {
++		// FreeChat: disappearing messages expiry index
++		name: "expiresat_eventid",
++		key_size_hint: Some(64),
++		..descriptor::SEQUENTIAL_SMALL
++	},
+ 	Descriptor {
+ 		name: "global",
+ 		..descriptor::RANDOM_SMALL
+diff --git a/src/service/rooms/disappearing/mod.rs b/src/service/rooms/disappearing/mod.rs
+new file mode 100644
+index 000000000..3f4ada242
+--- /dev/null
++++ b/src/service/rooms/disappearing/mod.rs
+@@ -0,0 +1,308 @@
++//! FreeChat: disappearing messages.
++//!
++//! A room opts in by setting the `com.freechat.disappearing` state event
++//! (state key `""`) with content `{"ttl": <seconds>}`; a missing event or a
++//! `ttl` of zero disables the feature. The TTL in effect when a message is
++//! appended applies to that message, so changing it never shortens or extends
++//! messages already sent.
++//!
++//! When a message expires the server redacts it as its original sender, which
++//! every client applies to its local store, then deletes the media it
++//! referenced. Clients may list media MXCs under `com.freechat.media` in the
++//! plaintext content of encrypted events so it can be found and removed.
++
++#[cfg(test)]
++mod tests;
++
++use std::{sync::Arc, time::Duration};
++
++use async_trait::async_trait;
++use futures::{StreamExt, TryStreamExt};
++use ruma::{
++	CanonicalJsonObject, CanonicalJsonValue, EventId, Mxc, OwnedEventId, OwnedUserId, UserId,
++	events::{StateEventType, TimelineEventType},
++};
++use serde::Deserialize;
++use serde_json::{json, value::to_raw_value};
++use tuwunel_core::{
++	Result, debug, debug_info, implement,
++	matrix::{
++		event::Event,
++		pdu::{PduBuilder, PduEvent},
++	},
++	utils::{ReadyExt, time::now},
++	warn,
++};
++use tuwunel_database::Map;
++
++/// State event type that configures a room's disappearing-message TTL.
++pub const STATE_TYPE: &str = "com.freechat.disappearing";
++
++/// Plaintext content key on which clients list media MXCs of an event.
++pub const MEDIA_KEY: &str = "com.freechat.media";
++
++/// Content key marking a redaction issued by this service, so clients can
++/// hide the event entirely instead of showing a "message deleted" notice.
++pub const EXPIRED_KEY: &str = "com.freechat.expired";
++
++/// How often the worker checks for expired messages.
++const INTERVAL: Duration = Duration::from_secs(5);
++
++pub struct Service {
++	services: Arc<crate::services::OnceServices>,
++	expiresat_eventid: Arc<Map>,
++}
++
++#[derive(Clone, Copy, Debug, Default, Deserialize)]
++pub struct Content {
++	#[serde(default)]
++	pub ttl: u64,
++}
++
++#[async_trait]
++impl crate::Service for Service {
++	fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
++		Ok(Arc::new(Self {
++			services: args.services.clone(),
++			expiresat_eventid: args.db["expiresat_eventid"].clone(),
++		}))
++	}
++
++	async fn worker(self: Arc<Self>) -> Result {
++		loop {
++			if let Err(e) = self.expire_due().await {
++				warn!("Disappearing messages sweep failed: {e}");
++			}
++
++			tokio::select! {
++				() = tokio::time::sleep(INTERVAL) => {},
++				() = self.services.server.until_shutdown() => return Ok(())
++			};
++		}
++	}
++
++	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
++}
++
++/// Schedules a freshly appended event for expiry if its room has a TTL set.
++///
++/// Called from the timeline append path while the room's state lock is held.
++#[implement(Service)]
++pub async fn schedule(&self, pdu: &PduEvent) {
++	if !is_expirable(pdu) {
++		return;
++	}
++
++	let ttl = self.room_ttl(pdu.room_id()).await;
++	if ttl == 0 {
++		return;
++	}
++
++	let sent_secs = u64::from(pdu.origin_server_ts().as_secs());
++	let expires_at = sent_secs.saturating_add(ttl);
++
++	self.expiresat_eventid
++		.put_raw((expires_at, pdu.event_id()), []);
++}
++
++/// Returns the room's current TTL in seconds, zero when disabled.
++#[implement(Service)]
++pub async fn room_ttl(&self, room_id: &ruma::RoomId) -> u64 {
++	self.services
++		.state_accessor
++		.room_state_get_content::<Content>(room_id, &StateEventType::from(STATE_TYPE), "")
++		.await
++		.map(|content| content.ttl)
++		.unwrap_or(0)
++}
++
++/// Redacts every scheduled event whose expiry time has passed.
++#[implement(Service)]
++async fn expire_due(&self) -> Result {
++	let now = now().as_secs();
++	let due: Vec<(u64, OwnedEventId)> = self
++		.expiresat_eventid
++		.keys::<(u64, &EventId)>()
++		.ready_take_while(|res| res.as_ref().is_ok_and(|(at, _)| *at <= now))
++		.map_ok(|(at, event_id)| (at, event_id.to_owned()))
++		.try_collect()
++		.await?;
++
++	if due.is_empty() {
++		return Ok(());
++	}
++
++	debug_info!(count = due.len(), "Expiring disappearing messages");
++
++	for (at, event_id) in due {
++		if let Err(e) = self.expire(&event_id).await {
++			warn!(%event_id, "Failed to expire disappearing message: {e}");
++		}
++
++		self.expiresat_eventid.del((at, &*event_id));
++	}
++
++	Ok(())
++}
++
++/// Redacts one expired event and deletes the media it referenced.
++#[implement(Service)]
++async fn expire(&self, event_id: &EventId) -> Result {
++	let Ok(pdu) = self.services.timeline.get_pdu(event_id).await else {
++		debug!(%event_id, "Expired event no longer exists");
++		return Ok(());
++	};
++
++	if pdu.is_redacted() {
++		return Ok(());
++	}
++
++	// Collect media before redaction strips the content.
++	let mxcs = media_mxcs(&pdu);
++
++	let room_id = pdu.room_id();
++	let Some(redactor) = self.redactor(&pdu).await else {
++		warn!(%event_id, %room_id, "No local member can redact expired message");
++		return Ok(());
++	};
++
++	let content = to_raw_value(&json!({
++		"redacts": event_id,
++		EXPIRED_KEY: true,
++	}))?;
++
++	let state_lock = self.services.state.mutex.lock(room_id).await;
++	self.services
++		.timeline
++		.build_and_append_pdu(
++			PduBuilder {
++				event_type: TimelineEventType::RoomRedaction,
++				content: content.into(),
++				redacts: Some(event_id.to_owned()),
++				..PduBuilder::default()
++			},
++			&redactor,
++			room_id,
++			&state_lock,
++		)
++		.await?;
++	drop(state_lock);
++
++	for mxc in mxcs {
++		self.delete_media(&mxc, pdu.sender()).await;
++	}
++
++	Ok(())
++}
++
++/// Picks the user to issue the redaction: the original sender while they are
++/// still joined, otherwise any joined local user allowed to redact it.
++#[implement(Service)]
++async fn redactor(&self, pdu: &PduEvent) -> Option<OwnedUserId> {
++	let room_id = pdu.room_id();
++	let event_id = pdu.event_id();
++	let can_redact = async |user: &UserId| {
++		self.services
++			.state_cache
++			.is_joined(user, room_id)
++			.await && self
++			.services
++			.state_accessor
++			.user_can_redact(event_id, user, room_id, false)
++			.await
++			.unwrap_or(false)
++	};
++
++	if self.services.globals.user_is_local(pdu.sender()) && can_redact(pdu.sender()).await {
++		return Some(pdu.sender().to_owned());
++	}
++
++	let members: Vec<OwnedUserId> = self
++		.services
++		.state_cache
++		.local_users_in_room(room_id)
++		.map(ToOwned::to_owned)
++		.collect()
++		.await;
++
++	for user in members {
++		if can_redact(&user).await {
++			return Some(user);
++		}
++	}
++
++	None
++}
++
++/// Deletes media only when it was uploaded by the message's sender, so an
++/// event cannot be used to remove someone else's file.
++#[implement(Service)]
++async fn delete_media(&self, mxc: &str, sender: &UserId) {
++	let Ok(parsed) = Mxc::try_from(mxc) else {
++		return;
++	};
++
++	let uploader = self
++		.services
++		.media
++		.media_entry(&parsed)
++		.await
++		.and_then(|entry| entry.user_id);
++
++	if uploader.as_deref() != Some(sender) {
++		debug!(%mxc, "Skipping media not uploaded by the sender");
++		return;
++	}
++
++	if let Err(e) = self.services.media.delete(&parsed).await {
++		debug!(%mxc, "Failed to delete expired media: {e}");
++	}
++}
++
++/// Message-like events expire; state events and redactions do not.
++fn is_expirable(pdu: &PduEvent) -> bool {
++	pdu.state_key().is_none() && *pdu.kind() != TimelineEventType::RoomRedaction
++}
++
++fn media_mxcs(pdu: &PduEvent) -> Vec<String> {
++	pdu.get_content::<CanonicalJsonObject>()
++		.map(|content| content_mxcs(&content))
++		.unwrap_or_default()
++}
++
++/// MXC URIs referenced by an event's content, including the FreeChat
++/// plaintext list used for encrypted events.
++fn content_mxcs(content: &CanonicalJsonObject) -> Vec<String> {
++	let str_at = |obj: &CanonicalJsonObject, path: &[&str]| -> Option<String> {
++		let (last, parents) = path.split_last()?;
++		let mut cur = obj;
++		for key in parents {
++			cur = cur.get(*key)?.as_object()?;
++		}
++
++		cur.get(*last)?.as_str().map(ToOwned::to_owned)
++	};
++
++	let mut mxcs: Vec<String> = [
++		&["url"][..],
++		&["file", "url"],
++		&["info", "thumbnail_url"],
++		&["info", "thumbnail_file", "url"],
++	]
++	.into_iter()
++	.filter_map(|path| str_at(content, path))
++	.collect();
++
++	if let Some(CanonicalJsonValue::Array(list)) = content.get(MEDIA_KEY) {
++		mxcs.extend(
++			list.iter()
++				.filter_map(CanonicalJsonValue::as_str)
++				.map(ToOwned::to_owned),
++		);
++	}
++
++	mxcs.retain(|mxc| mxc.starts_with("mxc://"));
++	mxcs.sort();
++	mxcs.dedup();
++	mxcs
++}
+diff --git a/src/service/rooms/disappearing/tests.rs b/src/service/rooms/disappearing/tests.rs
+new file mode 100644
+index 000000000..050abbaea
+--- /dev/null
++++ b/src/service/rooms/disappearing/tests.rs
+@@ -0,0 +1,58 @@
++use ruma::CanonicalJsonObject;
++use serde_json::json;
++
++use super::{Content, content_mxcs};
++
++fn object(value: serde_json::Value) -> CanonicalJsonObject {
++	serde_json::from_value(value).expect("valid canonical object")
++}
++
++#[test]
++fn plain_image_with_thumbnail() {
++	let content = object(json!({
++		"msgtype": "m.image",
++		"body": "a.png",
++		"url": "mxc://example.org/main",
++		"info": { "thumbnail_url": "mxc://example.org/thumb" },
++	}));
++
++	assert_eq!(content_mxcs(&content), ["mxc://example.org/main", "mxc://example.org/thumb"]);
++}
++
++#[test]
++fn encrypted_file_fields() {
++	let content = object(json!({
++		"msgtype": "m.file",
++		"file": { "url": "mxc://example.org/file" },
++		"info": { "thumbnail_file": { "url": "mxc://example.org/thumbfile" } },
++	}));
++
++	assert_eq!(content_mxcs(&content), ["mxc://example.org/file", "mxc://example.org/thumbfile"]);
++}
++
++#[test]
++fn plaintext_hint_on_encrypted_event() {
++	let content = object(json!({
++		"algorithm": "m.megolm.v1.aes-sha2",
++		"ciphertext": "AAAA",
++		"com.freechat.media": ["mxc://example.org/a", "mxc://example.org/a", 42, "https://x"],
++	}));
++
++	assert_eq!(content_mxcs(&content), ["mxc://example.org/a"]);
++}
++
++#[test]
++fn no_media() {
++	let content = object(json!({ "msgtype": "m.text", "body": "hi" }));
++
++	assert!(content_mxcs(&content).is_empty());
++}
++
++#[test]
++fn ttl_content_defaults_to_disabled() {
++	let content: Content = serde_json::from_value(json!({})).unwrap();
++	assert_eq!(content.ttl, 0);
++
++	let content: Content = serde_json::from_value(json!({ "ttl": 3600 })).unwrap();
++	assert_eq!(content.ttl, 3600);
++}
+diff --git a/src/service/rooms/mod.rs b/src/service/rooms/mod.rs
+index e30f1f4ee..666a7cbf3 100644
+--- a/src/service/rooms/mod.rs
++++ b/src/service/rooms/mod.rs
+@@ -2,6 +2,7 @@
+ pub mod auth_chain;
+ pub mod delete;
+ pub mod directory;
++pub mod disappearing;
+ pub mod event_handler;
+ pub mod lazy_loading;
+ pub mod metadata;
+diff --git a/src/service/rooms/timeline/append.rs b/src/service/rooms/timeline/append.rs
+index aee8db46b..f41db058b 100644
+--- a/src/service/rooms/timeline/append.rs
++++ b/src/service/rooms/timeline/append.rs
+@@ -217,6 +217,9 @@ pub async fn append_pdu<'a, Leafs>(
+ 	self.append_pdu_effects(pdu_id, pdu, shortroomid, count, state_lock)
+ 		.await?;
+ 
++	// FreeChat: schedule expiry when the room has disappearing messages on.
++	self.services.disappearing.schedule(pdu).await;
++
+ 	drop(next_count);
+ 
+ 	self.services
+diff --git a/src/service/services.rs b/src/service/services.rs
+index 7229cb498..f61a86094 100644
+--- a/src/service/services.rs
++++ b/src/service/services.rs
+@@ -39,6 +39,7 @@ pub struct Services {
+ 	pub auth_chain: Arc<rooms::auth_chain::Service>,
+ 	pub delete: Arc<rooms::delete::Service>,
+ 	pub directory: Arc<rooms::directory::Service>,
++	pub disappearing: Arc<rooms::disappearing::Service>,
+ 	pub event_handler: Arc<rooms::event_handler::Service>,
+ 	pub lazy_loading: Arc<rooms::lazy_loading::Service>,
+ 	pub metadata: Arc<rooms::metadata::Service>,
+@@ -106,6 +107,7 @@ pub async fn build(server: Arc<Server>) -> Result<Arc<Self>> {
+ 		auth_chain: rooms::auth_chain::Service::build(&args)?,
+ 		delete: rooms::delete::Service::build(&args)?,
+ 		directory: rooms::directory::Service::build(&args)?,
++		disappearing: rooms::disappearing::Service::build(&args)?,
+ 		event_handler: rooms::event_handler::Service::build(&args)?,
+ 		lazy_loading: rooms::lazy_loading::Service::build(&args)?,
+ 		metadata: rooms::metadata::Service::build(&args)?,
+@@ -175,6 +177,7 @@ macro_rules! cast {
+ 		cast!(self.auth_chain),
+ 		cast!(self.delete),
+ 		cast!(self.directory),
++		cast!(self.disappearing),
+ 		cast!(self.event_handler),
+ 		cast!(self.lazy_loading),
+ 		cast!(self.metadata),

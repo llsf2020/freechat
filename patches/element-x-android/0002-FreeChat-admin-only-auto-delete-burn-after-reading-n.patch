@@ -1,0 +1,1327 @@
+From 1bb77e789164a128285f17dd18864971c8703476 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 02/12] FreeChat: admin-only auto-delete, burn after reading,
+ no deleted placeholders
+
+- Room auto-delete can only be changed by room admins (power level 100 or
+  creators); others see why
+- Settings: default burn-after-read delay for my messages; room details:
+  per-chat override or follow the default. Stored as global
+  com.freechat.disappearing account data {read_ttl, rooms}, because the
+  Rust SDK cannot write room account data
+- Every deleted message disappears without a placeholder, like Telegram;
+  deleted thread roots stay. Two upstream TimelinePresenter tests adapted
+- Shared duration labels in libraries/matrixui
+---
+ .../impl/timeline/TimelinePresenter.kt        |  13 +--
+ ...iredMessages.kt => HideDeletedMessages.kt} |  16 ++-
+ .../impl/timeline/TimelinePresenterTest.kt    |  12 +-
+ .../freechat/HideDeletedMessagesTest.kt       |  53 +++++++++
+ .../freechat/HideExpiredMessagesTest.kt       |  50 --------
+ .../impl/freechat/GlobalReadBurnPresenter.kt  |  96 ++++++++++++++++
+ .../impl/freechat/GlobalReadBurnView.kt       |  99 ++++++++++++++++
+ .../impl/root/PreferencesRootNode.kt          |   6 +-
+ .../impl/root/PreferencesRootView.kt          |   2 +
+ .../freechat/GlobalReadBurnPresenterTest.kt   |  60 ++++++++++
+ .../roomdetails/impl/RoomDetailsNode.kt       |   6 +
+ .../freechat/DisappearingMessagesPresenter.kt |   9 +-
+ .../impl/freechat/DisappearingMessagesView.kt |  27 +----
+ .../impl/freechat/ReadBurnPresenter.kt        | 108 ++++++++++++++++++
+ .../roomdetails/impl/freechat/ReadBurnView.kt | 103 +++++++++++++++++
+ .../DisappearingMessagesPresenterTest.kt      |  27 +++--
+ .../impl/freechat/ReadBurnPresenterTest.kt    |  86 ++++++++++++++
+ .../matrix/api/freechat/Disappearing.kt       |  51 +++++++++
+ .../matrix/api/freechat/DisappearingTest.kt   |  40 +++++++
+ .../matrix/ui/freechat/DisappearingLabels.kt  |  44 +++++++
+ .../res/values-zh-rTW/freechat_strings.xml    |   6 +
+ .../main/res/values-zh/freechat_strings.xml   |   6 +
+ .../src/main/res/values/freechat_strings.xml  |   6 +
+ 23 files changed, 813 insertions(+), 113 deletions(-)
+ rename features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/{HideExpiredMessages.kt => HideDeletedMessages.kt} (58%)
+ create mode 100644 features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideDeletedMessagesTest.kt
+ delete mode 100644 features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideExpiredMessagesTest.kt
+ create mode 100644 features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/freechat/GlobalReadBurnPresenter.kt
+ create mode 100644 features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/freechat/GlobalReadBurnView.kt
+ create mode 100644 features/preferences/impl/src/test/kotlin/io/element/android/features/preferences/impl/freechat/GlobalReadBurnPresenterTest.kt
+ create mode 100644 features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/freechat/ReadBurnPresenter.kt
+ create mode 100644 features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/freechat/ReadBurnView.kt
+ create mode 100644 features/roomdetails/impl/src/test/kotlin/io/element/android/features/roomdetails/impl/freechat/ReadBurnPresenterTest.kt
+ create mode 100644 libraries/matrixui/src/main/kotlin/io/element/android/libraries/matrix/ui/freechat/DisappearingLabels.kt
+
+diff --git a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenter.kt b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenter.kt
+index 55c141c391..08d0f178b5 100644
+--- a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenter.kt
++++ b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenter.kt
+@@ -31,7 +31,7 @@ import io.element.android.features.messages.impl.crypto.sendfailure.resolve.Reso
+ import io.element.android.features.messages.impl.timeline.components.MessageShieldData
+ import io.element.android.features.messages.impl.timeline.factories.TimelineItemsFactory
+ import io.element.android.features.messages.impl.timeline.factories.TimelineItemsFactoryConfig
+-import io.element.android.features.messages.impl.timeline.freechat.hideExpiredMessages
++import io.element.android.features.messages.impl.timeline.freechat.hideDeletedMessages
+ import io.element.android.features.messages.impl.timeline.model.NewEventState
+ import io.element.android.features.messages.impl.timeline.model.TimelineItem
+ import io.element.android.features.messages.impl.timeline.model.virtual.TimelineItemReadMarkerModel
+@@ -53,7 +53,6 @@ import io.element.android.libraries.featureflag.api.FeatureFlags
+ import io.element.android.libraries.matrix.api.core.EventId
+ import io.element.android.libraries.matrix.api.core.UniqueId
+ import io.element.android.libraries.matrix.api.core.asEventId
+-import io.element.android.libraries.matrix.api.freechat.Disappearing
+ import io.element.android.libraries.matrix.api.room.JoinedRoom
+ import io.element.android.libraries.matrix.api.room.powerlevels.permissionsAsState
+ import io.element.android.libraries.matrix.api.room.roomMembers
+@@ -79,7 +78,6 @@ import kotlinx.coroutines.flow.flowOn
+ import kotlinx.coroutines.flow.launchIn
+ import kotlinx.coroutines.flow.map
+ import kotlinx.coroutines.flow.onEach
+-import kotlinx.coroutines.flow.onStart
+ import kotlinx.coroutines.launch
+ import kotlinx.coroutines.withContext
+ import timber.log.Timber
+@@ -323,12 +321,9 @@ class TimelinePresenter(
+         }
+ 
+         LaunchedEffect(Unit) {
+-            // FreeChat: hide deleted messages in rooms with disappearing messages on.
+-            combine(
+-                timelineItemsFactory.timelineItems,
+-                room.stateEventContentFlow(Disappearing.STATE_TYPE).map(Disappearing::ttlFromContent).onStart { emit(0L) },
+-                ::hideExpiredMessages,
+-            )
++            // FreeChat: deleted messages vanish without a placeholder.
++            timelineItemsFactory.timelineItems
++                .map(::hideDeletedMessages)
+                 .onEach { newTimelineItems ->
+                     timelineItemIndexer.process(newTimelineItems)
+                     timelineItems = newTimelineItems.toImmutableList()
+diff --git a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideExpiredMessages.kt b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideDeletedMessages.kt
+similarity index 58%
+rename from features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideExpiredMessages.kt
+rename to features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideDeletedMessages.kt
+index b323f69196..18745e3388 100644
+--- a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideExpiredMessages.kt
++++ b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideDeletedMessages.kt
+@@ -8,22 +8,20 @@
+ package io.element.android.features.messages.impl.timeline.freechat
+ 
+ import io.element.android.features.messages.impl.timeline.model.TimelineItem
++import io.element.android.features.messages.impl.timeline.model.TimelineItemThreadInfo
+ import io.element.android.features.messages.impl.timeline.model.event.TimelineItemRedactedContent
+-import io.element.android.libraries.matrix.api.freechat.Disappearing
+ import kotlinx.collections.immutable.toImmutableList
+ 
+ /**
+- * FreeChat: drop deleted messages from the timeline instead of showing a "message deleted" placeholder.
++ * FreeChat: deleted messages vanish from the timeline instead of leaving a "message deleted" placeholder,
++ * like Telegram. Deleted thread roots stay so their threads remain reachable.
+  *
+- * matrix-rust-sdk forgets an event's original JSON when a redaction arrives live, so the server's
+- * `com.freechat.expired` marker is only visible after a reload. In rooms with disappearing messages on,
+- * every redacted message is therefore hidden (Telegram never shows placeholders either); elsewhere only
+- * the ones we can tell expired are.
++ * Every deletion is hidden, not just server expiries: matrix-rust-sdk forgets an event's original JSON when a
++ * redaction arrives live, so the `com.freechat.expired` marker cannot be told apart from a manual deletion.
+  */
+-internal fun hideExpiredMessages(items: List<TimelineItem>, roomTtl: Long): List<TimelineItem> {
++internal fun hideDeletedMessages(items: List<TimelineItem>): List<TimelineItem> {
+     fun TimelineItem.Event.isHidden(): Boolean =
+-        content is TimelineItemRedactedContent &&
+-            (roomTtl > 0 || Disappearing.isExpiredRedaction(timelineItemDebugInfoProvider().originalJson))
++        content is TimelineItemRedactedContent && threadInfo !is TimelineItemThreadInfo.ThreadRoot
+ 
+     return items.mapNotNull { item ->
+         when (item) {
+diff --git a/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenterTest.kt b/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenterTest.kt
+index aa4198d156..4c8a308b92 100644
+--- a/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenterTest.kt
++++ b/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenterTest.kt
+@@ -873,7 +873,8 @@ class TimelinePresenterTest {
+     }
+ 
+     @Test
+-    fun `present - collapses a run of three or more redacted events into a single group`() = runTest {
++    // FreeChat: deleted messages are hidden instead of being collapsed into a "messages deleted" group.
++    fun `present - hides a run of redacted events`() = runTest {
+         val timeline = FakeTimeline(
+             timelineItems = flowOf(
+                 (0 until 3).map { index ->
+@@ -886,10 +887,8 @@ class TimelinePresenterTest {
+         )
+         val presenter = createTimelinePresenter(timeline = timeline)
+         presenter.test {
+-            val state = consumeItemsUntilPredicate { it.timelineItems.size == 1 }.last()
+-            val group = state.timelineItems.single()
+-            assertThat(group).isInstanceOf(TimelineItem.GroupedEvents::class.java)
+-            assertThat((group as TimelineItem.GroupedEvents).events).hasSize(3)
++            val state = consumeItemsUntilTimeout().last()
++            assertThat(state.timelineItems).isEmpty()
+             cancelAndIgnoreRemainingEvents()
+         }
+     }
+@@ -1005,7 +1004,8 @@ class TimelinePresenterTest {
+         )
+         presenter.test {
+             assertThat(redactedVoiceMessageManager.invocations.size).isEqualTo(0)
+-            skipItems(2)
++            // FreeChat: the hidden redacted item no longer changes the state, so wait for emissions to settle.
++            consumeItemsUntilTimeout()
+             assertThat(redactedVoiceMessageManager.invocations.size).isEqualTo(1)
+         }
+     }
+diff --git a/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideDeletedMessagesTest.kt b/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideDeletedMessagesTest.kt
+new file mode 100644
+index 0000000000..4bf6706893
+--- /dev/null
++++ b/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideDeletedMessagesTest.kt
+@@ -0,0 +1,53 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.features.messages.impl.timeline.freechat
++
++import com.google.common.truth.Truth.assertThat
++import io.element.android.features.messages.impl.timeline.aTimelineItemEvent
++import io.element.android.features.messages.impl.timeline.model.TimelineItem
++import io.element.android.features.messages.impl.timeline.model.TimelineItemThreadInfo
++import io.element.android.features.messages.impl.timeline.model.event.TimelineItemRedactedContent
++import io.element.android.libraries.architecture.AsyncData
++import io.element.android.libraries.matrix.api.core.UniqueId
++import io.element.android.libraries.matrix.api.timeline.item.ThreadSummary
++import kotlinx.collections.immutable.persistentListOf
++import org.junit.Test
++
++class HideDeletedMessagesTest {
++    private val text = aTimelineItemEvent()
++    private val deleted = aTimelineItemEvent(content = TimelineItemRedactedContent)
++
++    @Test
++    fun `deleted messages are hidden`() {
++        assertThat(hideDeletedMessages(listOf(text, deleted))).containsExactly(text)
++    }
++
++    @Test
++    fun `deleted thread roots stay`() {
++        val root = aTimelineItemEvent(
++            content = TimelineItemRedactedContent,
++            threadInfo = TimelineItemThreadInfo.ThreadRoot(
++                summary = ThreadSummary(latestEvent = AsyncData.Uninitialized, numberOfReplies = 1),
++                latestEventText = null
++            ),
++        )
++        assertThat(hideDeletedMessages(listOf(root))).containsExactly(root)
++    }
++
++    @Test
++    fun `groups are filtered, dropped when empty, and kept as is when untouched`() {
++        val allDeleted = TimelineItem.GroupedEvents(UniqueId("g1"), persistentListOf(deleted, deleted), persistentListOf())
++        assertThat(hideDeletedMessages(listOf(allDeleted))).isEmpty()
++
++        val mixed = TimelineItem.GroupedEvents(UniqueId("g2"), persistentListOf(text, deleted), persistentListOf())
++        assertThat((hideDeletedMessages(listOf(mixed)).single() as TimelineItem.GroupedEvents).events).containsExactly(text)
++
++        val untouched = TimelineItem.GroupedEvents(UniqueId("g3"), persistentListOf(text), persistentListOf())
++        assertThat(hideDeletedMessages(listOf(untouched)).single()).isSameInstanceAs(untouched)
++    }
++}
+diff --git a/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideExpiredMessagesTest.kt b/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideExpiredMessagesTest.kt
+deleted file mode 100644
+index ae1b584cc1..0000000000
+--- a/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideExpiredMessagesTest.kt
++++ /dev/null
+@@ -1,50 +0,0 @@
+-/*
+- * Copyright 2026 FreeChat contributors
+- *
+- * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
+- * Please see LICENSE files in the repository root for full details.
+- */
+-
+-package io.element.android.features.messages.impl.timeline.freechat
+-
+-import com.google.common.truth.Truth.assertThat
+-import io.element.android.features.messages.impl.timeline.aTimelineItemDebugInfo
+-import io.element.android.features.messages.impl.timeline.aTimelineItemEvent
+-import io.element.android.features.messages.impl.timeline.model.TimelineItem
+-import io.element.android.features.messages.impl.timeline.model.event.TimelineItemRedactedContent
+-import io.element.android.libraries.matrix.api.core.UniqueId
+-import kotlinx.collections.immutable.persistentListOf
+-import org.junit.Test
+-
+-class HideExpiredMessagesTest {
+-    private val expiredJson = """{"content":{},"unsigned":{"redacted_because":{"content":{"com.freechat.expired":true}}}}"""
+-
+-    private val text = aTimelineItemEvent()
+-    private val redacted = aTimelineItemEvent(content = TimelineItemRedactedContent)
+-    private val expired = aTimelineItemEvent(content = TimelineItemRedactedContent, debugInfo = aTimelineItemDebugInfo(originalJson = expiredJson))
+-
+-    @Test
+-    fun `room without ttl keeps manual deletions and hides known expiries`() {
+-        assertThat(hideExpiredMessages(listOf(text, redacted, expired), roomTtl = 0)).containsExactly(text, redacted).inOrder()
+-    }
+-
+-    @Test
+-    fun `room with ttl hides every deleted message`() {
+-        assertThat(hideExpiredMessages(listOf(text, redacted, expired), roomTtl = 3600)).containsExactly(text)
+-    }
+-
+-    @Test
+-    fun `groups are filtered and dropped when empty`() {
+-        val group = TimelineItem.GroupedEvents(UniqueId("g"), persistentListOf(redacted, expired), persistentListOf())
+-        assertThat(hideExpiredMessages(listOf(group), roomTtl = 3600)).isEmpty()
+-
+-        val filtered = hideExpiredMessages(listOf(group), roomTtl = 0).single() as TimelineItem.GroupedEvents
+-        assertThat(filtered.events).containsExactly(redacted)
+-    }
+-
+-    @Test
+-    fun `untouched groups are returned as is`() {
+-        val group = TimelineItem.GroupedEvents(UniqueId("g"), persistentListOf(redacted), persistentListOf())
+-        assertThat(hideExpiredMessages(listOf(group), roomTtl = 0).single()).isSameInstanceAs(group)
+-    }
+-}
+diff --git a/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/freechat/GlobalReadBurnPresenter.kt b/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/freechat/GlobalReadBurnPresenter.kt
+new file mode 100644
+index 0000000000..11cd66e685
+--- /dev/null
++++ b/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/freechat/GlobalReadBurnPresenter.kt
+@@ -0,0 +1,96 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.features.preferences.impl.freechat
++
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.rememberCoroutineScope
++import androidx.compose.runtime.setValue
++import dev.zacsweers.metro.Inject
++import io.element.android.libraries.architecture.Presenter
++import io.element.android.libraries.matrix.api.MatrixClient
++import io.element.android.libraries.matrix.api.freechat.Disappearing
++import kotlinx.coroutines.launch
++import timber.log.Timber
++
++/** FreeChat: my default burn-after-read delay for every chat. */
++@Inject
++class GlobalReadBurnPresenter(
++    private val client: MatrixClient,
++) : Presenter<GlobalReadBurnState> {
++    @Composable
++    override fun present(): GlobalReadBurnState {
++        val scope = rememberCoroutineScope()
++        var ttl by remember { mutableStateOf<Long?>(null) }
++        var showDialog by remember { mutableStateOf(false) }
++        var isSaving by remember { mutableStateOf(false) }
++        var hasError by remember { mutableStateOf(false) }
++
++        LaunchedEffect(Unit) {
++            client.getAccountData(Disappearing.STATE_TYPE)
++                .onSuccess { ttl = Disappearing.parsePersonal(it).readTtl }
++                .onFailure { Timber.e(it, "FreeChat: failed to load burn-after-read settings") }
++        }
++
++        fun save(newTtl: Long) = scope.launch {
++            isSaving = true
++            // Re-read so per-chat overrides set on another device are kept.
++            client.getAccountData(Disappearing.STATE_TYPE)
++                .mapCatching { latest ->
++                    client.setAccountData(Disappearing.STATE_TYPE, Disappearing.withGlobalReadTtl(latest, newTtl)).getOrThrow()
++                }
++                .onSuccess { ttl = newTtl }
++                .onFailure {
++                    Timber.e(it, "FreeChat: failed to save burn-after-read default")
++                    hasError = true
++                }
++            isSaving = false
++        }
++
++        fun handleEvent(event: GlobalReadBurnEvent) {
++            when (event) {
++                GlobalReadBurnEvent.OpenDialog -> showDialog = true
++                GlobalReadBurnEvent.CloseDialog -> showDialog = false
++                GlobalReadBurnEvent.ClearError -> hasError = false
++                is GlobalReadBurnEvent.SetTtl -> {
++                    showDialog = false
++                    if (event.ttl != ttl) save(event.ttl)
++                }
++            }
++        }
++
++        return GlobalReadBurnState(
++            ttl = ttl ?: 0,
++            isLoaded = ttl != null,
++            isSaving = isSaving,
++            showDialog = showDialog,
++            hasError = hasError,
++            eventSink = ::handleEvent,
++        )
++    }
++}
++
++data class GlobalReadBurnState(
++    /** Default delay in seconds, zero when off. */
++    val ttl: Long,
++    val isLoaded: Boolean,
++    val isSaving: Boolean,
++    val showDialog: Boolean,
++    val hasError: Boolean,
++    val eventSink: (GlobalReadBurnEvent) -> Unit,
++)
++
++sealed interface GlobalReadBurnEvent {
++    data object OpenDialog : GlobalReadBurnEvent
++    data object CloseDialog : GlobalReadBurnEvent
++    data object ClearError : GlobalReadBurnEvent
++    data class SetTtl(val ttl: Long) : GlobalReadBurnEvent
++}
+diff --git a/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/freechat/GlobalReadBurnView.kt b/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/freechat/GlobalReadBurnView.kt
+new file mode 100644
+index 0000000000..56f19d2474
+--- /dev/null
++++ b/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/freechat/GlobalReadBurnView.kt
+@@ -0,0 +1,99 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.features.preferences.impl.freechat
++
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.tooling.preview.PreviewParameter
++import androidx.compose.ui.tooling.preview.PreviewParameterProvider
++import io.element.android.compound.tokens.generated.CompoundIcons
++import io.element.android.libraries.designsystem.components.dialogs.ErrorDialog
++import io.element.android.libraries.designsystem.components.dialogs.ListOption
++import io.element.android.libraries.designsystem.components.dialogs.SingleSelectionDialog
++import io.element.android.libraries.designsystem.components.list.ListItemContent
++import io.element.android.libraries.designsystem.components.preferences.PreferenceCategory
++import io.element.android.libraries.designsystem.preview.ElementPreview
++import io.element.android.libraries.designsystem.preview.PreviewsDayNight
++import io.element.android.libraries.designsystem.theme.components.IconSource
++import io.element.android.libraries.designsystem.theme.components.ListItem
++import io.element.android.libraries.designsystem.theme.components.Text
++import io.element.android.libraries.matrix.api.freechat.Disappearing
++import io.element.android.libraries.matrix.ui.freechat.readTtlLabel
++import io.element.android.libraries.ui.strings.CommonStrings
++import kotlinx.collections.immutable.toImmutableList
++
++/** FreeChat: settings section for my default burn-after-read delay. */
++@Composable
++fun GlobalReadBurnSection(
++    state: GlobalReadBurnState,
++    modifier: Modifier = Modifier,
++) {
++    PreferenceCategory(modifier = modifier, title = stringResource(CommonStrings.freechat_burn_title)) {
++        ListItem(
++            leadingContent = ListItemContent.Icon(IconSource.Vector(CompoundIcons.VisibilityOff())),
++            content = { Text(stringResource(CommonStrings.freechat_burn_title)) },
++            supportingContent = { Text(readTtlLabel(state.ttl)) },
++            enabled = state.isLoaded && !state.isSaving,
++            onClick = { state.eventSink(GlobalReadBurnEvent.OpenDialog) },
++        )
++    }
++
++    if (state.showDialog) {
++        val presets = Disappearing.READ_TTL_PRESETS
++        val choices = if (state.ttl in presets) presets else presets + state.ttl
++        SingleSelectionDialog(
++            title = stringResource(CommonStrings.freechat_burn_title),
++            subtitle = stringResource(CommonStrings.freechat_burn_description),
++            options = choices.map { ListOption(readTtlLabel(it)) }.toImmutableList(),
++            initialSelection = choices.indexOf(state.ttl),
++            onSelectOption = { index -> state.eventSink(GlobalReadBurnEvent.SetTtl(choices[index])) },
++            onDismissRequest = { state.eventSink(GlobalReadBurnEvent.CloseDialog) },
++        )
++    }
++
++    if (state.hasError) {
++        ErrorDialog(
++            content = stringResource(CommonStrings.freechat_burn_error),
++            onSubmit = { state.eventSink(GlobalReadBurnEvent.ClearError) },
++        )
++    }
++}
++
++internal class GlobalReadBurnStateProvider : PreviewParameterProvider<GlobalReadBurnState> {
++    override val values = sequenceOf(
++        aGlobalReadBurnState(),
++        aGlobalReadBurnState(ttl = 30),
++        aGlobalReadBurnState(ttl = 30, showDialog = true),
++        aGlobalReadBurnState(isLoaded = false),
++        aGlobalReadBurnState(hasError = true),
++    )
++}
++
++internal fun aGlobalReadBurnState(
++    ttl: Long = 0,
++    isLoaded: Boolean = true,
++    isSaving: Boolean = false,
++    showDialog: Boolean = false,
++    hasError: Boolean = false,
++    eventSink: (GlobalReadBurnEvent) -> Unit = {},
++) = GlobalReadBurnState(
++    ttl = ttl,
++    isLoaded = isLoaded,
++    isSaving = isSaving,
++    showDialog = showDialog,
++    hasError = hasError,
++    eventSink = eventSink,
++)
++
++@PreviewsDayNight
++@Composable
++internal fun GlobalReadBurnSectionPreview(@PreviewParameter(GlobalReadBurnStateProvider::class) state: GlobalReadBurnState) =
++    ElementPreview {
++        GlobalReadBurnSection(state)
++    }
+diff --git a/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootNode.kt b/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootNode.kt
+index 57ed6294fa..b823c33843 100644
+--- a/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootNode.kt
++++ b/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootNode.kt
+@@ -22,6 +22,8 @@ import io.element.android.compound.theme.ElementTheme
+ import io.element.android.features.logout.api.direct.DirectLogoutEvent
+ import io.element.android.features.logout.api.direct.DirectLogoutView
+ import io.element.android.features.preferences.impl.account.PreferencesAccountCallback
++import io.element.android.features.preferences.impl.freechat.GlobalReadBurnPresenter
++import io.element.android.features.preferences.impl.freechat.GlobalReadBurnSection
+ import io.element.android.libraries.androidutils.browser.openUrlInChromeCustomTab
+ import io.element.android.libraries.architecture.callback
+ import io.element.android.libraries.di.SessionScope
+@@ -35,6 +37,7 @@ class PreferencesRootNode(
+     private val presenter: PreferencesRootPresenter,
+     private val emojiPickerRenderer: EmojiPickerRenderer,
+     private val directLogoutView: DirectLogoutView,
++    private val globalReadBurnPresenter: GlobalReadBurnPresenter, // FreeChat
+ ) : Node(buildContext, plugins = plugins) {
+     interface Callback : PreferencesAccountCallback, Plugin {
+         fun navigateToAddAccount()
+@@ -96,7 +99,8 @@ class PreferencesRootNode(
+                     callback.startSignOutFlow()
+                 }
+             },
+-            onDeactivateClick = callback::startAccountDeactivationFlow
++            onDeactivateClick = callback::startAccountDeactivationFlow,
++            freechatSettingsView = { GlobalReadBurnSection(globalReadBurnPresenter.present()) }, // FreeChat
+         )
+ 
+         directLogoutView.Render(state = state.preferencesAccountState.directLogoutState)
+diff --git a/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootView.kt b/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootView.kt
+index 1449ece700..c59eeab5b8 100644
+--- a/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootView.kt
++++ b/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootView.kt
+@@ -96,6 +96,7 @@ fun PreferencesRootView(
+     onSignOutClick: () -> Unit,
+     onDeactivateClick: () -> Unit,
+     modifier: Modifier = Modifier,
++    freechatSettingsView: @Composable () -> Unit = {}, // FreeChat
+ ) {
+     val snackbarHostState = rememberSnackbarHostState(snackbarMessage = state.snackbarMessage)
+ 
+@@ -149,6 +150,7 @@ fun PreferencesRootView(
+                 onOpenMediaSettings = onOpenMediaSettings,
+                 onOpenLocationSettings = onOpenLocationSettings,
+             )
++            freechatSettingsView() // FreeChat
+             // General section
+             GeneralSection(
+                 state = state,
+diff --git a/features/preferences/impl/src/test/kotlin/io/element/android/features/preferences/impl/freechat/GlobalReadBurnPresenterTest.kt b/features/preferences/impl/src/test/kotlin/io/element/android/features/preferences/impl/freechat/GlobalReadBurnPresenterTest.kt
+new file mode 100644
+index 0000000000..96a45bedff
+--- /dev/null
++++ b/features/preferences/impl/src/test/kotlin/io/element/android/features/preferences/impl/freechat/GlobalReadBurnPresenterTest.kt
+@@ -0,0 +1,60 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.features.preferences.impl.freechat
++
++import com.google.common.truth.Truth.assertThat
++import io.element.android.libraries.matrix.api.MatrixClient
++import io.element.android.libraries.matrix.api.freechat.Disappearing
++import io.element.android.libraries.matrix.test.AN_EXCEPTION
++import io.element.android.libraries.matrix.test.FakeMatrixClient
++import io.element.android.tests.testutils.consumeItemsUntilPredicate
++import io.element.android.tests.testutils.test
++import kotlinx.coroutines.test.runTest
++import org.junit.Test
++
++class GlobalReadBurnPresenterTest {
++    private class AccountDataClient(
++        var stored: String?,
++        private val saveResult: Result<Unit> = Result.success(Unit),
++    ) : MatrixClient by FakeMatrixClient() {
++        override suspend fun getAccountData(eventType: String): Result<String?> = Result.success(stored)
++
++        override suspend fun setAccountData(eventType: String, content: String): Result<Unit> =
++            saveResult.onSuccess { stored = content }
++    }
++
++    @Test
++    fun `present - loads the default, off when unset`() = runTest {
++        GlobalReadBurnPresenter(AccountDataClient(null)).test {
++            val state = consumeItemsUntilPredicate { it.isLoaded }.last()
++            assertThat(state.ttl).isEqualTo(0)
++            cancelAndIgnoreRemainingEvents()
++        }
++    }
++
++    @Test
++    fun `present - changing the default keeps per-chat overrides`() = runTest {
++        val client = AccountDataClient("""{"read_ttl":5,"rooms":{"!a:x":0}}""")
++        GlobalReadBurnPresenter(client).test {
++            consumeItemsUntilPredicate { it.isLoaded && it.ttl == 5L }.last().eventSink(GlobalReadBurnEvent.SetTtl(60))
++            consumeItemsUntilPredicate { !it.isSaving && it.ttl == 60L }
++            assertThat(Disappearing.parsePersonal(client.stored)).isEqualTo(Disappearing.Personal(60, mapOf("!a:x" to 0L)))
++            cancelAndIgnoreRemainingEvents()
++        }
++    }
++
++    @Test
++    fun `present - save failure shows an error and keeps the old value`() = runTest {
++        GlobalReadBurnPresenter(AccountDataClient("""{"read_ttl":5}""", Result.failure(AN_EXCEPTION))).test {
++            consumeItemsUntilPredicate { it.isLoaded }.last().eventSink(GlobalReadBurnEvent.SetTtl(30))
++            val failed = consumeItemsUntilPredicate { it.hasError }.last()
++            assertThat(failed.ttl).isEqualTo(5)
++            cancelAndIgnoreRemainingEvents()
++        }
++    }
++}
+diff --git a/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/RoomDetailsNode.kt b/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/RoomDetailsNode.kt
+index e759f5f08f..54e69473a3 100644
+--- a/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/RoomDetailsNode.kt
++++ b/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/RoomDetailsNode.kt
+@@ -26,6 +26,8 @@ import io.element.android.annotations.ContributesNode
+ import io.element.android.features.leaveroom.api.LeaveRoomRenderer
+ import io.element.android.features.roomdetails.impl.freechat.DisappearingMessagesItem
+ import io.element.android.features.roomdetails.impl.freechat.DisappearingMessagesPresenter
++import io.element.android.features.roomdetails.impl.freechat.ReadBurnItem
++import io.element.android.features.roomdetails.impl.freechat.ReadBurnPresenter
+ import io.element.android.libraries.androidutils.system.startSharePlainTextIntent
+ import io.element.android.libraries.architecture.appyx.launchMolecule
+ import io.element.android.libraries.architecture.callback
+@@ -49,6 +51,7 @@ class RoomDetailsNode(
+     private val analyticsService: AnalyticsService,
+     private val leaveRoomRenderer: LeaveRoomRenderer,
+     disappearingMessagesPresenter: DisappearingMessagesPresenter, // FreeChat
++    readBurnPresenter: ReadBurnPresenter, // FreeChat
+ ) : Node(buildContext, plugins = plugins), RoomDetailsNavigator {
+     interface Callback : Plugin {
+         fun navigateBack()
+@@ -97,6 +100,7 @@ class RoomDetailsNode(
+ 
+     private val stateFlow = launchMolecule { presenter.present() }
+     private val disappearingStateFlow = launchMolecule { disappearingMessagesPresenter.present() } // FreeChat
++    private val readBurnStateFlow = launchMolecule { readBurnPresenter.present() } // FreeChat
+ 
+     fun onNewOwnersSelected() {
+         stateFlow.value.eventSink(RoomDetailsEvent.LeaveRoom(needsConfirmation = false))
+@@ -145,6 +149,8 @@ class RoomDetailsNode(
+                 // FreeChat
+                 val disappearingState by disappearingStateFlow.collectAsState()
+                 DisappearingMessagesItem(disappearingState)
++                val readBurnState by readBurnStateFlow.collectAsState()
++                ReadBurnItem(readBurnState)
+             },
+             leaveRoomView = {
+                 leaveRoomRenderer.Render(
+diff --git a/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/freechat/DisappearingMessagesPresenter.kt b/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/freechat/DisappearingMessagesPresenter.kt
+index 4e9b77e70d..d660e248cb 100644
+--- a/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/freechat/DisappearingMessagesPresenter.kt
++++ b/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/freechat/DisappearingMessagesPresenter.kt
+@@ -11,6 +11,7 @@ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.collectAsState
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.produceState
+ import androidx.compose.runtime.remember
+ import androidx.compose.runtime.rememberCoroutineScope
+ import androidx.compose.runtime.setValue
+@@ -18,8 +19,6 @@ import dev.zacsweers.metro.Inject
+ import io.element.android.libraries.architecture.Presenter
+ import io.element.android.libraries.matrix.api.freechat.Disappearing
+ import io.element.android.libraries.matrix.api.room.JoinedRoom
+-import io.element.android.libraries.matrix.api.room.StateEventType
+-import io.element.android.libraries.matrix.api.room.powerlevels.permissionsAsState
+ import kotlinx.coroutines.flow.map
+ import kotlinx.coroutines.launch
+ import timber.log.Timber
+@@ -34,8 +33,10 @@ class DisappearingMessagesPresenter(
+         val ttl by remember {
+             room.stateEventContentFlow(Disappearing.STATE_TYPE).map(Disappearing::ttlFromContent)
+         }.collectAsState(initial = 0L)
+-        val canChange by room.permissionsAsState(false) { perms ->
+-            perms.canOwnUserSendState(StateEventType.Custom(Disappearing.STATE_TYPE))
++        // Only room admins may change it; the server enforces this too.
++        val roomInfo by room.roomInfoFlow.collectAsState()
++        val canChange by produceState(false, roomInfo) {
++            value = room.userRole(room.sessionId).getOrNull()?.let { it.powerLevel >= Disappearing.ADMIN_POWER_LEVEL } == true
+         }
+         var showDialog by remember { mutableStateOf(false) }
+         var pendingTtl by remember { mutableStateOf<Long?>(null) }
+diff --git a/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/freechat/DisappearingMessagesView.kt b/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/freechat/DisappearingMessagesView.kt
+index 50d65eb2c7..1ff7a80504 100644
+--- a/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/freechat/DisappearingMessagesView.kt
++++ b/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/freechat/DisappearingMessagesView.kt
+@@ -9,7 +9,6 @@ package io.element.android.features.roomdetails.impl.freechat
+ 
+ import androidx.compose.runtime.Composable
+ import androidx.compose.ui.Modifier
+-import androidx.compose.ui.res.pluralStringResource
+ import androidx.compose.ui.res.stringResource
+ import androidx.compose.ui.tooling.preview.PreviewParameter
+ import androidx.compose.ui.tooling.preview.PreviewParameterProvider
+@@ -24,7 +23,7 @@ import io.element.android.libraries.designsystem.theme.components.IconSource
+ import io.element.android.libraries.designsystem.theme.components.ListItem
+ import io.element.android.libraries.designsystem.theme.components.Text
+ import io.element.android.libraries.matrix.api.freechat.Disappearing
+-import io.element.android.libraries.ui.strings.CommonPlurals
++import io.element.android.libraries.matrix.ui.freechat.disappearingLabel
+ import io.element.android.libraries.ui.strings.CommonStrings
+ import kotlinx.collections.immutable.toImmutableList
+ 
+@@ -38,7 +37,10 @@ fun DisappearingMessagesItem(
+         modifier = modifier,
+         leadingContent = ListItemContent.Icon(IconSource.Vector(CompoundIcons.Time())),
+         content = { Text(stringResource(CommonStrings.freechat_disappearing_title)) },
+-        supportingContent = { Text(disappearingLabel(state.ttl)) },
++        supportingContent = {
++            val label = disappearingLabel(state.ttl)
++            Text(if (state.canChange) label else "$label · ${stringResource(CommonStrings.freechat_disappearing_admin_only)}")
++        },
+         enabled = state.canChange && !state.isSaving,
+         onClick = { state.eventSink(DisappearingMessagesEvent.OpenDialog) },
+     )
+@@ -65,25 +67,6 @@ fun DisappearingMessagesItem(
+     }
+ }
+ 
+-/** Human-readable TTL, preferring the preset labels. */
+-@Composable
+-fun disappearingLabel(ttl: Long): String = when (val d = Disappearing.describe(ttl)) {
+-    Disappearing.Duration.Off -> stringResource(CommonStrings.freechat_disappearing_off)
+-    is Disappearing.Duration.Preset -> stringResource(PRESET_LABELS[d.index])
+-    is Disappearing.Duration.Days -> pluralStringResource(CommonPlurals.freechat_disappearing_days, d.count.toInt(), d.count)
+-    is Disappearing.Duration.Hours -> pluralStringResource(CommonPlurals.freechat_disappearing_hours, d.count.toInt(), d.count)
+-    is Disappearing.Duration.Minutes -> pluralStringResource(CommonPlurals.freechat_disappearing_minutes, d.count.toInt(), d.count)
+-    is Disappearing.Duration.Seconds -> pluralStringResource(CommonPlurals.freechat_disappearing_seconds, d.count.toInt(), d.count)
+-}
+-
+-private val PRESET_LABELS = listOf(
+-    CommonStrings.freechat_disappearing_off,
+-    CommonStrings.freechat_disappearing_hour,
+-    CommonStrings.freechat_disappearing_day,
+-    CommonStrings.freechat_disappearing_week,
+-    CommonStrings.freechat_disappearing_month,
+-)
+-
+ internal class DisappearingMessagesStateProvider : PreviewParameterProvider<DisappearingMessagesState> {
+     override val values = sequenceOf(
+         aDisappearingMessagesState(),
+diff --git a/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/freechat/ReadBurnPresenter.kt b/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/freechat/ReadBurnPresenter.kt
+new file mode 100644
+index 0000000000..7e8dcf267f
+--- /dev/null
++++ b/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/freechat/ReadBurnPresenter.kt
+@@ -0,0 +1,108 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.features.roomdetails.impl.freechat
++
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.rememberCoroutineScope
++import androidx.compose.runtime.setValue
++import dev.zacsweers.metro.Inject
++import io.element.android.libraries.architecture.Presenter
++import io.element.android.libraries.matrix.api.MatrixClient
++import io.element.android.libraries.matrix.api.freechat.Disappearing
++import io.element.android.libraries.matrix.api.room.JoinedRoom
++import kotlinx.coroutines.launch
++import timber.log.Timber
++
++/** FreeChat: this chat's burn-after-read override for my own messages. */
++@Inject
++class ReadBurnPresenter(
++    private val room: JoinedRoom,
++    private val client: MatrixClient,
++) : Presenter<ReadBurnState> {
++    @Composable
++    override fun present(): ReadBurnState {
++        val scope = rememberCoroutineScope()
++        var personal by remember { mutableStateOf<Disappearing.Personal?>(null) }
++        var showDialog by remember { mutableStateOf(false) }
++        var isSaving by remember { mutableStateOf(false) }
++        var hasError by remember { mutableStateOf(false) }
++        val roomId = room.roomId.value
++
++        LaunchedEffect(Unit) {
++            client.getAccountData(Disappearing.STATE_TYPE)
++                .onSuccess { personal = Disappearing.parsePersonal(it) }
++                .onFailure { Timber.e(it, "FreeChat: failed to load burn-after-read settings") }
++        }
++
++        fun save(override: Long?) = scope.launch {
++            isSaving = true
++            // Re-read so a change made on another device is not overwritten.
++            client.getAccountData(Disappearing.STATE_TYPE)
++                .mapCatching { latest ->
++                    val updated = Disappearing.withRoomReadTtl(latest, roomId, override)
++                    client.setAccountData(Disappearing.STATE_TYPE, updated).getOrThrow()
++                    updated
++                }
++                .onSuccess { personal = Disappearing.parsePersonal(it) }
++                .onFailure {
++                    Timber.e(it, "FreeChat: failed to save burn-after-read for $roomId")
++                    hasError = true
++                }
++            isSaving = false
++        }
++
++        fun handleEvent(event: ReadBurnEvent) {
++            when (event) {
++                ReadBurnEvent.OpenDialog -> showDialog = true
++                ReadBurnEvent.CloseDialog -> showDialog = false
++                ReadBurnEvent.ClearError -> hasError = false
++                is ReadBurnEvent.SetOverride -> {
++                    showDialog = false
++                    if (event.ttl != personal?.roomOverride(roomId)) save(event.ttl)
++                }
++            }
++        }
++
++        return ReadBurnState(
++            defaultTtl = personal?.readTtl ?: 0,
++            override = personal?.roomOverride(roomId),
++            isLoaded = personal != null,
++            isSaving = isSaving,
++            showDialog = showDialog,
++            hasError = hasError,
++            eventSink = ::handleEvent,
++        )
++    }
++}
++
++data class ReadBurnState(
++    /** My default delay in seconds, zero when off. */
++    val defaultTtl: Long,
++    /** This chat's delay, or null when it follows [defaultTtl]. */
++    val override: Long?,
++    val isLoaded: Boolean,
++    val isSaving: Boolean,
++    val showDialog: Boolean,
++    val hasError: Boolean,
++    val eventSink: (ReadBurnEvent) -> Unit,
++) {
++    val effectiveTtl: Long get() = override ?: defaultTtl
++}
++
++sealed interface ReadBurnEvent {
++    data object OpenDialog : ReadBurnEvent
++    data object CloseDialog : ReadBurnEvent
++    data object ClearError : ReadBurnEvent
++
++    /** Sets this chat's delay; null follows the default. */
++    data class SetOverride(val ttl: Long?) : ReadBurnEvent
++}
+diff --git a/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/freechat/ReadBurnView.kt b/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/freechat/ReadBurnView.kt
+new file mode 100644
+index 0000000000..b162385b01
+--- /dev/null
++++ b/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/freechat/ReadBurnView.kt
+@@ -0,0 +1,103 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.features.roomdetails.impl.freechat
++
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.res.stringResource
++import androidx.compose.ui.tooling.preview.PreviewParameter
++import androidx.compose.ui.tooling.preview.PreviewParameterProvider
++import io.element.android.compound.tokens.generated.CompoundIcons
++import io.element.android.libraries.designsystem.components.dialogs.ErrorDialog
++import io.element.android.libraries.designsystem.components.dialogs.ListOption
++import io.element.android.libraries.designsystem.components.dialogs.SingleSelectionDialog
++import io.element.android.libraries.designsystem.components.list.ListItemContent
++import io.element.android.libraries.designsystem.preview.ElementPreview
++import io.element.android.libraries.designsystem.preview.PreviewsDayNight
++import io.element.android.libraries.designsystem.theme.components.IconSource
++import io.element.android.libraries.designsystem.theme.components.ListItem
++import io.element.android.libraries.designsystem.theme.components.Text
++import io.element.android.libraries.matrix.api.freechat.Disappearing
++import io.element.android.libraries.matrix.ui.freechat.readTtlLabel
++import io.element.android.libraries.ui.strings.CommonStrings
++import kotlinx.collections.immutable.toImmutableList
++
++/** FreeChat: room details entry for this chat's burn-after-read override. */
++@Composable
++fun ReadBurnItem(
++    state: ReadBurnState,
++    modifier: Modifier = Modifier,
++) {
++    val followDefault = stringResource(CommonStrings.freechat_burn_follow_default, readTtlLabel(state.defaultTtl))
++    ListItem(
++        modifier = modifier,
++        leadingContent = ListItemContent.Icon(IconSource.Vector(CompoundIcons.VisibilityOff())),
++        content = { Text(stringResource(CommonStrings.freechat_burn_room_title)) },
++        supportingContent = { Text(if (state.override == null) followDefault else readTtlLabel(state.override)) },
++        enabled = state.isLoaded && !state.isSaving,
++        onClick = { state.eventSink(ReadBurnEvent.OpenDialog) },
++    )
++
++    if (state.showDialog) {
++        // null = follow the default; a non-preset override set elsewhere still shows as selected.
++        val presets = Disappearing.READ_TTL_PRESETS
++        val choices: List<Long?> = listOf<Long?>(null) + presets + listOfNotNull(state.override?.takeUnless { it in presets })
++        val options = choices.map { ListOption(if (it == null) followDefault else readTtlLabel(it)) }.toImmutableList()
++        SingleSelectionDialog(
++            title = stringResource(CommonStrings.freechat_burn_room_title),
++            subtitle = stringResource(CommonStrings.freechat_burn_description),
++            options = options,
++            initialSelection = choices.indexOf(state.override),
++            onSelectOption = { index -> state.eventSink(ReadBurnEvent.SetOverride(choices[index])) },
++            onDismissRequest = { state.eventSink(ReadBurnEvent.CloseDialog) },
++        )
++    }
++
++    if (state.hasError) {
++        ErrorDialog(
++            content = stringResource(CommonStrings.freechat_burn_error),
++            onSubmit = { state.eventSink(ReadBurnEvent.ClearError) },
++        )
++    }
++}
++
++internal class ReadBurnStateProvider : PreviewParameterProvider<ReadBurnState> {
++    override val values = sequenceOf(
++        aReadBurnState(),
++        aReadBurnState(defaultTtl = 30),
++        aReadBurnState(defaultTtl = 30, override = 0),
++        aReadBurnState(defaultTtl = 30, override = 5, showDialog = true),
++        aReadBurnState(isLoaded = false),
++        aReadBurnState(hasError = true),
++    )
++}
++
++internal fun aReadBurnState(
++    defaultTtl: Long = 0,
++    override: Long? = null,
++    isLoaded: Boolean = true,
++    isSaving: Boolean = false,
++    showDialog: Boolean = false,
++    hasError: Boolean = false,
++    eventSink: (ReadBurnEvent) -> Unit = {},
++) = ReadBurnState(
++    defaultTtl = defaultTtl,
++    override = override,
++    isLoaded = isLoaded,
++    isSaving = isSaving,
++    showDialog = showDialog,
++    hasError = hasError,
++    eventSink = eventSink,
++)
++
++@PreviewsDayNight
++@Composable
++internal fun ReadBurnItemPreview(@PreviewParameter(ReadBurnStateProvider::class) state: ReadBurnState) =
++    ElementPreview {
++        ReadBurnItem(state)
++    }
+diff --git a/features/roomdetails/impl/src/test/kotlin/io/element/android/features/roomdetails/impl/freechat/DisappearingMessagesPresenterTest.kt b/features/roomdetails/impl/src/test/kotlin/io/element/android/features/roomdetails/impl/freechat/DisappearingMessagesPresenterTest.kt
+index f37985e701..b78a60f421 100644
+--- a/features/roomdetails/impl/src/test/kotlin/io/element/android/features/roomdetails/impl/freechat/DisappearingMessagesPresenterTest.kt
++++ b/features/roomdetails/impl/src/test/kotlin/io/element/android/features/roomdetails/impl/freechat/DisappearingMessagesPresenterTest.kt
+@@ -10,12 +10,12 @@ package io.element.android.features.roomdetails.impl.freechat
+ import com.google.common.truth.Truth.assertThat
+ import io.element.android.libraries.matrix.api.freechat.Disappearing
+ import io.element.android.libraries.matrix.api.room.JoinedRoom
+-import io.element.android.libraries.matrix.api.room.StateEventType
++import io.element.android.libraries.matrix.api.room.RoomMember
+ import io.element.android.libraries.matrix.test.AN_EXCEPTION
+ import io.element.android.libraries.matrix.test.room.FakeBaseRoom
+ import io.element.android.libraries.matrix.test.room.FakeJoinedRoom
+-import io.element.android.libraries.matrix.test.room.powerlevels.FakeRoomPermissions
+ import io.element.android.tests.testutils.consumeItemsUntilPredicate
++import io.element.android.tests.testutils.consumeItemsUntilTimeout
+ import io.element.android.tests.testutils.test
+ import kotlinx.coroutines.flow.Flow
+ import kotlinx.coroutines.flow.MutableStateFlow
+@@ -40,16 +40,12 @@ class DisappearingMessagesPresenterTest {
+     }
+ 
+     private fun aStateRoom(
+-        canSendState: Boolean = true,
++        role: RoomMember.Role = RoomMember.Role.Admin,
+         content: String? = null,
+         sendResult: Result<Unit> = Result.success(Unit),
+     ) = StateRoom(
+         delegate = FakeJoinedRoom(
+-            baseRoom = FakeBaseRoom(
+-                roomPermissions = FakeRoomPermissions(
+-                    canSendState = { it == StateEventType.Custom(Disappearing.STATE_TYPE) && canSendState },
+-                ),
+-            ),
++            baseRoom = FakeBaseRoom(userRoleResult = { Result.success(role) }),
+         ),
+         content = MutableStateFlow(content),
+         sendResult = sendResult,
+@@ -67,10 +63,17 @@ class DisappearingMessagesPresenterTest {
+     }
+ 
+     @Test
+-    fun `present - cannot change without permission`() = runTest {
+-        DisappearingMessagesPresenter(aStateRoom(canSendState = false)).test {
+-            assertThat(awaitItem().canChange).isFalse()
+-            cancelAndIgnoreRemainingEvents()
++    fun `present - only admins and owners can change it`() = runTest {
++        for ((role, expected) in listOf(
++            RoomMember.Role.User to false,
++            RoomMember.Role.Moderator to false,
++            RoomMember.Role.Admin to true,
++            RoomMember.Role.Owner(isCreator = true) to true,
++        )) {
++            DisappearingMessagesPresenter(aStateRoom(role = role)).test {
++                val state = consumeItemsUntilTimeout().last()
++                assertThat(state.canChange).isEqualTo(expected)
++            }
+         }
+     }
+ 
+diff --git a/features/roomdetails/impl/src/test/kotlin/io/element/android/features/roomdetails/impl/freechat/ReadBurnPresenterTest.kt b/features/roomdetails/impl/src/test/kotlin/io/element/android/features/roomdetails/impl/freechat/ReadBurnPresenterTest.kt
+new file mode 100644
+index 0000000000..85a13240a9
+--- /dev/null
++++ b/features/roomdetails/impl/src/test/kotlin/io/element/android/features/roomdetails/impl/freechat/ReadBurnPresenterTest.kt
+@@ -0,0 +1,86 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.features.roomdetails.impl.freechat
++
++import com.google.common.truth.Truth.assertThat
++import io.element.android.libraries.matrix.api.MatrixClient
++import io.element.android.libraries.matrix.api.freechat.Disappearing
++import io.element.android.libraries.matrix.test.AN_EXCEPTION
++import io.element.android.libraries.matrix.test.A_ROOM_ID
++import io.element.android.libraries.matrix.test.FakeMatrixClient
++import io.element.android.libraries.matrix.test.room.FakeJoinedRoom
++import io.element.android.tests.testutils.consumeItemsUntilPredicate
++import io.element.android.tests.testutils.test
++import kotlinx.coroutines.test.runTest
++import org.junit.Test
++
++class ReadBurnPresenterTest {
++    /** A client whose `com.freechat.disappearing` account data lives in [content]. */
++    private class AccountDataClient(
++        var stored: String?,
++        private val saveResult: Result<Unit> = Result.success(Unit),
++    ) : MatrixClient by FakeMatrixClient() {
++        override suspend fun getAccountData(eventType: String): Result<String?> = Result.success(stored)
++
++        override suspend fun setAccountData(eventType: String, content: String): Result<Unit> =
++            saveResult.onSuccess { stored = content }
++    }
++
++    private val roomId = A_ROOM_ID.value
++
++    @Test
++    fun `present - loads the default and this chat's override`() = runTest {
++        val client = AccountDataClient("""{"read_ttl":30,"rooms":{"$roomId":5}}""")
++        ReadBurnPresenter(FakeJoinedRoom(), client).test {
++            val state = consumeItemsUntilPredicate { it.isLoaded }.last()
++            assertThat(state.defaultTtl).isEqualTo(30)
++            assertThat(state.override).isEqualTo(5)
++            assertThat(state.effectiveTtl).isEqualTo(5)
++            cancelAndIgnoreRemainingEvents()
++        }
++    }
++
++    @Test
++    fun `present - setting an override keeps the default and other chats`() = runTest {
++        val client = AccountDataClient("""{"read_ttl":30,"rooms":{"!other:x":0}}""")
++        ReadBurnPresenter(FakeJoinedRoom(), client).test {
++            consumeItemsUntilPredicate { it.isLoaded }.last().eventSink(ReadBurnEvent.SetOverride(0))
++            val state = consumeItemsUntilPredicate { !it.isSaving && it.override == 0L }.last()
++            assertThat(state.defaultTtl).isEqualTo(30)
++            assertThat(Disappearing.parsePersonal(client.stored)).isEqualTo(
++                Disappearing.Personal(30, mapOf("!other:x" to 0L, roomId to 0L)),
++            )
++            cancelAndIgnoreRemainingEvents()
++        }
++    }
++
++    @Test
++    fun `present - following the default removes the override`() = runTest {
++        val client = AccountDataClient("""{"read_ttl":30,"rooms":{"$roomId":5}}""")
++        ReadBurnPresenter(FakeJoinedRoom(), client).test {
++            consumeItemsUntilPredicate { it.isLoaded }.last().eventSink(ReadBurnEvent.SetOverride(null))
++            val state = consumeItemsUntilPredicate { !it.isSaving && it.override == null }.last()
++            assertThat(state.effectiveTtl).isEqualTo(30)
++            assertThat(Disappearing.parsePersonal(client.stored).rooms).isEmpty()
++            cancelAndIgnoreRemainingEvents()
++        }
++    }
++
++    @Test
++    fun `present - save failure shows an error`() = runTest {
++        val client = AccountDataClient(null, saveResult = Result.failure(AN_EXCEPTION))
++        ReadBurnPresenter(FakeJoinedRoom(), client).test {
++            consumeItemsUntilPredicate { it.isLoaded }.last().eventSink(ReadBurnEvent.SetOverride(5))
++            val failed = consumeItemsUntilPredicate { it.hasError }.last()
++            assertThat(failed.override).isNull()
++            failed.eventSink(ReadBurnEvent.ClearError)
++            assertThat(consumeItemsUntilPredicate { !it.hasError }.last().hasError).isFalse()
++            cancelAndIgnoreRemainingEvents()
++        }
++    }
++}
+diff --git a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/Disappearing.kt b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/Disappearing.kt
+index cae71912bf..9627052b97 100644
+--- a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/Disappearing.kt
++++ b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/Disappearing.kt
+@@ -30,6 +30,49 @@ object Disappearing {
+     /** TTL presets offered in the UI, in seconds. Zero means off. */
+     val PRESETS: List<Long> = listOf(0L, HOUR, DAY, 7 * DAY, 30 * DAY)
+ 
++    /** Power level needed to change the room TTL; the server enforces it too. */
++    const val ADMIN_POWER_LEVEL = 100L
++
++    /** Personal burn-after-read presets in seconds. Zero means off. */
++    val READ_TTL_PRESETS: List<Long> = listOf(0L, 5L, 30L, 60L, 5 * 60L, HOUR)
++
++    /**
++     * Personal burn-after-read settings, stored as global `com.freechat.disappearing` account data:
++     * `{"read_ttl": seconds, "rooms": {"<room id>": seconds}}`.
++     */
++    data class Personal(
++        val readTtl: Long = 0,
++        val rooms: Map<String, Long> = emptyMap(),
++    ) {
++        /** The override for [roomId], or null when the room follows [readTtl]. */
++        fun roomOverride(roomId: String): Long? = rooms[roomId]
++    }
++
++    fun parsePersonal(contentJson: String?): Personal {
++        val content = parseObject(contentJson) ?: return Personal()
++        val rooms = (content["rooms"] as? JsonObject).orEmpty().mapNotNull { (roomId, value) ->
++            value.asTtl()?.let { roomId to it }
++        }.toMap()
++        return Personal(readTtl = content["read_ttl"].asTtl() ?: 0, rooms = rooms)
++    }
++
++    /** [contentJson] with the default delay set, keeping every other field. */
++    fun withGlobalReadTtl(contentJson: String?, ttl: Long): String {
++        val content = parseObject(contentJson).orEmpty()
++        return JsonObject(content + ("read_ttl" to JsonPrimitive(ttl.coerceAtLeast(0)))).toString()
++    }
++
++    /** [contentJson] with [roomId]'s override set, or removed when [ttl] is null, keeping every other field. */
++    fun withRoomReadTtl(contentJson: String?, roomId: String, ttl: Long?): String {
++        val content = parseObject(contentJson).orEmpty()
++        val rooms = (content["rooms"] as? JsonObject).orEmpty().toMutableMap()
++        if (ttl == null) rooms.remove(roomId) else rooms[roomId] = JsonPrimitive(ttl.coerceAtLeast(0))
++        return JsonObject(content + ("rooms" to JsonObject(rooms))).toString()
++    }
++
++    private fun kotlinx.serialization.json.JsonElement?.asTtl(): Long? =
++        (this as? JsonPrimitive)?.takeUnless { it.isString }?.longOrNull?.takeIf { it >= 0 }
++
+     private val json = Json { ignoreUnknownKeys = true }
+ 
+     /** TTL in seconds from a state event's content JSON; zero when missing, invalid or disabled. */
+@@ -59,6 +102,14 @@ object Disappearing {
+         data class Seconds(val count: Long) : Duration
+     }
+ 
++    /** A burn-after-read delay as a count of the largest whole unit. */
++    fun describeReadTtl(ttl: Long): Duration = when {
++        ttl <= 0 -> Duration.Off
++        ttl % HOUR == 0L -> Duration.Hours(ttl / HOUR)
++        ttl % 60 == 0L -> Duration.Minutes(ttl / 60)
++        else -> Duration.Seconds(ttl)
++    }
++
+     fun describe(ttl: Long): Duration {
+         if (ttl <= 0) return Duration.Off
+         val preset = PRESETS.indexOf(ttl)
+diff --git a/libraries/matrix/api/src/test/kotlin/io/element/android/libraries/matrix/api/freechat/DisappearingTest.kt b/libraries/matrix/api/src/test/kotlin/io/element/android/libraries/matrix/api/freechat/DisappearingTest.kt
+index 855b7daa2b..4322db7036 100644
+--- a/libraries/matrix/api/src/test/kotlin/io/element/android/libraries/matrix/api/freechat/DisappearingTest.kt
++++ b/libraries/matrix/api/src/test/kotlin/io/element/android/libraries/matrix/api/freechat/DisappearingTest.kt
+@@ -55,3 +55,43 @@ class DisappearingTest {
+         assertThat(Disappearing.describe(45)).isEqualTo(Disappearing.Duration.Seconds(45))
+     }
+ }
++
++class DisappearingPersonalTest {
++    @Test
++    fun `parsePersonal - reads default and room overrides, dropping invalid values`() {
++        val personal = Disappearing.parsePersonal("""{"read_ttl":30,"rooms":{"!a:x":0,"!b:x":"5","!c:x":-1,"!d:x":60}}""")
++        assertThat(personal.readTtl).isEqualTo(30)
++        assertThat(personal.rooms).containsExactly("!a:x", 0L, "!d:x", 60L)
++        assertThat(personal.roomOverride("!a:x")).isEqualTo(0)
++        assertThat(personal.roomOverride("!z:x")).isNull()
++    }
++
++    @Test
++    fun `parsePersonal - missing or broken content is off`() {
++        assertThat(Disappearing.parsePersonal(null)).isEqualTo(Disappearing.Personal())
++        assertThat(Disappearing.parsePersonal("nope")).isEqualTo(Disappearing.Personal())
++    }
++
++    @Test
++    fun `withGlobalReadTtl - keeps overrides and unknown fields`() {
++        val updated = Disappearing.withGlobalReadTtl("""{"read_ttl":5,"rooms":{"!a:x":0},"extra":true}""", 60)
++        assertThat(Disappearing.parsePersonal(updated)).isEqualTo(Disappearing.Personal(60, mapOf("!a:x" to 0L)))
++        assertThat(updated).contains("\"extra\":true")
++    }
++
++    @Test
++    fun `withRoomReadTtl - sets and clears one room`() {
++        val set = Disappearing.withRoomReadTtl("""{"read_ttl":30}""", "!a:x", 5)
++        assertThat(Disappearing.parsePersonal(set)).isEqualTo(Disappearing.Personal(30, mapOf("!a:x" to 5L)))
++        val cleared = Disappearing.withRoomReadTtl(set, "!a:x", null)
++        assertThat(Disappearing.parsePersonal(cleared)).isEqualTo(Disappearing.Personal(30))
++    }
++
++    @Test
++    fun `describeReadTtl - largest whole unit`() {
++        assertThat(Disappearing.describeReadTtl(0)).isEqualTo(Disappearing.Duration.Off)
++        assertThat(Disappearing.describeReadTtl(5)).isEqualTo(Disappearing.Duration.Seconds(5))
++        assertThat(Disappearing.describeReadTtl(300)).isEqualTo(Disappearing.Duration.Minutes(5))
++        assertThat(Disappearing.describeReadTtl(3600)).isEqualTo(Disappearing.Duration.Hours(1))
++    }
++}
+diff --git a/libraries/matrixui/src/main/kotlin/io/element/android/libraries/matrix/ui/freechat/DisappearingLabels.kt b/libraries/matrixui/src/main/kotlin/io/element/android/libraries/matrix/ui/freechat/DisappearingLabels.kt
+new file mode 100644
+index 0000000000..4c9f91dd10
+--- /dev/null
++++ b/libraries/matrixui/src/main/kotlin/io/element/android/libraries/matrix/ui/freechat/DisappearingLabels.kt
+@@ -0,0 +1,44 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.matrix.ui.freechat
++
++import androidx.compose.runtime.Composable
++import androidx.compose.ui.res.pluralStringResource
++import androidx.compose.ui.res.stringResource
++import io.element.android.libraries.matrix.api.freechat.Disappearing
++import io.element.android.libraries.ui.strings.CommonPlurals
++import io.element.android.libraries.ui.strings.CommonStrings
++
++/** FreeChat: human-readable room auto-delete TTL, preferring the preset labels. */
++@Composable
++fun disappearingLabel(ttl: Long): String = durationLabel(Disappearing.describe(ttl))
++
++/** FreeChat: human-readable burn-after-read delay. */
++@Composable
++fun readTtlLabel(ttl: Long): String = durationLabel(Disappearing.describeReadTtl(ttl))
++
++@Composable
++private fun durationLabel(duration: Disappearing.Duration): String = when (duration) {
++    Disappearing.Duration.Off -> stringResource(CommonStrings.freechat_disappearing_off)
++    is Disappearing.Duration.Preset -> stringResource(PRESET_LABELS[duration.index])
++    is Disappearing.Duration.Days -> plural(CommonPlurals.freechat_disappearing_days, duration.count)
++    is Disappearing.Duration.Hours -> plural(CommonPlurals.freechat_disappearing_hours, duration.count)
++    is Disappearing.Duration.Minutes -> plural(CommonPlurals.freechat_disappearing_minutes, duration.count)
++    is Disappearing.Duration.Seconds -> plural(CommonPlurals.freechat_disappearing_seconds, duration.count)
++}
++
++@Composable
++private fun plural(id: Int, count: Long): String = pluralStringResource(id, count.toInt(), count)
++
++private val PRESET_LABELS = listOf(
++    CommonStrings.freechat_disappearing_off,
++    CommonStrings.freechat_disappearing_hour,
++    CommonStrings.freechat_disappearing_day,
++    CommonStrings.freechat_disappearing_week,
++    CommonStrings.freechat_disappearing_month,
++)
+diff --git a/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml b/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml
+index ba0efa7d31..29e945a936 100644
+--- a/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml
++++ b/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml
+@@ -28,4 +28,10 @@
+     <string name="freechat_disappearing_error">無法修改自動刪除設定</string>
+     <string name="freechat_disappearing_updated">%1$s 修改了自動刪除設定。</string>
+     <string name="freechat_disappearing_updated_by_you">你修改了自動刪除設定。</string>
++    <string name="freechat_burn_title">我的訊息閱後即焚</string>
++    <string name="freechat_burn_description">你發出的訊息，在所有其他成員都讀過之後，經過設定時間從所有人那裡刪除。只對之後發出的訊息生效。</string>
++    <string name="freechat_burn_room_title">這個聊天裡我的訊息閱後即焚</string>
++    <string name="freechat_burn_follow_default">跟隨我的預設設定（%1$s）</string>
++    <string name="freechat_burn_error">無法修改閱後即焚設定</string>
++    <string name="freechat_disappearing_admin_only">只有群主和管理員可以修改。</string>
+ </resources>
+diff --git a/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml b/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml
+index 6942bc851f..1f069dd6d2 100644
+--- a/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml
++++ b/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml
+@@ -28,4 +28,10 @@
+     <string name="freechat_disappearing_error">无法修改自动删除设置</string>
+     <string name="freechat_disappearing_updated">%1$s 修改了自动删除设置。</string>
+     <string name="freechat_disappearing_updated_by_you">你修改了自动删除设置。</string>
++    <string name="freechat_burn_title">我的消息阅后即焚</string>
++    <string name="freechat_burn_description">你发出的消息，在所有其他成员都读过之后，经过设定时间从所有人那里删除。只对之后发出的消息生效。</string>
++    <string name="freechat_burn_room_title">这个聊天里我的消息阅后即焚</string>
++    <string name="freechat_burn_follow_default">跟随我的默认设置（%1$s）</string>
++    <string name="freechat_burn_error">无法修改阅后即焚设置</string>
++    <string name="freechat_disappearing_admin_only">只有群主和管理员可以修改。</string>
+ </resources>
+diff --git a/libraries/ui-strings/src/main/res/values/freechat_strings.xml b/libraries/ui-strings/src/main/res/values/freechat_strings.xml
+index 7813ef56a2..326a11e533 100644
+--- a/libraries/ui-strings/src/main/res/values/freechat_strings.xml
++++ b/libraries/ui-strings/src/main/res/values/freechat_strings.xml
+@@ -33,4 +33,10 @@
+     <string name="freechat_disappearing_error">Could not change auto-delete</string>
+     <string name="freechat_disappearing_updated">%1$s changed the auto-delete setting.</string>
+     <string name="freechat_disappearing_updated_by_you">You changed the auto-delete setting.</string>
++    <string name="freechat_burn_title">Burn my messages after reading</string>
++    <string name="freechat_burn_description">Messages you send are deleted for everyone this long after every other member has read them. Applies to messages sent from now on.</string>
++    <string name="freechat_burn_room_title">Burn my messages after reading in this chat</string>
++    <string name="freechat_burn_follow_default">Same as my default (%1$s)</string>
++    <string name="freechat_burn_error">Could not change burn-after-read</string>
++    <string name="freechat_disappearing_admin_only">Only room admins can change this.</string>
+ </resources>

@@ -1,0 +1,412 @@
+From 7e5f0e7c3151b04b66cc4192040685f581a89897 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 4/8] FreeChat: strict mode and global privacy settings on iOS
+
+Strict mode (per device, opt-in): sign-ins use the SDK's in-memory store and are
+never saved to the keychain, the app signs out on return after the chosen time
+in the background, and password sign-ins use a device ID the homeserver removes
+once idle. Settings gain my default burn-after-read, protection for every chat
+and the strict mode switch. Untested: needs a Mac to build.
+---
+ .../Sources/Application/AppCoordinator.swift  |  12 ++
+ .../FreeChat/FreeChatGlobalSettings.swift     | 163 ++++++++++++++++++
+ .../Sources/FreeChat/FreeChatStrictMode.swift |  58 +++++++
+ .../SettingsScreenCoordinator.swift           |   9 +-
+ .../SettingsScreen/View/SettingsScreen.swift  |   5 +
+ .../AuthenticationService.swift               |   4 +-
+ .../Services/Client/ClientFactory.swift       |  17 +-
+ .../UserSession/UserSessionStore.swift        |   6 +
+ 8 files changed, 268 insertions(+), 6 deletions(-)
+ create mode 100644 ElementX/Sources/FreeChat/FreeChatGlobalSettings.swift
+ create mode 100644 ElementX/Sources/FreeChat/FreeChatStrictMode.swift
+
+diff --git a/ElementX/Sources/Application/AppCoordinator.swift b/ElementX/Sources/Application/AppCoordinator.swift
+index f0d8df816..f331d8f34 100644
+--- a/ElementX/Sources/Application/AppCoordinator.swift
++++ b/ElementX/Sources/Application/AppCoordinator.swift
+@@ -34,6 +34,7 @@ class AppCoordinator: AppCoordinatorProtocol, AuthenticationFlowCoordinatorDeleg
+     
+     /// Common background task to continue long-running tasks in the background.
+     private var backgroundTask: UIBackgroundTaskIdentifier?
++    private var freechatBackgroundedAt: Date? // FreeChat strict mode
+     
+     private var backgroundRefreshSyncObserver: AnyCancellable?
+     
+@@ -1304,6 +1305,7 @@ class AppCoordinator: AppCoordinatorProtocol, AuthenticationFlowCoordinatorDeleg
+     @objc
+     private func applicationDidEnterBackground() {
+         MXLog.info("Application did enter background")
++        freechatBackgroundedAt = .now
+         
+         scheduleDelayedPauseServices()
+         scheduleBackgroundAppRefresh()
+@@ -1337,6 +1339,16 @@ class AppCoordinator: AppCoordinatorProtocol, AuthenticationFlowCoordinatorDeleg
+     private func applicationWillEnterForeground() {
+         MXLog.info("Application will enter foreground")
+         endActiveBackgroundTask()
++        
++        // FreeChat strict mode: suspended apps run no timers, so the time in the background is checked on return.
++        if let backgroundedAt = freechatBackgroundedAt, userSession != nil, FreeChatStrictMode.isStrictClient,
++           Date.now.timeIntervalSince(backgroundedAt) >= TimeInterval(FreeChatStrictMode.settings.idleMinutes * 60) {
++            MXLog.info("FreeChat: strict session idle in the background, signing out")
++            freechatBackgroundedAt = nil
++            stateMachine.processEvent(.signOut(isSoft: false, disableAppLock: false))
++            return
++        }
++        freechatBackgroundedAt = nil
+         Task {
+             await resumeClientServices()
+         }
+diff --git a/ElementX/Sources/FreeChat/FreeChatGlobalSettings.swift b/ElementX/Sources/FreeChat/FreeChatGlobalSettings.swift
+new file mode 100644
+index 000000000..2977d967b
+--- /dev/null
++++ b/ElementX/Sources/FreeChat/FreeChatGlobalSettings.swift
+@@ -0,0 +1,163 @@
++//
++// Copyright 2026 FreeChat contributors
++//
++// SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++// Please see LICENSE files in the repository root for full details.
++//
++
++import Compound
++import SwiftUI
++
++/// FreeChat settings for every chat: my default burn-after-read, protection for every chat and strict mode.
++@Observable
++final class FreeChatGlobalSettings {
++    private(set) var personal = FreeChat.Personal()
++    private(set) var strictMode = FreeChatStrictMode.settings
++    private(set) var isSaving = false
++    var hasError = false
++
++    /// The running session was signed in with strict mode on.
++    let isStrictSession = FreeChatStrictMode.isStrictClient
++
++    private let clientProxy: ClientProxyProtocol
++    /// Starts the app's normal sign-out, which warns when the keys are not backed up.
++    private let signOut: () -> Void
++
++    init(clientProxy: ClientProxyProtocol, signOut: @escaping () -> Void) {
++        self.clientProxy = clientProxy
++        self.signOut = signOut
++    }
++
++    func load() async {
++        if case .success(let json) = await clientProxy.freechatAccountData(type: FreeChat.disappearingStateType) {
++            personal = FreeChat.personal(fromContentJSON: json)
++        }
++    }
++
++    func setDefaultReadTTL(_ ttl: UInt64) async {
++        await updatePersonal { FreeChat.updatingPersonal($0, readTTL: ttl) }
++    }
++
++    func setProtectEveryChat(_ protect: Bool) async {
++        await updatePersonal { FreeChat.updatingPersonal($0, blockScreenshots: protect) }
++    }
++
++    /// Strict mode applies from the next sign-in, so turning it on signs out right away.
++    func enableStrictModeAndSignOut() {
++        setStrictMode(FreeChatStrictMode.Settings(isEnabled: true, idleMinutes: strictMode.idleMinutes))
++        signOut()
++    }
++
++    func disableStrictMode() {
++        setStrictMode(FreeChatStrictMode.Settings(isEnabled: false, idleMinutes: strictMode.idleMinutes))
++    }
++
++    func setIdleMinutes(_ minutes: Int) {
++        setStrictMode(FreeChatStrictMode.Settings(isEnabled: strictMode.isEnabled, idleMinutes: minutes))
++    }
++
++    // MARK: - Private
++
++    private func setStrictMode(_ settings: FreeChatStrictMode.Settings) {
++        FreeChatStrictMode.settings = settings
++        strictMode = settings
++    }
++
++    private func updatePersonal(_ update: (String?) -> String) async {
++        isSaving = true
++        defer { isSaving = false }
++        // Re-read so changes made on another device are kept.
++        guard case .success(let latest) = await clientProxy.freechatAccountData(type: FreeChat.disappearingStateType) else {
++            hasError = true
++            return
++        }
++        let updated = update(latest)
++        switch await clientProxy.setFreechatAccountData(type: FreeChat.disappearingStateType, contentJSON: updated) {
++        case .success:
++            personal = FreeChat.personal(fromContentJSON: updated)
++        case .failure:
++            hasError = true
++        }
++    }
++}
++
++/// The FreeChat sections of the settings screen.
++struct FreeChatGlobalSections: View {
++    let settings: FreeChatGlobalSettings
++
++    @State private var isConfirmingStrictMode = false
++
++    var body: some View {
++        Section {
++            ListRow(label: .default(title: FreeChatStrings.string(.burnDefault), icon: \.visibilityOff),
++                    kind: .picker(selection: Binding(get: { settings.personal.readTTL },
++                                                     set: { ttl in Task { await settings.setDefaultReadTTL(ttl) } }),
++                                  items: choices(FreeChat.readTTLPresets, current: settings.personal.readTTL)))
++            ListRow(label: .default(title: FreeChatStrings.string(.alwaysBlockScreenshots), icon: \.lock),
++                    kind: .toggle(Binding(get: { settings.personal.blockScreenshots },
++                                          set: { protect in Task { await settings.setProtectEveryChat(protect) } })))
++        } header: {
++            Text(FreeChatStrings.string(.section))
++                .compoundListSectionHeader()
++        } footer: {
++            Text(FreeChatStrings.string(.alwaysBlockScreenshotsFooter))
++                .compoundListSectionFooter()
++        }
++        .disabled(settings.isSaving)
++        .task { await settings.load() }
++        .alert(FreeChatStrings.string(.error), isPresented: Binding(get: { settings.hasError }, set: { settings.hasError = $0 })) {
++            Button(FreeChatStrings.string(.cancel), role: .cancel) { }
++        }
++
++        Section {
++            strictModeRows
++        } header: {
++            Text(FreeChatStrings.string(.strictSection))
++                .compoundListSectionHeader()
++        } footer: {
++            Text(FreeChatStrings.string(.strictFooter))
++                .compoundListSectionFooter()
++        }
++        .alert(FreeChatStrings.string(.strictConfirmTitle), isPresented: $isConfirmingStrictMode) {
++            Button(FreeChatStrings.string(.strictConfirmButton), role: .destructive) { settings.enableStrictModeAndSignOut() }
++            Button(FreeChatStrings.string(.cancel), role: .cancel) { }
++        } message: {
++            Text(FreeChatStrings.string(.strictConfirmMessage))
++        }
++    }
++
++    // MARK: - Private
++
++    @ViewBuilder
++    private var strictModeRows: some View {
++        if settings.isStrictSession, settings.strictMode.isEnabled {
++            ListRow(label: .default(title: FreeChatStrings.string(.strictTitle), icon: \.lockSolid),
++                    details: .title(FreeChatStrings.string(.strictOn)),
++                    kind: .label)
++            ListRow(label: .default(title: FreeChatStrings.string(.strictIdle), icon: \.timer),
++                    kind: .picker(selection: Binding(get: { settings.strictMode.idleMinutes },
++                                                     set: { settings.setIdleMinutes($0) }),
++                                  items: idleChoices))
++            ListRow(label: .action(title: FreeChatStrings.string(.strictTurnOff), icon: \.lockOff),
++                    kind: .button { settings.disableStrictMode() })
++        } else if settings.isStrictSession {
++            ListRow(label: .default(title: FreeChatStrings.string(.strictTitle), icon: \.lockSolid),
++                    details: .title(FreeChatStrings.string(.strictOffPending)),
++                    kind: .label)
++        } else {
++            ListRow(label: .default(title: FreeChatStrings.string(.strictTitle), icon: \.lockSolid),
++                    kind: .button { isConfirmingStrictMode = true })
++        }
++    }
++
++    private var idleChoices: [(title: String, tag: Int)] {
++        let current = settings.strictMode.idleMinutes
++        let values = FreeChatStrictMode.idlePresetsMinutes.contains(current) ? FreeChatStrictMode.idlePresetsMinutes : FreeChatStrictMode.idlePresetsMinutes + [current]
++        return values.map { (title: FreeChatStrings.duration(UInt64($0) * 60), tag: $0) }
++    }
++
++    private func choices(_ presets: [UInt64], current: UInt64) -> [(title: String, tag: UInt64)] {
++        let values = presets.contains(current) ? presets : presets + [current]
++        return values.map { (title: FreeChatStrings.duration($0), tag: $0) }
++    }
++}
+diff --git a/ElementX/Sources/FreeChat/FreeChatStrictMode.swift b/ElementX/Sources/FreeChat/FreeChatStrictMode.swift
+new file mode 100644
+index 000000000..6ec4f2980
+--- /dev/null
++++ b/ElementX/Sources/FreeChat/FreeChatStrictMode.swift
+@@ -0,0 +1,58 @@
++//
++// Copyright 2026 FreeChat contributors
++//
++// SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++// Please see LICENSE files in the repository root for full details.
++//
++
++import Foundation
++import Synchronization
++
++/// FreeChat strict mode: a per-device choice to leave nothing on the device.
++///
++/// A session signed in while it is on:
++/// - uses the SDK's in-memory store: nothing of it is written to disk, not even encrypted;
++/// - is never saved to the keychain, so the next launch starts signed out;
++/// - signs out when the app comes back after the chosen time in the background;
++/// - for password sign-ins, uses a device ID of the form `FCS<minutes>_<random>`, which the homeserver
++///   deletes once it has been idle for that long. That covers an app that was killed or suspended.
++nonisolated enum FreeChatStrictMode {
++    static let devicePrefix = "FCS"
++    static let defaultIdleMinutes = 5
++    static let idlePresetsMinutes = [1, 5, 15, 30, 60]
++
++    struct Settings: Equatable {
++        var isEnabled = false
++        var idleMinutes = FreeChatStrictMode.defaultIdleMinutes
++    }
++
++    /// The device's choice. It says nothing about the user, so it is kept in user defaults.
++    static var settings: Settings {
++        get {
++            let defaults = UserDefaults.standard
++            let idle = defaults.integer(forKey: idleKey)
++            return Settings(isEnabled: defaults.bool(forKey: enabledKey), idleMinutes: idle > 0 ? idle : defaultIdleMinutes)
++        }
++        set {
++            UserDefaults.standard.set(newValue.isEnabled, forKey: enabledKey)
++            UserDefaults.standard.set(max(newValue.idleMinutes, 1), forKey: idleKey)
++        }
++    }
++
++    /// Whether the authentication client being set up, and so the session it becomes, is a strict one.
++    static var isStrictClient: Bool {
++        get { strictClient.withLock { $0 } }
++        set { strictClient.withLock { $0 = newValue } }
++    }
++
++    static func deviceID(idleMinutes: Int) -> String {
++        let random = (0..<8).map { _ in String(format: "%02x", UInt8.random(in: 0...255)) }.joined()
++        return "\(devicePrefix)\(idleMinutes)_\(random)"
++    }
++
++    // MARK: - Private
++
++    private static let enabledKey = "freechat.strictMode.enabled"
++    private static let idleKey = "freechat.strictMode.idleMinutes"
++    private static let strictClient = Mutex(false)
++}
+diff --git a/ElementX/Sources/Screens/Settings/SettingsScreen/SettingsScreenCoordinator.swift b/ElementX/Sources/Screens/Settings/SettingsScreen/SettingsScreenCoordinator.swift
+index 0f0b99669..c32a152e8 100644
+--- a/ElementX/Sources/Screens/Settings/SettingsScreen/SettingsScreenCoordinator.swift
++++ b/ElementX/Sources/Screens/Settings/SettingsScreen/SettingsScreenCoordinator.swift
+@@ -54,9 +54,16 @@ final class SettingsScreenCoordinator: CoordinatorProtocol {
+     
+     private var cancellables = Set<AnyCancellable>()
+     
++    // FreeChat
++    private let clientProxy: ClientProxyProtocol
++    private lazy var freechat = FreeChatGlobalSettings(clientProxy: clientProxy) { [weak self] in
++        self?.actionsSubject.send(.logout)
++    }
++    
+     // MARK: - Setup
+     
+     init(parameters: SettingsScreenCoordinatorParameters) {
++        clientProxy = parameters.userSession.clientProxy
+         viewModel = SettingsScreenViewModel(userSession: parameters.userSession,
+                                             isBugReportServiceEnabled: parameters.isBugReportServiceEnabled,
+                                             isInSecondaryWindow: parameters.isInSecondaryWindow,
+@@ -119,6 +126,6 @@ final class SettingsScreenCoordinator: CoordinatorProtocol {
+     // MARK: - Public
+     
+     func toPresentable() -> AnyView {
+-        AnyView(SettingsScreen(context: viewModel.context))
++        AnyView(SettingsScreen(context: viewModel.context, freechat: freechat))
+     }
+ }
+diff --git a/ElementX/Sources/Screens/Settings/SettingsScreen/View/SettingsScreen.swift b/ElementX/Sources/Screens/Settings/SettingsScreen/View/SettingsScreen.swift
+index da1f8600b..a9682d328 100644
+--- a/ElementX/Sources/Screens/Settings/SettingsScreen/View/SettingsScreen.swift
++++ b/ElementX/Sources/Screens/Settings/SettingsScreen/View/SettingsScreen.swift
+@@ -12,6 +12,7 @@ import SwiftUI
+ 
+ struct SettingsScreen: View {
+     @Bindable var context: SettingsScreenViewModel.Context
++    var freechat: FreeChatGlobalSettings? // FreeChat
+     
+     var body: some View {
+         Form {
+@@ -23,6 +24,10 @@ struct SettingsScreen: View {
+             
+             accountSettingsSection
+             
++            if let freechat {
++                FreeChatGlobalSections(settings: freechat)
++            }
++            
+             signOutSection
+             
+             appSettingsSection
+diff --git a/ElementX/Sources/Services/Authentication/AuthenticationService.swift b/ElementX/Sources/Services/Authentication/AuthenticationService.swift
+index f4de7b3a2..d3316edb6 100644
+--- a/ElementX/Sources/Services/Authentication/AuthenticationService.swift
++++ b/ElementX/Sources/Services/Authentication/AuthenticationService.swift
+@@ -153,7 +153,9 @@ class AuthenticationService: AuthenticationServiceProtocol {
+     func login(username: String, password: String, initialDeviceName: String?, deviceID: String?) async -> Result<UserSessionProtocol, AuthenticationServiceError> {
+         guard let client else { return .failure(.failedLoggingIn) }
+         do {
+-            try await client.login(username: username, password: password, initialDeviceName: initialDeviceName, deviceId: deviceID)
++            // FreeChat strict mode: the homeserver removes this device once it is idle.
++            let strictDeviceID = FreeChatStrictMode.isStrictClient ? FreeChatStrictMode.deviceID(idleMinutes: FreeChatStrictMode.settings.idleMinutes) : nil
++            try await client.login(username: username, password: password, initialDeviceName: initialDeviceName, deviceId: deviceID ?? strictDeviceID)
+             
+             let refreshToken = try? client.session().refreshToken
+             if refreshToken != nil {
+diff --git a/ElementX/Sources/Services/Client/ClientFactory.swift b/ElementX/Sources/Services/Client/ClientFactory.swift
+index 11323de8b..6076ad34f 100644
+--- a/ElementX/Sources/Services/Client/ClientFactory.swift
++++ b/ElementX/Sources/Services/Client/ClientFactory.swift
+@@ -20,17 +20,26 @@ nonisolated struct ClientFactory: ClientFactoryProtocol {
+                                   clientSessionDelegate: ClientSessionDelegate,
+                                   appSettings: AppSettings,
+                                   appHooks: AppHooks) async throws -> ClientProtocol {
+-        let builder = makeBaseBuilder(httpProxy: appSettings.websiteURL.globalProxy,
++        var builder = makeBaseBuilder(httpProxy: appSettings.websiteURL.globalProxy,
+                                       discoverSlidingSync: true,
+                                       sessionDelegate: clientSessionDelegate,
+                                       appHooks: appHooks,
+                                       enableOnlySignedDeviceIsolationMode: appSettings.enableOnlySignedDeviceIsolationMode,
+                                       threadsEnabled: appSettings.threadsEnabled)
+             .enableAutomaticBackPagination(enableAutomaticBackPagination: true)
+-            .sqliteStore(config: .init(dataPath: sessionDirectories.dataPath, cachePath: sessionDirectories.cachePath)
+-                .highEntropyPassphrase(passphrase: passphrase, base64Variant: .padded))
++        
++        // FreeChat strict mode: the session this client becomes never touches the disk.
++        let isStrict = FreeChatStrictMode.settings.isEnabled
++        FreeChatStrictMode.isStrictClient = isStrict
++        if isStrict {
++            builder = builder.inMemoryStore()
++        } else {
++            builder = builder
++                .sqliteStore(config: .init(dataPath: sessionDirectories.dataPath, cachePath: sessionDirectories.cachePath)
++                    .highEntropyPassphrase(passphrase: passphrase, base64Variant: .padded))
+             // FreeChat: no local search index, it would keep decrypted messages on disk.
+-            .serverNameOrHomeserverUrl(serverNameOrUrl: serverNameOrBaseURL)
++        }
++        builder = builder.serverNameOrHomeserverUrl(serverNameOrUrl: serverNameOrBaseURL)
+         
+         return try await build(builder, for: .authentication, appHooks: appHooks)
+     }
+diff --git a/ElementX/Sources/Services/UserSession/UserSessionStore.swift b/ElementX/Sources/Services/UserSession/UserSessionStore.swift
+index 16cc44347..b0656cb06 100644
+--- a/ElementX/Sources/Services/UserSession/UserSessionStore.swift
++++ b/ElementX/Sources/Services/UserSession/UserSessionStore.swift
+@@ -85,6 +85,12 @@ class UserSessionStore: UserSessionStoreProtocol {
+             let userSettings = appHooks.userSessionHook.configure(appSettings.userSettings(for: userID), forHomeserver: client.homeserver())
+             let clientProxy = try await setupProxyForClient(client, userSettings: userSettings)
+             
++            // FreeChat strict mode: the session lives in memory only, so the next launch starts signed out.
++            if FreeChatStrictMode.isStrictClient {
++                MXLog.info("FreeChat: strict session, not saving it to the keychain")
++                return await .success(buildUserSessionWithClient(clientProxy, userSettings: userSettings))
++            }
++            
+             keychainController.setRestorationToken(RestorationToken(session: session,
+                                                                     sessionDirectories: sessionDirectories,
+                                                                     passphrase: passphrase,

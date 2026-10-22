@@ -1,0 +1,176 @@
+From 73a393657ce6e0f875397c38851fbe4d8600bc81 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 3/8] FreeChat: screen protection on iOS
+
+iOS cannot block screenshots. Protected rooms are hidden while the screen is
+recorded or mirrored and warn about screenshots, and the whole app is covered
+in the app switcher (whose snapshot iOS keeps on disk) even without app lock.
+Untested: needs a Mac to build.
+---
+ .../AppLockFlowCoordinator.swift              | 19 +++-
+ .../FreeChat/FreeChatScreenProtection.swift   | 87 +++++++++++++++++++
+ .../RoomScreen/RoomScreenCoordinator.swift    |  5 +-
+ 3 files changed, 109 insertions(+), 2 deletions(-)
+ create mode 100644 ElementX/Sources/FreeChat/FreeChatScreenProtection.swift
+
+diff --git a/ElementX/Sources/FlowCoordinators/AppLockFlowCoordinator.swift b/ElementX/Sources/FlowCoordinators/AppLockFlowCoordinator.swift
+index f910f8474..b2cdfaecd 100644
+--- a/ElementX/Sources/FlowCoordinators/AppLockFlowCoordinator.swift
++++ b/ElementX/Sources/FlowCoordinators/AppLockFlowCoordinator.swift
+@@ -140,7 +140,8 @@ class AppLockFlowCoordinator: CoordinatorProtocol {
+     
+     private func configureStateMachine() {
+         stateMachine.addRouteMapping { [weak self] event, fromState, _ in
+-            guard let self, appLockService.isEnabled else { return fromState }
++            guard let self else { return fromState }
++            guard appLockService.isEnabled else { return Self.obscureOnlyRoute(from: fromState, event: event) }
+             
+             switch (fromState, event) {
+             case (.initial, .start):
+@@ -218,6 +219,22 @@ class AppLockFlowCoordinator: CoordinatorProtocol {
+         stateMachine.tryEvent(.start)
+     }
+     
++    /// FreeChat: without app lock the app is still covered in the app switcher, whose snapshot iOS keeps on disk.
++    private static func obscureOnlyRoute(from state: State, event: Event?) -> State? {
++        switch (state, event) {
++        case (.initial, .willResignActive), (.unlocked, .willResignActive):
++            .appObscured
++        case (_, .didEnterBackground):
++            .backgrounded
++        case (_, .willEnterForeground):
++            .launching
++        case (.appObscured, .didBecomeActive), (.backgrounded, .didBecomeActive), (.launching, .didBecomeActive):
++            .unlocked
++        default:
++            state
++        }
++    }
++    
+     // MARK: - App unlock
+     
+     /// Displays the unlock flow with the app's placeholder view to hide obscure the view hierarchy in the app switcher.
+diff --git a/ElementX/Sources/FreeChat/FreeChatScreenProtection.swift b/ElementX/Sources/FreeChat/FreeChatScreenProtection.swift
+new file mode 100644
+index 000000000..3a745a506
+--- /dev/null
++++ b/ElementX/Sources/FreeChat/FreeChatScreenProtection.swift
+@@ -0,0 +1,87 @@
++//
++// Copyright 2026 FreeChat contributors
++//
++// SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++// Please see LICENSE files in the repository root for full details.
++//
++
++import Compound
++import SwiftUI
++
++/// Whether a room asks for screenshot protection: the room setting, or the user's own setting for every chat.
++@Observable
++final class FreeChatScreenPolicy {
++    private(set) var isProtected = false
++
++    private let roomProxy: JoinedRoomProxyProtocol
++    private let clientProxy: ClientProxyProtocol
++
++    init(roomProxy: JoinedRoomProxyProtocol, clientProxy: ClientProxyProtocol) {
++        self.roomProxy = roomProxy
++        self.clientProxy = clientProxy
++    }
++
++    func load() async {
++        var protected = false
++        if case .success(let json) = await roomProxy.freechatStateContent(type: FreeChat.privacyStateType) {
++            protected = FreeChat.blocksScreenshots(privacyContentJSON: json)
++        }
++        if !protected, case .success(let json) = await clientProxy.freechatAccountData(type: FreeChat.disappearingStateType) {
++            protected = FreeChat.personal(fromContentJSON: json).blockScreenshots
++        }
++        isProtected = protected
++    }
++}
++
++extension View {
++    /// iOS cannot block screenshots. Instead the content is hidden while the screen is recorded or mirrored,
++    /// and taking a screenshot shows a warning.
++    func freechatScreenProtection(_ policy: FreeChatScreenPolicy?) -> some View {
++        modifier(FreeChatScreenProtectionModifier(policy: policy))
++    }
++}
++
++private struct FreeChatScreenProtectionModifier: ViewModifier {
++    let policy: FreeChatScreenPolicy?
++
++    @State private var isCaptured = false
++    @State private var showsScreenshotWarning = false
++
++    private var isProtected: Bool {
++        policy?.isProtected == true
++    }
++
++    func body(content: Content) -> some View {
++        content
++            .overlay {
++                if isProtected, isCaptured {
++                    ZStack {
++                        Color.compound.bgCanvasDefault
++                        Label(FreeChatStrings.string(.screenHidden), icon: \.visibilityOff)
++                            .font(.compound.bodyLGSemibold)
++                            .foregroundStyle(.compound.textSecondary)
++                    }
++                    .ignoresSafeArea()
++                }
++            }
++            .task { await policy?.load() }
++            .onAppear { isCaptured = Self.isScreenCaptured }
++            .onReceive(NotificationCenter.default.publisher(for: UIScreen.capturedDidChangeNotification)) { _ in
++                isCaptured = Self.isScreenCaptured
++            }
++            .onReceive(NotificationCenter.default.publisher(for: UIApplication.userDidTakeScreenshotNotification)) { _ in
++                if isProtected { showsScreenshotWarning = true }
++            }
++            .alert(FreeChatStrings.string(.screenshotTaken), isPresented: $showsScreenshotWarning) {
++                Button(FreeChatStrings.string(.cancel), role: .cancel) { }
++            } message: {
++                Text(FreeChatStrings.string(.screenshotTakenMessage))
++            }
++    }
++
++    private static var isScreenCaptured: Bool {
++        UIApplication.shared.connectedScenes
++            .compactMap { ($0 as? UIWindowScene)?.screen }
++            .contains { $0.isCaptured }
++    }
++}
+diff --git a/ElementX/Sources/Screens/RoomScreen/RoomScreenCoordinator.swift b/ElementX/Sources/Screens/RoomScreen/RoomScreenCoordinator.swift
+index 86e9960b2..879a25afb 100644
+--- a/ElementX/Sources/Screens/RoomScreen/RoomScreenCoordinator.swift
++++ b/ElementX/Sources/Screens/RoomScreen/RoomScreenCoordinator.swift
+@@ -57,6 +57,7 @@ final class RoomScreenCoordinator: CoordinatorProtocol {
+     private var composerViewModel: ComposerToolbarViewModelProtocol
+     private let userSettings: UserSettings
+     
++    private let screenPolicy: FreeChatScreenPolicy // FreeChat
+     private var cancellables = Set<AnyCancellable>()
+     
+     private let actionsSubject: PassthroughSubject<RoomScreenCoordinatorAction, Never> = .init()
+@@ -65,6 +66,7 @@ final class RoomScreenCoordinator: CoordinatorProtocol {
+     }
+     
+     init(parameters: RoomScreenCoordinatorParameters) {
++        screenPolicy = FreeChatScreenPolicy(roomProxy: parameters.roomProxy, clientProxy: parameters.userSession.clientProxy)
+         userSettings = parameters.userSession.userSettings
+         
+         var selectedPinnedEventID: String?
+@@ -247,7 +249,8 @@ final class RoomScreenCoordinator: CoordinatorProtocol {
+         
+         return AnyView(RoomScreen(context: roomViewModel.context,
+                                   timelineContext: timelineViewModel.context,
+-                                  composerToolbar: composerToolbar))
++                                  composerToolbar: composerToolbar)
++                .freechatScreenProtection(screenPolicy))
+     }
+ }
+ 

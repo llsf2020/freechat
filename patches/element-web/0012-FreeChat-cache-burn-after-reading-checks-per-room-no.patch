@@ -1,0 +1,225 @@
+From 6552ad4c0b070fcd3b92bc0c97e41ce31e35c1fa Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 12/12] FreeChat: cache burn-after-reading checks per room; no
+ receipt time means unknown
+
+---
+ apps/web/src/freechat/expiry.test.ts | 62 +++++++++++++++++++-
+ apps/web/src/freechat/expiry.ts      | 84 ++++++++++++++++++++++------
+ 2 files changed, 126 insertions(+), 20 deletions(-)
+
+diff --git a/apps/web/src/freechat/expiry.test.ts b/apps/web/src/freechat/expiry.test.ts
+index a2f09f17a7..ffd7b7cac6 100644
+--- a/apps/web/src/freechat/expiry.test.ts
++++ b/apps/web/src/freechat/expiry.test.ts
+@@ -5,10 +5,10 @@ SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
+ Please see LICENSE files in the repository root for full details.
+ */
+ 
+-import { MatrixEvent } from "matrix-js-sdk/src/matrix";
+-import { describe, it, expect } from "vitest";
++import { MatrixEvent, RoomEvent, RoomMemberEvent, SyncState, TypedEventEmitter } from "matrix-js-sdk/src/matrix";
++import { describe, it, expect, vi } from "vitest";
+ 
+-import { EXPIRES_AT_KEY, READ_TTL_KEY, expiryOf, isExpired, isMarked } from "./expiry";
++import { EXPIRES_AT_KEY, READ_TTL_KEY, expiryOf, installExpiry, isExpired, isMarked } from "./expiry";
+ 
+ function anEvent(unsigned: Record<string, unknown>, sender = "@a:x"): MatrixEvent {
+     return new MatrixEvent({
+@@ -61,3 +61,59 @@ describe("expiry markers", () => {
+         expect(expiryOf(ev, aRoom(["@a:x", "@b:x"], { "@b:x": -3000 }))).toBe(2000);
+     });
+ });
++
++describe("burn after reading without a receipt time", () => {
++    it("is left to the server instead of moving with the clock", () => {
++        const ev = anEvent({ [READ_TTL_KEY]: 5 });
++        const room = aRoom(["@a:x", "@b:x"], {});
++        room.hasUserReadEvent = () => true; // read, but the receipt has no timestamp
++        expect(expiryOf(ev, room)).toBeNull();
++        expect(expiryOf(anEvent({ [EXPIRES_AT_KEY]: 9000, [READ_TTL_KEY]: 5 }), room)).toBe(9000);
++    });
++});
++
++describe("burn after reading cache", () => {
++    /** A room of a client with an expiry manager, counting how often receipts are looked at. */
++    function aTrackedRoom(read: Record<string, number>) {
++        const client = Object.assign(new TypedEventEmitter<any, any>(), {
++            getRooms: () => [],
++            getRoom: () => room,
++            getSyncState: () => SyncState.Prepared,
++        });
++        const room = { ...aRoom(["@a:x", "@b:x"], read), roomId: "!r:x", client };
++        room.hasUserReadEvent = vi.fn(room.hasUserReadEvent);
++        installExpiry(client as any);
++        return { client, room };
++    }
++
++    it("reuses the answer until a receipt, membership or event changes the room", () => {
++        const read: Record<string, number> = {};
++        const { client, room } = aTrackedRoom(read);
++        const ev = anEvent({ [READ_TTL_KEY]: 5 });
++
++        expect(expiryOf(ev, room)).toBeNull();
++        expect(expiryOf(ev, room)).toBeNull();
++        expect(room.hasUserReadEvent).toHaveBeenCalledTimes(1);
++
++        read["@b:x"] = 1000;
++        client.emit(RoomEvent.Receipt, ev, room);
++        expect(expiryOf(ev, room)).toBe(6000);
++        expect(expiryOf(ev, room)).toBe(6000);
++        expect(room.hasUserReadEvent).toHaveBeenCalledTimes(2);
++
++        client.emit(RoomMemberEvent.Membership, ev, { roomId: "!r:x" });
++        expect(expiryOf(ev, room)).toBe(6000);
++        client.emit(RoomEvent.Timeline, ev, room);
++        expect(expiryOf(ev, room)).toBe(6000);
++        expect(room.hasUserReadEvent).toHaveBeenCalledTimes(4);
++    });
++
++    it("does not cache rooms nobody listens to", () => {
++        const room = aRoom(["@a:x", "@b:x"], { "@b:x": 1000 });
++        room.hasUserReadEvent = vi.fn(room.hasUserReadEvent);
++        const ev = anEvent({ [READ_TTL_KEY]: 5 });
++        expiryOf(ev, room);
++        expiryOf(ev, room);
++        expect(room.hasUserReadEvent).toHaveBeenCalledTimes(2);
++    });
++});
+diff --git a/apps/web/src/freechat/expiry.ts b/apps/web/src/freechat/expiry.ts
+index 4e0794c712..66f5d76a80 100644
+--- a/apps/web/src/freechat/expiry.ts
++++ b/apps/web/src/freechat/expiry.ts
+@@ -19,7 +19,16 @@ Please see LICENSE files in the repository root for full details.
+  *    exist and drops the rest (covers private read receipts and any drift).
+  */
+ 
+-import { ClientEvent, type MatrixClient, type MatrixEvent, type Room, SyncState } from "matrix-js-sdk/src/matrix";
++import {
++    ClientEvent,
++    type MatrixClient,
++    type MatrixEvent,
++    type Room,
++    RoomEvent,
++    RoomMemberEvent,
++    type RoomMember,
++    SyncState,
++} from "matrix-js-sdk/src/matrix";
+ import { logger } from "matrix-js-sdk/src/logger";
+ 
+ import { existingEvents } from "./api";
+@@ -42,28 +51,60 @@ export function isMarked(ev: MatrixEvent): boolean {
+     return positive(unsigned[EXPIRES_AT_KEY]) !== null || positive(unsigned[READ_TTL_KEY]) !== null;
+ }
+ 
++const MANAGERS = new WeakMap<MatrixClient, ExpiryManager>();
++
++/**
++ * Bumped whenever something that decides burn after reading changes in a room: a
++ * read receipt, a membership or a new event. Only kept for clients with an
++ * {@link ExpiryManager}, which listens for those changes.
++ */
++const ROOM_VERSIONS = new WeakMap<Room, number>();
++/** The last burn-after-reading answer per event, valid while its room's version is unchanged. */
++const BURN_CACHE = new WeakMap<MatrixEvent, { room: Room; version: number; at: number | null }>();
++
++function bumpRoom(room: Room | null | undefined): void {
++    if (room) ROOM_VERSIONS.set(room, (ROOM_VERSIONS.get(room) ?? 0) + 1);
++}
++
++/**
++ * When every other member read the event, plus its read TTL; null while someone
++ * has not read it, or when a receipt carries no time (the server check decides).
++ */
++function burnAt(ev: MatrixEvent, eventId: string, room: Room, readTtl: number): number | null {
++    const others = room
++        .getJoinedMembers()
++        .map((m) => m.userId)
++        .filter((userId) => userId !== ev.getSender());
++    if (others.length === 0 || !others.every((userId) => room.hasUserReadEvent(userId, eventId))) return null;
++
++    const times = others.map((userId) => room.getReadReceiptForUserId(userId, true)?.data.ts);
++    if (times.some((ts) => typeof ts !== "number")) return null;
++    return Math.max(...(times as number[])) + readTtl * 1000;
++}
++
+ /** When this device should delete the event, in ms since the epoch, or null if not (yet) known. */
+ export function expiryOf(ev: MatrixEvent, room: Room | null | undefined): number | null {
+     const unsigned = ev.getUnsigned() as Record<string, unknown>;
+-    let at = positive(unsigned[EXPIRES_AT_KEY]);
++    const at = positive(unsigned[EXPIRES_AT_KEY]);
+ 
+     const readTtl = positive(unsigned[READ_TTL_KEY]);
+     const eventId = ev.getId();
+-    if (readTtl !== null && room && eventId) {
+-        const others = room
+-            .getJoinedMembers()
+-            .map((m) => m.userId)
+-            .filter((userId) => userId !== ev.getSender());
+-        if (others.length > 0 && others.every((userId) => room.hasUserReadEvent(userId, eventId))) {
+-            const readAt = Math.max(
+-                ...others.map((userId) => room.getReadReceiptForUserId(userId, true)?.data.ts ?? Date.now()),
+-            );
+-            const burnAt = readAt + readTtl * 1000;
+-            at = at === null ? burnAt : Math.min(at, burnAt);
+-        }
++    if (readTtl === null || !room || !eventId) return at;
++
++    // Timelines are re-rendered often; walking every member's receipts each time is slow in big rooms.
++    const tracked = !!room.client && MANAGERS.has(room.client);
++    const version = ROOM_VERSIONS.get(room) ?? 0;
++    const cached = tracked ? BURN_CACHE.get(ev) : undefined;
++    let burn: number | null;
++    if (cached && cached.room === room && cached.version === version) {
++        burn = cached.at;
++    } else {
++        burn = burnAt(ev, eventId, room, readTtl);
++        if (tracked) BURN_CACHE.set(ev, { room, version, at: burn });
+     }
+ 
+-    return at;
++    if (burn === null) return at;
++    return at === null ? burn : Math.min(at, burn);
+ }
+ 
+ export function isExpired(ev: MatrixEvent, room: Room | null | undefined, now = Date.now()): boolean {
+@@ -80,11 +121,17 @@ export class ExpiryManager {
+ 
+     public start(): void {
+         this.client.on(ClientEvent.Sync, this.onSync);
++        this.client.on(RoomEvent.Receipt, this.onReceipt);
++        this.client.on(RoomEvent.Timeline, this.onTimeline);
++        this.client.on(RoomMemberEvent.Membership, this.onMembership);
+         this.schedule(0);
+     }
+ 
+     public stop(): void {
+         this.client.off(ClientEvent.Sync, this.onSync);
++        this.client.off(RoomEvent.Receipt, this.onReceipt);
++        this.client.off(RoomEvent.Timeline, this.onTimeline);
++        this.client.off(RoomMemberEvent.Membership, this.onMembership);
+         if (this.timer) clearTimeout(this.timer);
+         this.timer = null;
+     }
+@@ -94,6 +141,11 @@ export class ExpiryManager {
+         if (state === SyncState.Syncing && prev !== SyncState.Syncing) this.schedule(0);
+     };
+ 
++    private readonly onReceipt = (_ev: MatrixEvent, room: Room): void => bumpRoom(room);
++    private readonly onTimeline = (_ev: MatrixEvent, room: Room | undefined): void => bumpRoom(room);
++    private readonly onMembership = (_ev: MatrixEvent, member: RoomMember): void =>
++        bumpRoom(this.client.getRoom(member.roomId));
++
+     private schedule(delayMs: number): void {
+         if (this.timer) clearTimeout(this.timer);
+         this.timer = setTimeout(() => void this.sweep(), delayMs);
+@@ -147,8 +199,6 @@ export class ExpiryManager {
+     }
+ }
+ 
+-const MANAGERS = new WeakMap<MatrixClient, ExpiryManager>();
+-
+ export function installExpiry(client: MatrixClient): void {
+     if (MANAGERS.has(client)) return;
+     const manager = new ExpiryManager(client);

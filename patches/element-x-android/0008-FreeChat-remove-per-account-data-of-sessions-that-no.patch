@@ -1,0 +1,205 @@
+From 706439e399cc158c150686c17e5a66aa2088af2f Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 08/12] FreeChat: remove per-account data of sessions that no
+ longer exist
+
+Session preferences, push settings and the push client secret (keyed by user ID)
+outlive a strict session whose process was killed. They are removed at start-up
+for every account not in the session store.
+---
+ .../element/android/x/ElementXApplication.kt  |  2 +
+ .../initializer/FreeChatCleanupInitializer.kt | 22 +++++
+ libraries/pushstore/impl/build.gradle.kts     |  2 +
+ .../impl/freechat/StaleSessionDataCleaner.kt  | 80 +++++++++++++++++++
+ .../freechat/StaleSessionDataCleanerTest.kt   | 32 ++++++++
+ 5 files changed, 138 insertions(+)
+ create mode 100644 app/src/main/kotlin/io/element/android/x/initializer/FreeChatCleanupInitializer.kt
+ create mode 100644 libraries/pushstore/impl/src/main/kotlin/io/element/android/libraries/pushstore/impl/freechat/StaleSessionDataCleaner.kt
+ create mode 100644 libraries/pushstore/impl/src/test/kotlin/io/element/android/libraries/pushstore/impl/freechat/StaleSessionDataCleanerTest.kt
+
+diff --git a/app/src/main/kotlin/io/element/android/x/ElementXApplication.kt b/app/src/main/kotlin/io/element/android/x/ElementXApplication.kt
+index a3712ebbf6..8d98b7f5ae 100644
+--- a/app/src/main/kotlin/io/element/android/x/ElementXApplication.kt
++++ b/app/src/main/kotlin/io/element/android/x/ElementXApplication.kt
+@@ -24,6 +24,7 @@ import io.element.android.x.di.ApplicationBindings
+ import io.element.android.x.info.logApplicationInfo
+ import io.element.android.x.initializer.CacheCleanerInitializer
+ import io.element.android.x.initializer.CrashInitializer
++import io.element.android.x.initializer.FreeChatCleanupInitializer
+ import io.element.android.x.initializer.PlatformInitializer
+ 
+ class ElementXApplication : Application(), DependencyInjectionGraphOwner, Configuration.Provider {
+@@ -42,6 +43,7 @@ class ElementXApplication : Application(), DependencyInjectionGraphOwner, Config
+             initializeComponent(CrashInitializer::class.java)
+             initializeComponent(PlatformInitializer::class.java)
+             initializeComponent(CacheCleanerInitializer::class.java)
++            initializeComponent(FreeChatCleanupInitializer::class.java)
+         }
+ 
+         bindings<ApplicationBindings>().inject(this)
+diff --git a/app/src/main/kotlin/io/element/android/x/initializer/FreeChatCleanupInitializer.kt b/app/src/main/kotlin/io/element/android/x/initializer/FreeChatCleanupInitializer.kt
+new file mode 100644
+index 0000000000..ce4da1886a
+--- /dev/null
++++ b/app/src/main/kotlin/io/element/android/x/initializer/FreeChatCleanupInitializer.kt
+@@ -0,0 +1,22 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.x.initializer
++
++import android.content.Context
++import androidx.startup.Initializer
++import io.element.android.libraries.architecture.bindings
++import io.element.android.libraries.pushstore.impl.freechat.StaleSessionDataCleanerBindings
++
++/** FreeChat: removes per-account data of sessions that no longer exist, before any session is restored. */
++class FreeChatCleanupInitializer : Initializer<Unit> {
++    override fun create(context: Context) {
++        context.bindings<StaleSessionDataCleanerBindings>().staleSessionDataCleaner().clean()
++    }
++
++    override fun dependencies(): List<Class<out Initializer<*>>> = emptyList()
++}
+diff --git a/libraries/pushstore/impl/build.gradle.kts b/libraries/pushstore/impl/build.gradle.kts
+index 4e643fd5f9..a9fec69e21 100644
+--- a/libraries/pushstore/impl/build.gradle.kts
++++ b/libraries/pushstore/impl/build.gradle.kts
+@@ -30,6 +30,8 @@ dependencies {
+     implementation(projects.libraries.matrix.api)
+     implementation(projects.libraries.preferences.api)
+     implementation(projects.libraries.pushstore.api)
++    implementation(projects.libraries.sessionStorage.api) // FreeChat
++    implementation(projects.libraries.di) // FreeChat
+     implementation(libs.androidx.corektx)
+     implementation(libs.androidx.datastore.preferences)
+ 
+diff --git a/libraries/pushstore/impl/src/main/kotlin/io/element/android/libraries/pushstore/impl/freechat/StaleSessionDataCleaner.kt b/libraries/pushstore/impl/src/main/kotlin/io/element/android/libraries/pushstore/impl/freechat/StaleSessionDataCleaner.kt
+new file mode 100644
+index 0000000000..7b89793019
+--- /dev/null
++++ b/libraries/pushstore/impl/src/main/kotlin/io/element/android/libraries/pushstore/impl/freechat/StaleSessionDataCleaner.kt
+@@ -0,0 +1,80 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.pushstore.impl.freechat
++
++import android.content.Context
++import androidx.datastore.preferences.core.edit
++import dev.zacsweers.metro.AppScope
++import dev.zacsweers.metro.ContributesTo
++import dev.zacsweers.metro.Inject
++import io.element.android.libraries.androidutils.hash.hash
++import io.element.android.libraries.core.coroutine.CoroutineDispatchers
++import io.element.android.libraries.di.annotations.AppCoroutineScope
++import io.element.android.libraries.di.annotations.ApplicationContext
++import io.element.android.libraries.preferences.api.store.PreferenceDataStoreFactory
++import io.element.android.libraries.sessionstorage.api.SessionStore
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.launch
++import timber.log.Timber
++import java.io.File
++
++/**
++ * FreeChat: removes per-account data left behind by sessions that no longer exist.
++ *
++ * A strict-mode session lives in memory only, but some per-account settings still go to small files: session
++ * preferences, push settings and the push client secret (keyed by the user ID). A normal sign-out deletes them;
++ * when the process is killed instead, they would reveal which account was signed in. Run once at start-up, before
++ * any session is restored: in-memory strict sessions are part of [SessionStore], so live accounts are never touched.
++ */
++@Inject
++class StaleSessionDataCleaner(
++    @ApplicationContext private val context: Context,
++    private val sessionStore: SessionStore,
++    private val preferenceDataStoreFactory: PreferenceDataStoreFactory,
++    @AppCoroutineScope private val coroutineScope: CoroutineScope,
++    private val dispatchers: CoroutineDispatchers,
++) {
++    fun clean() {
++        coroutineScope.launch(dispatchers.io) {
++            runCatching {
++                val userIds = sessionStore.getAllSessions().map { it.userId }.toSet()
++                deleteStalePreferenceFiles(userIds.map { it.hash().take(16) }.toSet())
++                preferenceDataStoreFactory.create(PUSH_CLIENT_SECRET_STORE).edit { secrets ->
++                    secrets.asMap().keys.filter { it.name !in userIds }.forEach { secrets.remove(it) }
++                }
++            }.onFailure {
++                Timber.e(it, "FreeChat: failed cleaning up data of old sessions")
++            }
++        }
++    }
++
++    private fun deleteStalePreferenceFiles(liveHashes: Set<String>) {
++        File(context.filesDir, "datastore").listFiles()
++            ?.filter { isStalePerSessionFile(it.name, liveHashes) }
++            ?.forEach { it.delete() }
++    }
++
++    private companion object {
++        // Name used by DataStorePushClientSecretStore.
++        const val PUSH_CLIENT_SECRET_STORE = "push_client_secret_store"
++    }
++}
++
++// Names used by DefaultSessionPreferencesStore and UserPushStoreDataStore: a 16-character hash of the user ID.
++private val PER_SESSION_FILE = Regex("""session_([0-9a-f]{16})_preferences\.preferences_pb|push_store_([0-9a-f]{16})\.preferences_pb""")
++
++/** Whether [fileName] holds per-account data of an account whose user ID hash is not in [liveHashes]. */
++internal fun isStalePerSessionFile(fileName: String, liveHashes: Set<String>): Boolean {
++    val hash = PER_SESSION_FILE.matchEntire(fileName)?.groupValues?.drop(1)?.firstOrNull { it.isNotEmpty() } ?: return false
++    return hash !in liveHashes
++}
++
++@ContributesTo(AppScope::class)
++interface StaleSessionDataCleanerBindings {
++    fun staleSessionDataCleaner(): StaleSessionDataCleaner
++}
+diff --git a/libraries/pushstore/impl/src/test/kotlin/io/element/android/libraries/pushstore/impl/freechat/StaleSessionDataCleanerTest.kt b/libraries/pushstore/impl/src/test/kotlin/io/element/android/libraries/pushstore/impl/freechat/StaleSessionDataCleanerTest.kt
+new file mode 100644
+index 0000000000..1a190a7748
+--- /dev/null
++++ b/libraries/pushstore/impl/src/test/kotlin/io/element/android/libraries/pushstore/impl/freechat/StaleSessionDataCleanerTest.kt
+@@ -0,0 +1,32 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.pushstore.impl.freechat
++
++import com.google.common.truth.Truth.assertThat
++import io.element.android.libraries.androidutils.hash.hash
++import org.junit.Test
++
++class StaleSessionDataCleanerTest {
++    private val live = "@alice:chat.example".hash().take(16)
++    private val gone = "@bob:chat.example".hash().take(16)
++
++    @Test
++    fun `files of accounts that no longer exist are stale`() {
++        assertThat(isStalePerSessionFile("session_${gone}_preferences.preferences_pb", setOf(live))).isTrue()
++        assertThat(isStalePerSessionFile("push_store_$gone.preferences_pb", setOf(live))).isTrue()
++    }
++
++    @Test
++    fun `files of live accounts and shared files are kept`() {
++        assertThat(isStalePerSessionFile("session_${live}_preferences.preferences_pb", setOf(live))).isFalse()
++        assertThat(isStalePerSessionFile("push_store_$live.preferences_pb", setOf(live))).isFalse()
++        assertThat(isStalePerSessionFile("elementx_preferences.preferences_pb", setOf(live))).isFalse()
++        assertThat(isStalePerSessionFile("push_client_secret_store.preferences_pb", emptySet())).isFalse()
++        assertThat(isStalePerSessionFile("freechat_strict_mode.preferences_pb", emptySet())).isFalse()
++    }
++}

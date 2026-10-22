@@ -1,0 +1,216 @@
+From 9305a5977bae582e58fd1d4a2989dd8af02cd56e Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 03/12] FreeChat: store per-chat burn-after-read in global
+ account data
+
+Same format as the server and Element X: {"read_ttl": N, "rooms": {...}}.
+---
+ apps/web/src/freechat/ReadBurnSettings.tsx | 52 +++++++++++-----------
+ apps/web/src/freechat/disappearing.test.ts | 18 ++++++--
+ apps/web/src/freechat/disappearing.ts      | 31 ++++++++++---
+ 3 files changed, 65 insertions(+), 36 deletions(-)
+
+diff --git a/apps/web/src/freechat/ReadBurnSettings.tsx b/apps/web/src/freechat/ReadBurnSettings.tsx
+index 4a94ee0bd6..1eb2984267 100644
+--- a/apps/web/src/freechat/ReadBurnSettings.tsx
++++ b/apps/web/src/freechat/ReadBurnSettings.tsx
+@@ -8,13 +8,14 @@ Please see LICENSE files in the repository root for full details.
+ /*
+  * FreeChat: personal burn-after-read settings.
+  *
+- * Stored as `com.freechat.disappearing` account data `{"read_ttl": seconds}`:
+- * globally as the default, and per room to override it. A room override
+- * without `read_ttl` follows the global default. The homeserver enforces it.
++ * Stored as global `com.freechat.disappearing` account data
++ * `{"read_ttl": seconds, "rooms": {"<room id>": seconds}}`: the default and
++ * per-room overrides. Overrides live in global account data because Element X
++ * (matrix-rust-sdk) cannot write room account data. The homeserver enforces it.
+  */
+ 
+ import React, { type JSX, useCallback, useContext, useState } from "react";
+-import { ClientEvent, type MatrixEvent, type Room, RoomEvent } from "matrix-js-sdk/src/matrix";
++import { ClientEvent, type MatrixClient, type MatrixEvent, type Room } from "matrix-js-sdk/src/matrix";
+ import { logger } from "matrix-js-sdk/src/logger";
+ 
+ import MatrixClientContext from "../contexts/MatrixClientContext";
+@@ -25,10 +26,12 @@ import StyledRadioGroup from "../components/views/elements/StyledRadioGroup";
+ import SettingsFieldset from "../components/views/settings/SettingsFieldset";
+ import {
+     DISAPPEARING_EVENT_TYPE,
++    type PersonalSettings,
+     READ_TTL_PRESETS,
+     formatReadTtl,
+-    getGlobalReadTtl,
+-    getRoomReadTtl,
++    getPersonalSettings,
++    roomReadTtl,
++    withRoomReadTtl,
+ } from "./disappearing";
+ import { ft } from "./i18n";
+ 
+@@ -47,31 +50,36 @@ function showError(e: unknown): void {
+     });
+ }
+ 
+-/** The global default, re-read whenever account data changes. */
+-function useGlobalReadTtl(): number {
++/** The personal settings, re-read whenever account data changes. */
++function usePersonalSettings(): PersonalSettings {
+     const client = useContext(MatrixClientContext);
+-    const [ttl, setTtl] = useState(() => getGlobalReadTtl(client));
++    const [settings, setSettings] = useState(() => getPersonalSettings(client));
+     const onAccountData = useCallback(
+         (event: MatrixEvent) => {
+-            if (event.getType() === DISAPPEARING_EVENT_TYPE) setTtl(getGlobalReadTtl(client));
++            if (event.getType() === DISAPPEARING_EVENT_TYPE) setSettings(getPersonalSettings(client));
+         },
+         [client],
+     );
+     useTypedEventEmitter(client, ClientEvent.AccountData, onAccountData);
+-    return ttl;
++    return settings;
++}
++
++async function saveSettings(client: MatrixClient, settings: PersonalSettings): Promise<void> {
++    await client.setAccountData(DISAPPEARING_EVENT_TYPE as any, settings as any);
+ }
+ 
+ /** User settings: the default for every chat. */
+ export function GlobalReadBurnSettings(): JSX.Element {
+     const client = useContext(MatrixClientContext);
+-    const ttl = useGlobalReadTtl();
++    const settings = usePersonalSettings();
++    const ttl = settings.read_ttl ?? 0;
+     const [pending, setPending] = useState<number | null>(null);
+ 
+     const onChange = async (value: string): Promise<void> => {
+         const next = Number(value);
+         setPending(next);
+         try {
+-            await client.setAccountData(DISAPPEARING_EVENT_TYPE as any, { read_ttl: next } as any);
++            await saveSettings(client, { ...settings, read_ttl: next });
+         } catch (e) {
+             showError(e);
+         } finally {
+@@ -95,18 +103,11 @@ export function GlobalReadBurnSettings(): JSX.Element {
+ /** Room settings: override the default for this chat, or follow it. */
+ export function RoomReadBurnSettings({ room }: { room: Room }): JSX.Element {
+     const client = useContext(MatrixClientContext);
+-    const globalTtl = useGlobalReadTtl();
+-    const [override, setOverride] = useState(() => getRoomReadTtl(room));
++    const settings = usePersonalSettings();
++    const globalTtl = settings.read_ttl ?? 0;
++    const override = roomReadTtl(settings, room.roomId);
+     const [pending, setPending] = useState<string | null>(null);
+ 
+-    const onRoomAccountData = useCallback(
+-        (event: MatrixEvent) => {
+-            if (event.getType() === DISAPPEARING_EVENT_TYPE) setOverride(getRoomReadTtl(room));
+-        },
+-        [room],
+-    );
+-    useTypedEventEmitter(room, RoomEvent.AccountData, onRoomAccountData);
+-
+     const current = override === undefined ? FOLLOW_GLOBAL : String(override);
+     const definitions = [
+         { value: FOLLOW_GLOBAL, label: ft("burn_follow_global", { duration: formatReadTtl(globalTtl) }) },
+@@ -116,9 +117,8 @@ export function RoomReadBurnSettings({ room }: { room: Room }): JSX.Element {
+     const onChange = async (value: string): Promise<void> => {
+         setPending(value);
+         try {
+-            // An empty object clears the override (account data cannot be deleted).
+-            const content = value === FOLLOW_GLOBAL ? {} : { read_ttl: Number(value) };
+-            await client.setRoomAccountData(room.roomId, DISAPPEARING_EVENT_TYPE as any, content as any);
++            const ttl = value === FOLLOW_GLOBAL ? undefined : Number(value);
++            await saveSettings(client, withRoomReadTtl(settings, room.roomId, ttl));
+         } catch (e) {
+             showError(e);
+         } finally {
+diff --git a/apps/web/src/freechat/disappearing.test.ts b/apps/web/src/freechat/disappearing.test.ts
+index 17655e5a06..55ba7e49c5 100644
+--- a/apps/web/src/freechat/disappearing.test.ts
++++ b/apps/web/src/freechat/disappearing.test.ts
+@@ -17,9 +17,10 @@ import {
+     formatReadTtl,
+     formatTtl,
+     getGlobalReadTtl,
+-    getRoomReadTtl,
++    roomReadTtl,
+     isExpiredRedaction,
+     isRoomAdmin,
++    withRoomReadTtl,
+     textForDisappearingEvent,
+ } from "./disappearing";
+ 
+@@ -116,9 +117,18 @@ describe("read ttl helpers", () => {
+     });
+ 
+     it("distinguishes a room override from following the default", () => {
+-        expect(getRoomReadTtl({ getAccountData: () => withContent({ read_ttl: 0 }) } as any)).toBe(0);
+-        expect(getRoomReadTtl({ getAccountData: () => withContent({}) } as any)).toBeUndefined();
+-        expect(getRoomReadTtl({ getAccountData: () => undefined } as any)).toBeUndefined();
++        const settings = { read_ttl: 30, rooms: { "!off:x": 0, "!bad:x": "5" as any } };
++        expect(roomReadTtl(settings, "!off:x")).toBe(0);
++        expect(roomReadTtl(settings, "!other:x")).toBeUndefined();
++        expect(roomReadTtl(settings, "!bad:x")).toBeUndefined();
++        expect(roomReadTtl({}, "!off:x")).toBeUndefined();
++    });
++
++    it("sets and clears a room override without touching the rest", () => {
++        const settings = { read_ttl: 30, rooms: { "!a:x": 5 } };
++        expect(withRoomReadTtl(settings, "!b:x", 0)).toEqual({ read_ttl: 30, rooms: { "!a:x": 5, "!b:x": 0 } });
++        expect(withRoomReadTtl(settings, "!a:x", undefined)).toEqual({ read_ttl: 30, rooms: {} });
++        expect(settings.rooms).toEqual({ "!a:x": 5 });
+     });
+ 
+     it("formats delays", () => {
+diff --git a/apps/web/src/freechat/disappearing.ts b/apps/web/src/freechat/disappearing.ts
+index ad9e82420f..e4c092a554 100644
+--- a/apps/web/src/freechat/disappearing.ts
++++ b/apps/web/src/freechat/disappearing.ts
+@@ -68,19 +68,38 @@ export function isRoomAdmin(state: RoomState, userId: string): boolean {
+ /** Personal burn-after-read presets in seconds, zero meaning off. */
+ export const READ_TTL_PRESETS: readonly number[] = [0, 5, 30, 60, 5 * 60, HOUR];
+ 
+-function readTtlFromContent(content: Record<string, unknown> | undefined): number | undefined {
+-    const ttl = content?.read_ttl;
++/** Shape of the global `com.freechat.disappearing` account data. */
++export interface PersonalSettings {
++    /** Default burn-after-read delay in seconds; zero or missing means off. */
++    read_ttl?: number;
++    /** Per-room overrides by room ID; zero turns it off in that room. */
++    rooms?: Record<string, number>;
++}
++
++function validTtl(ttl: unknown): number | undefined {
+     return typeof ttl === "number" && Number.isFinite(ttl) && ttl >= 0 ? Math.floor(ttl) : undefined;
+ }
+ 
++export function getPersonalSettings(client: MatrixClient): PersonalSettings {
++    return (client.getAccountData(DISAPPEARING_EVENT_TYPE as any)?.getContent() as PersonalSettings) ?? {};
++}
++
+ /** The user's global burn-after-read delay, zero when off. */
+ export function getGlobalReadTtl(client: MatrixClient): number {
+-    return readTtlFromContent(client.getAccountData(DISAPPEARING_EVENT_TYPE as any)?.getContent()) ?? 0;
++    return validTtl(getPersonalSettings(client).read_ttl) ?? 0;
++}
++
++/** The override for a room, or undefined when the room follows the default. */
++export function roomReadTtl(settings: PersonalSettings, roomId: string): number | undefined {
++    return validTtl(settings.rooms?.[roomId]);
+ }
+ 
+-/** The user's per-room override, or undefined when the room follows the global setting. */
+-export function getRoomReadTtl(room: Room): number | undefined {
+-    return readTtlFromContent(room.getAccountData(DISAPPEARING_EVENT_TYPE)?.getContent());
++/** New settings content with the room's override set, or removed when `ttl` is undefined. */
++export function withRoomReadTtl(settings: PersonalSettings, roomId: string, ttl: number | undefined): PersonalSettings {
++    const rooms = { ...settings.rooms };
++    if (ttl === undefined) delete rooms[roomId];
++    else rooms[roomId] = ttl;
++    return { ...settings, rooms };
+ }
+ 
+ export function formatReadTtl(ttl: number): string {

@@ -1,0 +1,97 @@
+From 5280a7a66d154ae69d1a759b4169220e0cc7402e Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 08/14] FreeChat: existing_events endpoint for devices to drop
+ purged messages
+
+POST /_matrix/client/unstable/com.freechat/rooms/{roomId}/existing_events
+answers which of up to 500 event IDs still exist, for members only. Devices
+use it for marked messages whose expiry they cannot compute themselves,
+such as burn-after-read with private read receipts.
+---
+ src/api/client/freechat.rs | 47 ++++++++++++++++++++++++++++++++++++--
+ src/api/router.rs          |  4 ++++
+ 2 files changed, 49 insertions(+), 2 deletions(-)
+
+diff --git a/src/api/client/freechat.rs b/src/api/client/freechat.rs
+index 9e047006b..31a784277 100644
+--- a/src/api/client/freechat.rs
++++ b/src/api/client/freechat.rs
+@@ -15,10 +15,10 @@
+ 	TypedHeader,
+ 	headers::{Authorization, authorization::Bearer},
+ };
+-use ruma::{OwnedRoomId, OwnedUserId};
++use ruma::{OwnedEventId, OwnedRoomId, OwnedUserId};
+ use serde::Deserialize;
+ use serde_json::json;
+-use tuwunel_core::{Err, Result};
++use tuwunel_core::{Err, Result, matrix::Event};
+ 
+ /// `GET /_matrix/client/unstable/com.freechat/rooms/{roomId}/join_password`
+ ///
+@@ -86,6 +86,49 @@ pub(crate) async fn join_with_password_route(
+ 	Ok(Json(json!({ "room_id": room_id })))
+ }
+ 
++/// Most event IDs one existence check may ask about.
++const MAX_EXISTING_EVENTS: usize = 500;
++
++#[derive(Deserialize)]
++pub(crate) struct ExistingEvents {
++	event_ids: Vec<OwnedEventId>,
++}
++
++/// `POST /_matrix/client/unstable/com.freechat/rooms/{roomId}/existing_events`
++///
++/// Answers which of the given events still exist in the room, so devices can
++/// delete local copies of disappearing messages the server already purged.
++/// Members only; reveals nothing beyond what the member could fetch one by one.
++pub(crate) async fn existing_events_route(
++	State(services): State<crate::State>,
++	TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
++	Path(room_id): Path<OwnedRoomId>,
++	Json(body): Json<ExistingEvents>,
++) -> Result<impl IntoResponse> {
++	let user = authenticate(&services, bearer.token()).await?;
++	if !services.state_cache.is_joined(&user, &room_id).await {
++		return Err!(Request(Forbidden("You are not in this room.")));
++	}
++
++	if body.event_ids.len() > MAX_EXISTING_EVENTS {
++		return Err!(Request(InvalidParam("Too many event IDs.")));
++	}
++
++	let mut existing = Vec::new();
++	for event_id in body.event_ids {
++		if services
++			.timeline
++			.get_pdu(&event_id)
++			.await
++			.is_ok_and(|pdu| *pdu.room_id() == *room_id)
++		{
++			existing.push(event_id);
++		}
++	}
++
++	Ok(Json(json!({ "existing": existing })))
++}
++
+ /// Resolves an access token to an active local user, like the router's auth.
+ async fn authenticate(services: &crate::State, token: &str) -> Result<OwnedUserId> {
+ 	let Ok((user_id, _device_id, expires_at)) = services.users.find_from_token(token).await
+diff --git a/src/api/router.rs b/src/api/router.rs
+index e88f2a883..f8190fad1 100644
+--- a/src/api/router.rs
++++ b/src/api/router.rs
+@@ -331,6 +331,10 @@ fn register_client_room_routes(router: Router<State>) -> Router<State> {
+ 			"/_matrix/client/unstable/com.freechat/rooms/{room_id}/join_with_password",
+ 			post(client::freechat::join_with_password_route),
+ 		)
++		.route(
++			"/_matrix/client/unstable/com.freechat/rooms/{room_id}/existing_events",
++			post(client::freechat::existing_events_route),
++		)
+ 		.ruma_route(&client::report_event_route)
+ 		.ruma_route(&client::report_room_route)
+ 		.ruma_route(&client::report_user_route)

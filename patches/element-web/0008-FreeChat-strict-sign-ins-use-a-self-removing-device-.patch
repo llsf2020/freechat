@@ -1,0 +1,91 @@
+From 1f46f2b2f26831c1b5a0e18b6f96e2286078a600 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 09:05:19 +0000
+Subject: [PATCH 08/12] FreeChat: strict sign-ins use a self-removing device ID
+
+---
+ apps/web/src/Login.ts                    |  3 +++
+ apps/web/src/freechat/strictMode.test.ts |  8 ++++++++
+ apps/web/src/freechat/strictMode.ts      | 15 +++++++++++++++
+ 3 files changed, 26 insertions(+)
+
+diff --git a/apps/web/src/Login.ts b/apps/web/src/Login.ts
+index cb2828789c..d0fad67a92 100644
+--- a/apps/web/src/Login.ts
++++ b/apps/web/src/Login.ts
+@@ -24,6 +24,7 @@ import { getOAuthClientId } from "./utils/oauth/registerClient";
+ import { type IConfigOptions } from "./IConfigOptions";
+ import SdkConfig from "./SdkConfig";
+ import { isUserRegistrationSupported } from "./utils/oauth/isUserRegistrationSupported";
++import { getStrictMode, strictDeviceId } from "./freechat/strictMode";
+ 
+ /**
+  * Login flows supported by this client
+@@ -167,6 +168,8 @@ export default class Login {
+             password,
+             identifier,
+             initial_device_display_name: this.defaultDeviceDisplayName,
++            // FreeChat strict mode: the server removes this device once it is idle.
++            ...(getStrictMode().enabled ? { device_id: strictDeviceId() } : {}),
+         };
+ 
+         const tryFallbackHs = (originalError: Error): Promise<IMatrixClientCreds> => {
+diff --git a/apps/web/src/freechat/strictMode.test.ts b/apps/web/src/freechat/strictMode.test.ts
+index ad11b32cb0..30702753d6 100644
+--- a/apps/web/src/freechat/strictMode.test.ts
++++ b/apps/web/src/freechat/strictMode.test.ts
+@@ -18,6 +18,7 @@ import {
+     isStrictSession,
+     keepStrictModeChoice,
+     setStrictMode,
++    strictDeviceId,
+     watchStrictSession,
+ } from "./strictMode";
+ 
+@@ -118,6 +119,13 @@ describe("strict mode", () => {
+         expect(getStrictMode().enabled).toBe(true);
+     });
+ 
++    it("names strict devices so the server removes them when idle", () => {
++        setStrictMode({ enabled: true, idleMinutes: 15 });
++        const id = strictDeviceId();
++        expect(id).toMatch(/^FCS15_[0-9a-f]{16}$/);
++        expect(strictDeviceId()).not.toBe(id);
++    });
++
+     it("stops watching on sign-out", () => {
+         vi.useFakeTimers();
+         const logout = vi.fn();
+diff --git a/apps/web/src/freechat/strictMode.ts b/apps/web/src/freechat/strictMode.ts
+index 9b7fd9bb9b..08b3a10529 100644
+--- a/apps/web/src/freechat/strictMode.ts
++++ b/apps/web/src/freechat/strictMode.ts
+@@ -13,6 +13,9 @@ Please see LICENSE files in the repository root for full details.
+  * chosen time, signs out on the server, so no orphaned device keeps receiving keys. Signing in
+  * again takes the password and the recovery key.
+  *
++ * The homeserver backs this up: strict sign-ins use a device ID that tells it to delete the device
++ * once it has been idle for the chosen time (see `strictDeviceId`).
++ *
+  * The choice itself (on/off and the idle time) is stored in localStorage: it says nothing about
+  * the user. It applies from the next sign-in; turning it on signs out right away.
+  */
+@@ -51,6 +54,18 @@ export function setStrictMode(mode: StrictMode): void {
+     );
+ }
+ 
++/**
++ * Device ID for a strict sign-in: `FCS<idle minutes>_<random>`. The homeserver deletes such a
++ * device once its token has been unused for that long, which covers a browser that crashed or
++ * was killed before it could sign out.
++ */
++export function strictDeviceId(): string {
++    const random = Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, "0")).join(
++        "",
++    );
++    return `FCS${getStrictMode().idleMinutes}_${random}`;
++}
++
+ /**
+  * Whether the session currently running is a strict one. Fixed at sign-in, so turning strict mode
+  * off mid-session does not suddenly start persisting an in-memory session.
