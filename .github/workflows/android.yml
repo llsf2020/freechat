@@ -37,6 +37,16 @@ jobs:
           sudo docker image prune --all --force > /dev/null
           df -h /
 
+      # The build gets terminated when memory runs out (as upstream's CI found too), so add swap.
+      - name: More swap
+        run: |
+          sudo swapoff -a
+          sudo fallocate -l 8G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile > /dev/null
+          sudo swapon /mnt/swapfile
+          free -h
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

@@ -1,7 +1,8 @@
 From 7e5f0e7c3151b04b66cc4192040685f581a89897 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 09:05:19 +0000
-Subject: [PATCH 4/9] FreeChat: strict mode and global privacy settings on iOS
+Subject: [PATCH 04/10] FreeChat: strict mode and global privacy settings on
+ iOS
 
 Strict mode (per device, opt-in): sign-ins use the SDK's in-memory store and are
 never saved to the keychain, the app signs out on return after the chosen time

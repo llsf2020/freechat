@@ -1,0 +1,60 @@
+From aa159cd7083bf8af9c27e4cfbecb49954e6eddea Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 00:00:00 +0000
+Subject: [PATCH 10/10] FreeChat: fix the iOS build
+
+The media helper extension is nonisolated like FreeChat itself, so the expiry
+tracker can call it off the main actor, and the time rows use the Compound
+icon that exists (time, not timer).
+---
+ ElementX/Sources/FreeChat/FreeChatExpiry.swift         | 3 ++-
+ ElementX/Sources/FreeChat/FreeChatGlobalSettings.swift | 2 +-
+ ElementX/Sources/FreeChat/FreeChatRoomSettings.swift   | 4 ++--
+ 3 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/ElementX/Sources/FreeChat/FreeChatExpiry.swift b/ElementX/Sources/FreeChat/FreeChatExpiry.swift
+index cfbb2525c..2b5abebce 100644
+--- a/ElementX/Sources/FreeChat/FreeChatExpiry.swift
++++ b/ElementX/Sources/FreeChat/FreeChatExpiry.swift
+@@ -118,7 +118,8 @@ nonisolated final class FreeChatExpiryTracker: Sendable {
+     }
+ }
+ 
+-extension FreeChat {
++// Like FreeChat itself, not on the main actor: the expiry tracker calls it from its own context.
++nonisolated extension FreeChat {
+     /// MXCs of a message's files and thumbnails; for encrypted media they are the IDs of the encrypted files.
+     static func mediaMXCs(of content: TimelineItemContent) -> [String] {
+         guard case .msgLike(let msgLike) = content else { return [] }
+diff --git a/ElementX/Sources/FreeChat/FreeChatGlobalSettings.swift b/ElementX/Sources/FreeChat/FreeChatGlobalSettings.swift
+index 2977d967b..486767817 100644
+--- a/ElementX/Sources/FreeChat/FreeChatGlobalSettings.swift
++++ b/ElementX/Sources/FreeChat/FreeChatGlobalSettings.swift
+@@ -134,7 +134,7 @@ struct FreeChatGlobalSections: View {
+             ListRow(label: .default(title: FreeChatStrings.string(.strictTitle), icon: \.lockSolid),
+                     details: .title(FreeChatStrings.string(.strictOn)),
+                     kind: .label)
+-            ListRow(label: .default(title: FreeChatStrings.string(.strictIdle), icon: \.timer),
++            ListRow(label: .default(title: FreeChatStrings.string(.strictIdle), icon: \.time),
+                     kind: .picker(selection: Binding(get: { settings.strictMode.idleMinutes },
+                                                      set: { settings.setIdleMinutes($0) }),
+                                   items: idleChoices))
+diff --git a/ElementX/Sources/FreeChat/FreeChatRoomSettings.swift b/ElementX/Sources/FreeChat/FreeChatRoomSettings.swift
+index 9bbddb31d..4c3ab3e5b 100644
+--- a/ElementX/Sources/FreeChat/FreeChatRoomSettings.swift
++++ b/ElementX/Sources/FreeChat/FreeChatRoomSettings.swift
+@@ -157,12 +157,12 @@ struct FreeChatRoomSection: View {
+     @ViewBuilder
+     private var autoDeleteRow: some View {
+         if settings.canEditAutoDelete {
+-            ListRow(label: .default(title: FreeChatStrings.string(.autoDelete), icon: \.timer),
++            ListRow(label: .default(title: FreeChatStrings.string(.autoDelete), icon: \.time),
+                     kind: .picker(selection: Binding(get: { settings.roomTTL },
+                                                      set: { ttl in Task { await settings.setRoomTTL(ttl) } }),
+                                   items: choices(FreeChat.roomTTLPresets, current: settings.roomTTL)))
+         } else {
+-            ListRow(label: .default(title: FreeChatStrings.string(.autoDelete), icon: \.timer),
++            ListRow(label: .default(title: FreeChatStrings.string(.autoDelete), icon: \.time),
+                     details: .title(FreeChatStrings.duration(settings.roomTTL)),
+                     kind: .label)
+         }
