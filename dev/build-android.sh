@@ -20,9 +20,12 @@ TASKS=("$@")
 python3 "$ROOT/branding/apply.py" android
 
 cd "$ROOT/forks/element-x-android"
-# CI machines have no systemd user session (and enough memory): run Gradle directly there.
-if systemd-run --user --scope --quiet true 2>/dev/null; then
+# The memory cap protects small development machines. CI machines have enough memory and their Gradle
+# settings ask for more than the cap, so CI (which sets CI=true) runs Gradle directly.
+if [[ -z "${CI:-}" ]] && systemd-run --user --scope --quiet true 2>/dev/null; then
+	echo "Gradle runs with a 5 GB memory cap (systemd-run)" >&2
 	exec systemd-run --user --scope --quiet -p MemoryMax=5G -p MemorySwapMax=2G \
 		./gradlew --no-daemon --console=plain "${TASKS[@]}"
 fi
+echo "Gradle runs without a memory cap" >&2
 exec ./gradlew --no-daemon --console=plain "${TASKS[@]}"
