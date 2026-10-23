@@ -1,6 +1,6 @@
-From c96bfdd234cfb785c7f0d040b676dfa2191c4b9b Mon Sep 17 00:00:00 2001
+From b646e5fbfc3bef08868952a6de95413181e2e51b Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
-Date: Thu, 22 Oct 2026 09:05:19 +0000
+Date: Thu, 22 Oct 2026 00:00:00 +0000
 Subject: [PATCH 01/14] FreeChat: disappearing messages
 
 Rooms opt in with the com.freechat.disappearing state event

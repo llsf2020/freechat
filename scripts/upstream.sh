@@ -57,6 +57,16 @@ cmd_export() {
 	rm -rf "$out"
 	mkdir -p "$out"
 	git -C "$dir" format-patch --quiet --no-signature -o "$out" "$base..$branch"
+	# Only the day of a commit is published: commits that went through a rebase keep their original time and zone.
+	python3 - "$out"/*.patch <<-'PY'
+		import email.utils, re, sys, time
+		for path in sys.argv[1:]:
+		    text = open(path, encoding="utf-8").read()
+		    def day(m):
+		        t = email.utils.parsedate_to_datetime(m.group(1)).timestamp()
+		        return "Date: " + time.strftime("%a, %d %b %Y 00:00:00 +0000", time.gmtime(t))
+		    open(path, "w", encoding="utf-8").write(re.sub(r"^Date: (.+)$", day, text, count=1, flags=re.M))
+	PY
 	echo "exported $(ls "$out" | wc -l) patch(es) to patches/$name/ (base $base)"
 }
 

@@ -1,0 +1,147 @@
+From a56a614894b99d425ffb3d0e2a3533cab6cf8e3a Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 00:00:00 +0000
+Subject: [PATCH] FreeChat: room list previews are kept in memory only
+
+The latest event of a room holds the content of a message (the decrypted one
+in an encrypted room). It is no longer written to the state store with the
+room info; a value stored before is dropped when the room info is loaded.
+---
+ crates/matrix-sdk-base/src/room/room_info.rs  | 52 +++++++++++++++++--
+ .../src/latest_events/latest_event/mod.rs     | 10 ++--
+ 2 files changed, 54 insertions(+), 8 deletions(-)
+
+diff --git a/crates/matrix-sdk-base/src/room/room_info.rs b/crates/matrix-sdk-base/src/room/room_info.rs
+index 2b3b7eca9..df55721c3 100644
+--- a/crates/matrix-sdk-base/src/room/room_info.rs
++++ b/crates/matrix-sdk-base/src/room/room_info.rs
+@@ -637,7 +637,13 @@ pub struct RoomInfo {
+     pub(crate) encryption_state_synced: bool,
+ 
+     /// The latest event value of this room.
+-    #[serde(default)]
++    ///
++    /// FreeChat: kept in memory only. It holds the content of a message (the
++    /// decrypted one in an encrypted room), which must not outlive the process
++    /// in the state store; it is computed again from the event cache. It is
++    /// still read, so that [`Self::apply_migrations`] can drop a value stored
++    /// before.
++    #[serde(default, skip_serializing)]
+     pub(crate) latest_event_value: LatestEventValue,
+ 
+     /// Information about read receipts for this room.
+@@ -1370,6 +1376,14 @@ impl RoomInfo {
+             migrated = true;
+         }
+ 
++        // FreeChat: a latest event stored by an earlier version is dropped, and
++        // the room info is saved again without it.
++        if !matches!(self.latest_event_value, LatestEventValue::None) {
++            info!("Dropping the latest event stored with the room info");
++            self.latest_event_value = LatestEventValue::None;
++            migrated = true;
++        }
++
+         migrated
+     }
+ 
+@@ -1538,7 +1552,7 @@ mod tests {
+     use matrix_sdk_common::executor::spawn;
+     use matrix_sdk_test::{async_test, event_factory::EventFactory};
+     use ruma::{
+-        assign,
++        MilliSecondsSinceUnixEpoch, assign,
+         events::{
+             AnyRoomAccountDataEvent,
+             room::{
+@@ -1593,7 +1607,12 @@ mod tests {
+             last_prev_batch: Some("pb".to_owned()),
+             sync_info: SyncInfo::FullySynced,
+             encryption_state_synced: true,
+-            latest_event_value: LatestEventValue::None,
++            // Not serialized.
++            latest_event_value: LatestEventValue::RemoteInvite {
++                event_id: None,
++                timestamp: MilliSecondsSinceUnixEpoch(42u32.into()),
++                inviter: None,
++            },
+             base_info: Box::new(
+                 assign!(BaseRoomInfo::new(), { pinned_events: Some(RoomPinnedEventsEventContent::new(vec![owned_event_id!("$a")]).into()) }),
+             ),
+@@ -1625,7 +1644,6 @@ mod tests {
+             "last_prev_batch": "pb",
+             "sync_info": "FullySynced",
+             "encryption_state_synced": true,
+-            "latest_event_value": "None",
+             "base_info": {
+                 "avatar": null,
+                 "canonical_alias": null,
+@@ -1663,6 +1681,32 @@ mod tests {
+         assert_eq!(serde_json::to_value(info).unwrap(), info_json);
+     }
+ 
++    #[async_test]
++    async fn test_stored_latest_event_is_dropped() {
++        let store = SaveLockedStateStore::new(MemoryStore::new().into_state_store());
++
++        let mut info = RoomInfo::new(room_id!("!r:server.tld"), RoomState::Joined);
++        let mut json = serde_json::to_value(&info).unwrap();
++        // What earlier versions stored.
++        json["latest_event_value"] =
++            json!({ "RemoteInvite": { "event_id": null, "timestamp": 42, "inviter": null } });
++        info = serde_json::from_value(json).unwrap();
++        assert_matches!(info.latest_event_value, LatestEventValue::RemoteInvite { .. });
++
++        // Loading it drops the value and asks for the room info to be saved again.
++        assert!(info.apply_migrations(store.clone()).await);
++        assert_matches!(info.latest_event_value, LatestEventValue::None);
++        assert!(!info.apply_migrations(store).await);
++
++        // A value set in memory is never serialized.
++        info.set_latest_event(LatestEventValue::RemoteInvite {
++            event_id: None,
++            timestamp: MilliSecondsSinceUnixEpoch(42u32.into()),
++            inviter: None,
++        });
++        assert!(serde_json::to_value(&info).unwrap().get("latest_event_value").is_none());
++    }
++
+     #[async_test]
+     async fn test_room_info_migration_v1() {
+         let store = SaveLockedStateStore::new(MemoryStore::new().into_state_store());
+diff --git a/crates/matrix-sdk/src/latest_events/latest_event/mod.rs b/crates/matrix-sdk/src/latest_events/latest_event/mod.rs
+index 4b97e6a08..73d0585ab 100644
+--- a/crates/matrix-sdk/src/latest_events/latest_event/mod.rs
++++ b/crates/matrix-sdk/src/latest_events/latest_event/mod.rs
+@@ -275,9 +275,10 @@ impl LatestEvent {
+     }
+ 
+     /// Update the `RoomInfo` associated to this room to set the new
+-    /// [`LatestEventValue`], and persist it in the
++    /// [`LatestEventValue`], and save the `RoomInfo` in the
+     /// [`StateStore`][matrix_sdk_base::StateStore] (the one from
+-    /// [`Client::state_store`][crate::Client::state_store]).
++    /// [`Client::state_store`][crate::Client::state_store]). FreeChat: the
++    /// value itself is not saved, see `RoomInfo::latest_event_value`.
+     #[instrument(skip_all)]
+     async fn store(&mut self, new_value: LatestEventValue) {
+         let Some(room) = self.weak_room.get() else {
+@@ -915,7 +916,8 @@ mod tests_latest_event {
+         }
+ 
+         // Reload the client with the same store config, and see the
+-        // `LatestEventValue` is inside the `RoomInfo`.
++        // `LatestEventValue` is not inside the `RoomInfo` (FreeChat: it is kept
++        // in memory only).
+         {
+             let client = server
+                 .client_builder()
+@@ -925,7 +927,7 @@ mod tests_latest_event {
+             let room = client.get_room(&room_id).unwrap();
+             let latest_event = room.latest_event();
+ 
+-            assert_matches!(latest_event, LatestEventValue::Remote(_));
++            assert_matches!(latest_event, LatestEventValue::None);
+         }
+     }
+ }

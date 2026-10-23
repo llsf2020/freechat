@@ -1,6 +1,6 @@
-From 04e5bec69f12e34122cebcc4f18745ba1710ccae Mon Sep 17 00:00:00 2001
+From 04e8b398a54743986f43c4bc28dd806e1919240a Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
-Date: Thu, 22 Oct 2026 09:05:19 +0000
+Date: Thu, 22 Oct 2026 00:00:00 +0000
 Subject: [PATCH 09/12] FreeChat: notifications only say there are new messages
 
 Showing the message in notifications is now off by default, and while it is

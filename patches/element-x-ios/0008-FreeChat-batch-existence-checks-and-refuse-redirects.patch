@@ -1,6 +1,6 @@
-From 37983fcf590dcded780ab5fab448a60f5f5e2885 Mon Sep 17 00:00:00 2001
+From b2b69a937cb183efb1160a84fe2dcad511f4f95b Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
-Date: Thu, 22 Oct 2026 09:05:19 +0000
+Date: Thu, 22 Oct 2026 00:00:00 +0000
 Subject: [PATCH 08/10] FreeChat: batch existence checks and refuse redirects
  on iOS
 

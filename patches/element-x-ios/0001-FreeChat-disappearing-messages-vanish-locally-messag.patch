@@ -1,6 +1,6 @@
-From 1a67b5b70ef51fea71d0ed34948f98ec2a9da5f9 Mon Sep 17 00:00:00 2001
+From d16d3129c4b39a2186ac1bd69bdd33384a9b41c1 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
-Date: Thu, 22 Oct 2026 09:05:19 +0000
+Date: Thu, 22 Oct 2026 00:00:00 +0000
 Subject: [PATCH 01/10] FreeChat: disappearing messages vanish locally;
  messages stay off disk
 
