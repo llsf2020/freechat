@@ -82,12 +82,13 @@ if [ "$SETUP" = 1 ]; then
 	run_step "set up (a few minutes the first time)" "$LOGS/setup.log" bash -c "cd '$IOS' && swift run tools setup-project" || exit 1
 fi
 
-# The simulator build needs no signing and no Apple developer account.
+# The simulator build needs no signing and no Apple developer account. Only arm64: the simulator of an Apple
+# silicon Mac, and the only slice dev/build-rust-sdk.sh builds.
 run_step "build" "$LOGS/build.log" xcodebuild \
 	-project "$IOS/ElementX.xcodeproj" -scheme ElementX \
 	-destination "generic/platform=iOS Simulator" \
 	-derivedDataPath "$IOS/build/DerivedData" \
-	CODE_SIGNING_ALLOWED=NO build
+	ARCHS=arm64 CODE_SIGNING_ALLOWED=NO build
 BUILD_OK=$?
 
 TEST_OK=1
