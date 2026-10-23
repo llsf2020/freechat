@@ -1,0 +1,271 @@
+From 279aec8e02855a3a30d3f788bc50951f8a4ea76f Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 00:00:00 +0000
+Subject: [PATCH 2/2] FreeChat: erase events locally
+
+Room::erase_events_locally (FFI) and RoomEventCache::erase_events_locally
+replace events, and their edits and reactions, by their redacted form in the
+event cache, in memory and in the store, without telling the server. Only the
+ID, type, sender and time remain; timelines show them as redacted. For
+disappearing messages the server has already deleted.
+---
+ bindings/matrix-sdk-ffi/src/room/mod.rs       | 18 ++++
+ .../src/event_cache/caches/room/mod.rs        | 21 +++++
+ .../src/event_cache/caches/room/state.rs      | 71 ++++++++++++++-
+ .../tests/integration/event_cache/mod.rs      | 88 +++++++++++++++++++
+ 4 files changed, 197 insertions(+), 1 deletion(-)
+
+diff --git a/bindings/matrix-sdk-ffi/src/room/mod.rs b/bindings/matrix-sdk-ffi/src/room/mod.rs
+index c018a38a4..a66d209c8 100644
+--- a/bindings/matrix-sdk-ffi/src/room/mod.rs
++++ b/bindings/matrix-sdk-ffi/src/room/mod.rs
+@@ -580,6 +580,24 @@ impl Room {
+         Ok(())
+     }
+ 
++    /// FreeChat: erase events from this device only, without telling the
++    /// server (e.g. disappearing messages the server has already deleted).
++    ///
++    /// In the event cache, in memory and on disk, each event and its edits
++    /// and reactions keep only their ID, type, sender and time; timelines show
++    /// them like redacted events. Events the cache doesn't know are skipped.
++    pub async fn erase_events_locally(&self, event_ids: Vec<String>) -> Result<(), ClientError> {
++        let event_ids =
++            event_ids.into_iter().map(EventId::parse).collect::<Result<Vec<_>, _>>()?;
++        let client = self.inner.client();
++        let Some(event_cache) = client.event_cache() else {
++            return Ok(());
++        };
++        let (room_event_cache, _drop_handles) = event_cache.room(self.inner.room_id()).await?;
++        room_event_cache.erase_events_locally(&event_ids).await?;
++        Ok(())
++    }
++
+     pub fn active_members_count(&self) -> u64 {
+         self.inner.active_members_count()
+     }
+diff --git a/crates/matrix-sdk/src/event_cache/caches/room/mod.rs b/crates/matrix-sdk/src/event_cache/caches/room/mod.rs
+index 30344400c..f8e180a2d 100644
+--- a/crates/matrix-sdk/src/event_cache/caches/room/mod.rs
++++ b/crates/matrix-sdk/src/event_cache/caches/room/mod.rs
+@@ -283,6 +283,27 @@ impl RoomEventCache {
+         Ok(())
+     }
+ 
++    /// FreeChat: erase events from this room's cache, in memory and in the
++    /// store, without telling the server. Each event, and its edits and
++    /// reactions, keeps only its ID, type, sender and time, and is shown like
++    /// a redacted event.
++    pub async fn erase_events_locally(&self, event_ids: &[OwnedEventId]) -> Result<()> {
++        let mut state = self.inner.state.write().await?;
++        let diffs = state.erase_events_locally(event_ids).await?;
++
++        if !diffs.is_empty() {
++            self.inner.update_sender.send(
++                RoomEventCacheUpdate::UpdateTimelineEvents(TimelineVectorDiffs {
++                    diffs,
++                    origin: EventsOrigin::Cache,
++                }),
++                Some(RoomEventCacheGenericUpdate { room_id: self.inner.room_id.clone() }),
++            );
++        }
++
++        Ok(())
++    }
++
+     /// Get a reference to the [`RoomEventCacheUpdateSender`].
+     pub(in super::super) fn update_sender(&self) -> &RoomEventCacheUpdateSender {
+         &self.inner.update_sender
+diff --git a/crates/matrix-sdk/src/event_cache/caches/room/state.rs b/crates/matrix-sdk/src/event_cache/caches/room/state.rs
+index bc056d3f2..06c7a914e 100644
+--- a/crates/matrix-sdk/src/event_cache/caches/room/state.rs
++++ b/crates/matrix-sdk/src/event_cache/caches/room/state.rs
+@@ -27,12 +27,13 @@ use matrix_sdk_base::{
+ };
+ use matrix_sdk_common::executor::spawn;
+ use ruma::{
+-    EventId, OwnedEventId, OwnedRoomId, OwnedUserId,
++    EventId, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedRoomId, OwnedUserId,
+     events::{
+         receipt::ReceiptEventContent, relation::RelationType,
+         room::redaction::SyncRoomRedactionEvent,
+     },
+     room_version_rules::RoomVersionRules,
++    serde::Raw,
+ };
+ use tokio::sync::broadcast::Sender;
+ use tracing::{debug, error, instrument, trace};
+@@ -722,6 +723,74 @@ impl<'a> StateLockWriteGuard<'a, RoomEventCacheState> {
+         Ok(())
+     }
+ 
++    /// FreeChat: erase events from this room's cache, in memory and in the
++    /// store, without telling the server (e.g. disappearing messages the
++    /// server has already deleted).
++    ///
++    /// Each event, and its edits and reactions, is replaced by its redacted
++    /// form, as a plain event: only its ID, type, sender and time remain, so
++    /// it is shown like a redacted event. Thread and pinned-event caches
++    /// loaded in memory keep their copy until they are reloaded.
++    #[must_use = "Propagate `VectorDiff` updates via `TimelineVectorDiffs`"]
++    pub async fn erase_events_locally(
++        &mut self,
++        event_ids: &[OwnedEventId],
++    ) -> Result<Vec<VectorDiff<Event>>, EventCacheError> {
++        let mut targets = Vec::new();
++
++        for event_id in event_ids {
++            if let Some(found) = self.find_event(event_id).await? {
++                targets.push(found);
++            }
++
++            let relations = find_event_relations(
++                event_id,
++                &self.room_id,
++                Some(vec![RelationType::Replacement, RelationType::Annotation]),
++                &self.room_linked_chunk,
++                &self.store,
++            )
++            .await?;
++
++            for relation in relations {
++                if let Some(relation_id) = relation.event_id()
++                    && let Some(found) = self.find_event(relation_id).await?
++                {
++                    targets.push(found);
++                }
++            }
++        }
++
++        for (location, event) in targets {
++            let Some(event_id) = event.event_id() else { continue };
++
++            // Only kept as `unsigned.redacted_because`, so that the event is
++            // seen as redacted.
++            let redaction = serde_json::json!({
++                "type": "m.room.redaction",
++                "event_id": format!("$freechat-erased-{event_id}"),
++                "sender": self.state.own_user_id,
++                "origin_server_ts": MilliSecondsSinceUnixEpoch::now(),
++                "redacts": event_id,
++                "content": { "redacts": event_id },
++            });
++            let redaction = Raw::new(&redaction).expect("JSON is serializable").cast_unchecked();
++
++            let Some(redacted) =
++                apply_redaction(event.raw(), &redaction, &self.room_version_rules.redaction)
++            else {
++                error!(%event_id, "could not erase an event locally");
++                continue;
++            };
++
++            self.replace_event_at(location, Event::from_plaintext(redacted)).await?;
++        }
++
++        self.update_read_receipts(None).await?;
++
++        Ok(self.room_linked_chunk_mut().updates_as_vector_diffs())
++    }
++
+     /// If the given event is a redaction, try to retrieve the to-be-redacted
+     /// event in the chunk, and replace it by the redacted form.
+     #[instrument(skip_all)]
+diff --git a/crates/matrix-sdk/tests/integration/event_cache/mod.rs b/crates/matrix-sdk/tests/integration/event_cache/mod.rs
+index 2c5cc5637..70b6a4c8a 100644
+--- a/crates/matrix-sdk/tests/integration/event_cache/mod.rs
++++ b/crates/matrix-sdk/tests/integration/event_cache/mod.rs
+@@ -1311,6 +1311,94 @@ async fn test_dont_delete_gap_that_wasnt_inserted() {
+     assert!(stream.is_empty());
+ }
+ 
++#[async_test]
++async fn test_erase_events_locally() {
++    let server = MatrixMockServer::new().await;
++
++    let state_memory_store = matrix_sdk_base::store::MemoryStore::new();
++    let event_cache_store = Arc::new(MemoryStore::new());
++    let store_config = StoreConfig::new(CrossProcessLockConfig::multi_process("hodlor"))
++        .state_store(state_memory_store)
++        .event_cache_store(event_cache_store);
++    let client = server
++        .client_builder()
++        .on_builder(|builder| builder.store_config(store_config.clone()))
++        .build()
++        .await;
++
++    let room_id = room_id!("!omelette:fromage.fr");
++    let f = EventFactory::new().room(room_id).sender(user_id!("@a:b.c"));
++
++    // A message, its edit, a reaction to it, and another message.
++    server
++        .sync_room(
++            &client,
++            JoinedRoomBuilder::new(room_id)
++                .add_timeline_event(f.text_msg("secret one").event_id(event_id!("$1")))
++                .add_timeline_event(
++                    f.text_msg("* secret two")
++                        .edit(
++                            event_id!("$1"),
++                            RoomMessageEventContentWithoutRelation::text_plain("secret two"),
++                        )
++                        .event_id(event_id!("$2")),
++                )
++                .add_timeline_event(
++                    f.reaction(event_id!("$1"), "secret three").event_id(event_id!("$3")),
++                )
++                .add_timeline_event(f.text_msg("kept").event_id(event_id!("$4"))),
++        )
++        .await;
++
++    let (room_event_cache, _drop_handles) =
++        client.event_cache().unwrap().room(room_id).await.unwrap();
++
++    let (events, mut subscriber) = room_event_cache.subscribe().await.unwrap();
++    if events.is_empty() {
++        assert_let_timeout!(
++            Ok(RoomEventCacheUpdate::UpdateTimelineEvents(TimelineVectorDiffs { .. })) =
++                subscriber.recv()
++        );
++    }
++
++    room_event_cache.erase_events_locally(&[event_id!("$1").to_owned()]).await.unwrap();
++
++    // Observers are told about the three replaced events.
++    assert_let_timeout!(
++        Ok(RoomEventCacheUpdate::UpdateTimelineEvents(TimelineVectorDiffs { diffs, .. })) =
++            subscriber.recv()
++    );
++    assert_eq!(diffs.len(), 3);
++    for diff in &diffs {
++        assert_let!(VectorDiff::Set { value, .. } = diff);
++        assert!(value.raw().json().get().contains("secret").not());
++    }
++
++    let check = |events: Vec<TimelineEvent>| {
++        assert_eq!(events.len(), 4);
++        for event in &events[..3] {
++            let ev = event.raw().cast_ref_unchecked::<AnySyncMessageLikeEvent>();
++            assert!(ev.deserialize().unwrap().is_redacted());
++            assert!(ev.json().get().contains("secret").not());
++        }
++        assert_event_matches_msg(&events[3], "kept");
++    };
++    check(room_event_cache.events().await.unwrap());
++
++    // The store has the erased events too.
++    drop(room_event_cache);
++    drop(_drop_handles);
++    drop(client);
++
++    let client = server
++        .client_builder()
++        .on_builder(|builder| builder.store_config(store_config))
++        .build()
++        .await;
++    let (cache, _drop_handles) = client.event_cache().unwrap().room(room_id).await.unwrap();
++    check(cache.events().await.unwrap());
++}
++
+ #[async_test]
+ async fn test_apply_redaction_when_redaction_comes_later() {
+     let server = MatrixMockServer::new().await;

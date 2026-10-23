@@ -1,7 +1,7 @@
 From 85d933268c3e95c99410659244a45f7faf4f5109 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 08/16] FreeChat: remove per-account data of sessions that no
+Subject: [PATCH 08/17] FreeChat: remove per-account data of sessions that no
  longer exist
 
 Session preferences, push settings and the push client secret (keyed by user ID)

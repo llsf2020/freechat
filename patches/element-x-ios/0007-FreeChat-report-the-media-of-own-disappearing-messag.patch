@@ -1,7 +1,7 @@
 From 6bb5444533ae0729b3ac08ee7e7c52fe14c0598a Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 07/10] FreeChat: report the media of own disappearing messages
+Subject: [PATCH 07/11] FreeChat: report the media of own disappearing messages
  on iOS
 
 Same as Android: after sending, the MXCs of the message's files and thumbnails

@@ -1,0 +1,135 @@
+From 676f545a5e61c397340af7addfda402f96d9118e Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 00:00:00 +0000
+Subject: [PATCH 11/11] FreeChat: erase disappearing messages from the local
+ event cache
+
+Messages hidden because they expired or the server purged them are also erased
+from the Rust SDK's event cache, in memory and on disk.
+---
+ .../Sources/FreeChat/FreeChatExpiry.swift     | 41 ++++++++++++++++++-
+ .../Sources/Services/Client/ClientProxy.swift |  1 +
+ .../TimelineController.swift                  |  4 ++
+ UnitTests/Sources/FreeChatTests.swift         |  1 +
+ 4 files changed, 45 insertions(+), 2 deletions(-)
+
+diff --git a/ElementX/Sources/FreeChat/FreeChatExpiry.swift b/ElementX/Sources/FreeChat/FreeChatExpiry.swift
+index 2b5abebce..8307c0942 100644
+--- a/ElementX/Sources/FreeChat/FreeChatExpiry.swift
++++ b/ElementX/Sources/FreeChat/FreeChatExpiry.swift
+@@ -9,15 +9,36 @@ import Foundation
+ import MatrixRustSDK
+ import Synchronization
+ 
+-/// The signed-in session's FreeChat API, for code far from the `ClientProxy` (timelines).
++/// The signed-in session's FreeChat API and SDK client, for code far from the `ClientProxy` (timelines).
+ /// Element X iOS runs one account at a time.
+ nonisolated enum FreeChatSession {
++    private nonisolated struct WeakClient {
++        weak var value: ClientProtocol?
++    }
++
+     private static let currentAPI = Mutex<FreeChatAPI?>(nil)
++    // Weak: signing out must not keep the client alive.
++    private static let currentClient = Mutex(WeakClient())
+ 
+     static var api: FreeChatAPI? {
+         get { currentAPI.withLock { $0 } }
+         set { currentAPI.withLock { $0 = newValue } }
+     }
++
++    static var client: ClientProtocol? {
++        get { currentClient.withLock { $0.value } }
++        set { currentClient.withLock { $0.value = newValue } }
++    }
++
++    /// Erases events from this device only, without telling the server: in the SDK's event cache, in memory and on
++    /// disk, each event and its edits and reactions keep only their ID, type, sender and time.
++    static func eraseEventsLocally(roomID: String, eventIDs: Set<String>) async {
++        do {
++            try await client?.getRoom(roomId: roomID)?.eraseEventsLocally(eventIds: Array(eventIDs))
++        } catch {
++            MXLog.error("FreeChat: erasing events failed in \(roomID): \(error)")
++        }
++    }
+ }
+ 
+ /// When a timeline last looked for expired and purged messages.
+@@ -31,7 +52,7 @@ nonisolated struct FreeChatExpiryChecks {
+ /// The server purges expired messages without leaving a redaction. `com.freechat.expires_at` (room auto-delete
+ /// and the server cap) is honoured to the second, even offline. Messages that burn after reading, whose expiry
+ /// this device cannot compute, are dropped once the server says they no longer exist. Redacted messages are
+-/// hidden as well: deleted messages leave no trace.
++/// hidden as well: deleted messages leave no trace. Hidden messages are also erased from the SDK's event cache.
+ ///
+ /// It also picks the user's own disappearing messages whose media should be reported to the server, so the files
+ /// are deleted with them.
+@@ -40,6 +61,7 @@ nonisolated final class FreeChatExpiryTracker: Sendable {
+         var markers = [String: FreeChat.ExpiryMarkers]()
+         var purged = Set<String>()
+         var reportedMedia = Set<String>()
++        var erased = Set<String>()
+     }
+ 
+     private let state = Mutex(State())
+@@ -73,6 +95,21 @@ nonisolated final class FreeChatExpiryTracker: Sendable {
+         })
+     }
+ 
++    /// Messages that expired or that the server purged and are not erased from the SDK's event cache yet. They count
++    /// as erased from now on.
++    func eventIDsToErase(in items: [TimelineItemProxy], now: Date = .now) -> Set<String> {
++        let purged = state.withLock { $0.purged }
++        let gone = Set(events(in: items).compactMap { item -> String? in
++            guard let eventID = item.id.eventID else { return nil }
++            return purged.contains(eventID) || markers(for: item, eventID: eventID).isExpired(now: now) ? eventID : nil
++        })
++        return state.withLock { state in
++            let fresh = gone.subtracting(state.erased)
++            state.erased.formUnion(fresh)
++            return fresh
++        }
++    }
++
+     /// Remembers messages the server no longer has. Returns whether there were any.
+     func markPurged(_ eventIDs: Set<String>) -> Bool {
+         guard !eventIDs.isEmpty else { return false }
+diff --git a/ElementX/Sources/Services/Client/ClientProxy.swift b/ElementX/Sources/Services/Client/ClientProxy.swift
+index 28b60c994..974c0f9d1 100644
+--- a/ElementX/Sources/Services/Client/ClientProxy.swift
++++ b/ElementX/Sources/Services/Client/ClientProxy.swift
+@@ -316,6 +316,7 @@ class ClientProxy: ClientProxyProtocol {
+         liveLocationOwnInfoUpdatesListenerTaskHandle = createLiveLocationOwnInfoUpdatesObserver()
+         
+         FreeChatSession.api = freechatAPI
++        FreeChatSession.client = client
+     }
+     
+     var userID: String {
+diff --git a/ElementX/Sources/Services/Timeline/TimelineController/TimelineController.swift b/ElementX/Sources/Services/Timeline/TimelineController/TimelineController.swift
+index 2f976c997..ff6e55bf9 100644
+--- a/ElementX/Sources/Services/Timeline/TimelineController/TimelineController.swift
++++ b/ElementX/Sources/Services/Timeline/TimelineController/TimelineController.swift
+@@ -562,6 +562,10 @@ class TimelineController: TimelineControllerProtocol {
+                 }
+             }
+         }
++        let toErase = freechatExpiry.eventIDsToErase(in: provider.itemProxies, now: now)
++        if !toErase.isEmpty {
++            await FreeChatSession.eraseEventsLocally(roomID: roomID, eventIDs: toErase)
++        }
+         if changed {
+             await updateTimelineItems(itemProxies: provider.itemProxies, paginationState: provider.paginationState)
+         }
+diff --git a/UnitTests/Sources/FreeChatTests.swift b/UnitTests/Sources/FreeChatTests.swift
+index bf3862580..ee098331b 100644
+--- a/UnitTests/Sources/FreeChatTests.swift
++++ b/UnitTests/Sources/FreeChatTests.swift
+@@ -84,6 +84,7 @@ struct FreeChatTests {
+         #expect(!tracker.markPurged([]))
+         #expect(tracker.markPurged(["$a"]))
+         #expect(tracker.unresolvedEventIDs(in: []).isEmpty)
++        #expect(tracker.eventIDsToErase(in: []).isEmpty)
+     }
+ 
+     @Test

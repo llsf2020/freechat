@@ -1,0 +1,138 @@
+From e2b09e3f861ef009bdfa2c6ef06d6bcfbc68aa3c Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 00:00:00 +0000
+Subject: [PATCH 17/17] FreeChat: erase disappearing messages from the local
+ event cache
+
+Messages hidden because they expired or the server purged them are also erased
+from the Rust SDK's event cache, in memory and on disk.
+---
+ .../freechat/DisappearingTimelineFilter.kt    | 36 +++++++++++++++----
+ .../DisappearingTimelineFilterTest.kt         |  8 +++++
+ .../libraries/matrix/api/MatrixClient.kt      |  7 ++++
+ .../libraries/matrix/impl/RustMatrixClient.kt |  7 ++++
+ 4 files changed, 52 insertions(+), 6 deletions(-)
+
+diff --git a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilter.kt b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilter.kt
+index c0df0134fe..c8dcfaa5e7 100644
+--- a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilter.kt
++++ b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilter.kt
+@@ -43,7 +43,8 @@ import timber.log.Timber
+  *
+  * The server purges expired messages without leaving a redaction. `unsigned.com.freechat.expires_at`
+  * (room auto-delete) is honoured to the second, even offline. Messages that burn after reading, whose
+- * expiry this device cannot compute, are dropped once the server says they no longer exist.
++ * expiry this device cannot compute, are dropped once the server says they no longer exist. Hidden messages are
++ * also erased from the Rust SDK's event cache, in memory and on disk.
+  *
+  * It also reports the media of the user's own disappearing messages, so the server deletes the files with them.
+  */
+@@ -91,6 +92,18 @@ class DefaultDisappearingTimelineFilter(
+                 delay(CHECK_INTERVAL_MS)
+             }
+         }
++        launch {
++            val erased = HashSet<EventId>()
++            combine(latest, purged, ticker()) { list, gone, now -> goneEventIds(list, now, gone, markers::of) }
++                .distinctUntilChanged()
++                .collect { gone ->
++                    val fresh = gone - erased
++                    if (fresh.isNotEmpty()) {
++                        erased += fresh
++                        client.eraseEventsLocally(roomId, fresh).onFailure { Timber.w(it, "FreeChat: erasing events failed in $roomId") }
++                    }
++                }
++        }
+         combine(latest, purged, ticker()) { list, gone, now -> hideExpired(list, now, gone, markers::of) }
+             .collect { send(it) }
+     }.distinctUntilChanged()
+@@ -119,11 +132,7 @@ internal fun hideExpired(
+     purged: Set<EventId>,
+     markersOf: (TimelineItem.Event) -> ExpiryMarkers,
+ ): List<TimelineItem> {
+-    fun TimelineItem.Event.isGone(): Boolean {
+-        if (eventId in purged) return true
+-        val expiresAt = markersOf(this).expiresAt
+-        return expiresAt != null && expiresAt <= now
+-    }
++    fun TimelineItem.Event.isGone() = isGone(now, purged, markersOf)
+ 
+     return items.mapNotNull { item ->
+         when (item) {
+@@ -141,6 +150,21 @@ internal fun hideExpired(
+     }
+ }
+ 
++/** IDs of the events [hideExpired] hides. */
++internal fun goneEventIds(
++    items: List<TimelineItem>,
++    now: Long,
++    purged: Set<EventId>,
++    markersOf: (TimelineItem.Event) -> ExpiryMarkers,
++): Set<EventId> =
++    items.events().filter { it.isGone(now, purged, markersOf) }.mapNotNull { it.eventId }.toSet()
++
++private fun TimelineItem.Event.isGone(now: Long, purged: Set<EventId>, markersOf: (TimelineItem.Event) -> ExpiryMarkers): Boolean {
++    if (eventId in purged) return true
++    val expiresAt = markersOf(this).expiresAt
++    return expiresAt != null && expiresAt <= now
++}
++
+ /** The user's own sent disappearing messages with media not reported yet, and the MXCs of each. */
+ internal fun mediaToReport(
+     items: List<TimelineItem>,
+diff --git a/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilterTest.kt b/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilterTest.kt
+index a5033ae1e3..da715bbd2c 100644
+--- a/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilterTest.kt
++++ b/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/DisappearingTimelineFilterTest.kt
+@@ -61,6 +61,14 @@ class DisappearingTimelineFilterTest {
+         assertThat(hideExpired(listOf(group), now = 9999, purged = setOf(EventId("\$burn")), markersOf = ::markers)).isEmpty()
+     }
+ 
++    @Test
++    fun `hidden messages, also in groups, are the ones to erase`() {
++        val group = TimelineItem.GroupedEvents(UniqueId("g"), persistentListOf(burn), persistentListOf())
++        assertThat(goneEventIds(listOf(plain, timed, group), now = 5000, purged = setOf(EventId("\$burn")), markersOf = ::markers))
++            .containsExactly(EventId("\$timed"), EventId("\$burn"))
++        assertThat(goneEventIds(listOf(plain, timed), now = 4999, purged = emptySet(), markersOf = ::markers)).isEmpty()
++    }
++
+     private val image = aTimelineItemImageContent().copy(
+         mediaSource = MediaSource("mxc://server/main", json = "{}"),
+         thumbnailSource = MediaSource("mxc://server/thumb#auto"),
+diff --git a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/MatrixClient.kt b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/MatrixClient.kt
+index d085b73bb7..3b8172a4e8 100644
+--- a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/MatrixClient.kt
++++ b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/MatrixClient.kt
+@@ -525,6 +525,13 @@ interface MatrixClient : ClientUrlContentFetcher {
+      */
+     suspend fun freechatRequest(method: String, path: String, jsonBody: String?): Result<String> =
+         Result.failure(UnsupportedOperationException("freechatRequest"))
++
++    /**
++     * FreeChat: erases events from this device only, without telling the server (disappearing messages the server
++     * has already deleted). In the Rust SDK's event cache, in memory and on disk, each event and its edits and
++     * reactions keep only their ID, type, sender and time. The default does nothing.
++     */
++    suspend fun eraseEventsLocally(roomId: RoomId, eventIds: Collection<EventId>): Result<Unit> = Result.success(Unit)
+ }
+ 
+ /**
+diff --git a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt
+index e172a437a9..451fdc4d3b 100644
+--- a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt
++++ b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt
+@@ -955,6 +955,13 @@ class RustMatrixClient(
+         }
+     }
+ 
++    override suspend fun eraseEventsLocally(roomId: RoomId, eventIds: Collection<EventId>): Result<Unit> = withContext(sessionDispatcher) {
++        runCatchingExceptions {
++            innerClient.getRoom(roomId.value)?.use { it.eraseEventsLocally(eventIds.map { id -> id.value }) }
++            Unit
++        }
++    }
++
+     // FreeChat: homeserver extensions. Plain HttpURLConnection keeps the module free of new dependencies.
+     override suspend fun freechatRequest(method: String, path: String, jsonBody: String?): Result<String> = withContext(sessionDispatcher) {
+         runCatchingExceptions {

@@ -1,7 +1,7 @@
 From a9f68c7e1fbbb1a5ebb77bcc2367ee55c7afcf2e Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 10/10] FreeChat: fix the iOS build
+Subject: [PATCH 10/11] FreeChat: fix the iOS build
 
 The media helper extension is nonisolated like FreeChat itself, so the expiry
 tracker can call it off the main actor, and the time rows use the Compound
