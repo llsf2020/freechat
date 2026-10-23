@@ -1,0 +1,29 @@
+From 562aaefba2ffd33670ee47c59e84b8833200b850 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 00:00:00 +0000
+Subject: [PATCH 15/15] FreeChat: the strict session test follows the new
+ avatar data field
+
+---
+ .../libraries/sessionstorage/impl/StrictSessionStoreTest.kt    | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/libraries/session-storage/impl/src/test/kotlin/io/element/android/libraries/sessionstorage/impl/StrictSessionStoreTest.kt b/libraries/session-storage/impl/src/test/kotlin/io/element/android/libraries/sessionstorage/impl/StrictSessionStoreTest.kt
+index 838c5fb5a1..608e9c11dc 100644
+--- a/libraries/session-storage/impl/src/test/kotlin/io/element/android/libraries/sessionstorage/impl/StrictSessionStoreTest.kt
++++ b/libraries/session-storage/impl/src/test/kotlin/io/element/android/libraries/sessionstorage/impl/StrictSessionStoreTest.kt
+@@ -51,12 +51,13 @@ class StrictSessionStoreTest {
+     fun `a strict session is never written to the database`() = runTest {
+         store.addSession(strict)
+         store.updateData(strict.copy(accessToken = "refreshed"))
+-        store.updateUserProfile(strict.userId, "Alice", null)
++        store.updateUserProfile(strict.userId, "Alice", null, "avatar-bytes")
+ 
+         assertThat(database.sessionDataQueries.selectAll().executeAsList()).isEmpty()
+         val session = store.getSession(strict.userId)!!
+         assertThat(session.accessToken).isEqualTo("refreshed")
+         assertThat(session.userDisplayName).isEqualTo("Alice")
++        assertThat(session.userAvatarData).isEqualTo("avatar-bytes")
+     }
+ 
+     @Test

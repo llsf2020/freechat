@@ -1,7 +1,7 @@
 From 817181ae12dbd5cd9e86bbf01c39fb7c058dafe7 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 00:00:00 +0000
-Subject: [PATCH 14/14] FreeChat: no automatic back pagination
+Subject: [PATCH 14/15] FreeChat: no automatic back pagination
 
 Upstream turned it on by default in v26.10.0: older messages of every room are
 fetched in the background and cached on the device. Off again, and finished so
