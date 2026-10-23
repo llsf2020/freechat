@@ -4,7 +4,7 @@
 
 A self-hosted, Telegram-like messenger with chat, voice and video (including group calls), plus **auto-delete and burn after reading**. It is built on the Matrix protocol, and every component is open source.
 
-> ⚠️ The project is still in testing. The iOS client code is written but has not been compiled or tested on a Mac yet.
+> ⚠️ The project is still in testing. The iOS app builds and passes its unit tests in CI, but has not been tried on a real device yet.
 
 ## Features
 
@@ -25,7 +25,7 @@ A self-hosted, Telegram-like messenger with chat, voice and video (including gro
 | Calls | LiveKit + lk-jwt-service + Element Call | used as released |
 | Web | Element Web | ✅ UI for the above; messages kept in memory only; strict mode |
 | Android | Element X Android | ✅ UI for the above; screenshot blocking; messages not kept across processes; strict mode |
-| iOS | Element X iOS | ✅ code written (not yet tested on a Mac): the above, hidden while recording, app switcher cover, strict mode |
+| iOS | Element X iOS | ✅ the above, hidden while recording, app switcher cover, strict mode (not yet tried on a real device) |
 
 Only **web, Android and iOS** are supported for now. Desktop apps (Windows, macOS, Linux) are not planned yet.
 

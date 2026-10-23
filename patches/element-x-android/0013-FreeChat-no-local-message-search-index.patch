@@ -1,0 +1,46 @@
+From 56bb79fe9709579486f53ef37e9674205a93a39b Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 00:00:00 +0000
+Subject: [PATCH 13/14] FreeChat: no local message search index
+
+Upstream turned message search on by default: it indexes decrypted messages
+on disk, where they would outlive auto-delete and burn after reading. The flag
+is now off and finished, so it cannot be enabled in developer options, and the
+existing cleanup deletes a stale index at startup.
+---
+ .../android/libraries/featureflag/api/FeatureFlags.kt       | 6 ++++--
+ .../libraries/matrix/impl/RustMatrixClientFactoryTest.kt    | 4 ++--
+ 2 files changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/libraries/featureflag/api/src/main/kotlin/io/element/android/libraries/featureflag/api/FeatureFlags.kt b/libraries/featureflag/api/src/main/kotlin/io/element/android/libraries/featureflag/api/FeatureFlags.kt
+index 61124c6ce3..f68a30befb 100644
+--- a/libraries/featureflag/api/src/main/kotlin/io/element/android/libraries/featureflag/api/FeatureFlags.kt
++++ b/libraries/featureflag/api/src/main/kotlin/io/element/android/libraries/featureflag/api/FeatureFlags.kt
+@@ -151,8 +151,10 @@ enum class FeatureFlags(
+         key = "feature.message_search",
+         title = "Message search",
+         description = "Index messages locally so they can be searched. Only messages received while enabled are indexed.",
+-        defaultValue = { true },
+-        isFinished = false,
++        // FreeChat: always off. The index would keep decrypted messages on disk, past auto-delete and burn after
++        // reading. Finished, so it cannot be turned on in developer options; a stale index is deleted at startup.
++        defaultValue = { false },
++        isFinished = true,
+     ),
+     MessageMultiSelect(
+         key = "feature.message_multi_select",
+diff --git a/libraries/matrix/impl/src/test/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClientFactoryTest.kt b/libraries/matrix/impl/src/test/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClientFactoryTest.kt
+index d5d8c62515..f676e51ae9 100644
+--- a/libraries/matrix/impl/src/test/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClientFactoryTest.kt
++++ b/libraries/matrix/impl/src/test/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClientFactoryTest.kt
+@@ -55,8 +55,8 @@ class RustMatrixClientFactoryTest {
+ 
+         assertThat(result.sessionId).isEqualTo(SessionId("@alice:server.org"))
+         runCurrent()
+-        // 2 workers are scheduled: one for the search backfill and one for the vacuum
+-        scheduleWorkersLambda.assertions().isCalledExactly(2)
++        // FreeChat: message search is always off, so only the vacuum worker is scheduled, not the search backfill
++        scheduleWorkersLambda.assertions().isCalledExactly(1)
+         result.destroy()
+     }
+ 

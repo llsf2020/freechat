@@ -1,7 +1,7 @@
-From 4e0720c74652a974caa275da060b1b866012c113 Mon Sep 17 00:00:00 2001
+From d01ffb14e114fb0cf5360ef00fac1d5e6839ce07 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 09:05:19 +0000
-Subject: [PATCH 11/12] FreeChat: batch existence checks, no redirects with the
+Subject: [PATCH 11/14] FreeChat: batch existence checks, no redirects with the
  token; drop dead code
 
 - Existence checks are sent in batches of 500, the server limit; larger
@@ -136,10 +136,10 @@ index 4322db7036..6253070329 100644
      fun `describe - presets then largest whole unit`() {
          assertThat(Disappearing.describe(0)).isEqualTo(Disappearing.Duration.Off)
 diff --git a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt
-index e167adea11..7ca4eeb180 100644
+index f723f4601e..e172a437a9 100644
 --- a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt
 +++ b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt
-@@ -924,6 +924,8 @@ class RustMatrixClient(
+@@ -965,6 +965,8 @@ class RustMatrixClient(
                  connection.connectTimeout = 15_000
                  connection.readTimeout = 30_000
                  connection.useCaches = false

@@ -1,0 +1,29 @@
+From 817181ae12dbd5cd9e86bbf01c39fb7c058dafe7 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 00:00:00 +0000
+Subject: [PATCH 14/14] FreeChat: no automatic back pagination
+
+Upstream turned it on by default in v26.10.0: older messages of every room are
+fetched in the background and cached on the device. Off again, and finished so
+it cannot be enabled in developer options; history is loaded on scroll.
+---
+ .../android/libraries/featureflag/api/FeatureFlags.kt       | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/libraries/featureflag/api/src/main/kotlin/io/element/android/libraries/featureflag/api/FeatureFlags.kt b/libraries/featureflag/api/src/main/kotlin/io/element/android/libraries/featureflag/api/FeatureFlags.kt
+index f68a30befb..828386ad88 100644
+--- a/libraries/featureflag/api/src/main/kotlin/io/element/android/libraries/featureflag/api/FeatureFlags.kt
++++ b/libraries/featureflag/api/src/main/kotlin/io/element/android/libraries/featureflag/api/FeatureFlags.kt
+@@ -121,8 +121,10 @@ enum class FeatureFlags(
+         title = "Automatic back pagination of rooms",
+         description = "Allow the app to automatically back paginate in rooms to pre-fetch older messages in background." +
+             "\nRequires an app restart to take effect.",
+-        defaultValue = { true },
+-        isFinished = false,
++        // FreeChat: always off, as before v26.10.0. Older messages are fetched when the user scrolls to them, so
++        // history nobody reads is not pulled onto the device. Finished, so developer options cannot turn it on.
++        defaultValue = { false },
++        isFinished = true,
+     ),
+     UnreadIndicatorCount(
+         key = "feature.unread_indicator_count",

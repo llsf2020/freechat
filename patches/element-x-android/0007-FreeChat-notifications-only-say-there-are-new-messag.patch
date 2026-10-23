@@ -1,7 +1,7 @@
-From 3f97177bbde5b0367df5ee53b444964034cbdf25 Mon Sep 17 00:00:00 2001
+From 0318b4bf7d440edab1e0e17951083091da860844 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 09:05:19 +0000
-Subject: [PATCH 07/12] FreeChat: notifications only say there are new messages
+Subject: [PATCH 07/14] FreeChat: notifications only say there are new messages
 
 A per-device setting, off by default: notifications are shown like with app
 lock, a single 'new messages' notification without sender, room or content.
@@ -213,7 +213,7 @@ index 0000000000..2f95b69f59
 +    }
 +}
 diff --git a/libraries/push/impl/src/main/kotlin/io/element/android/libraries/push/impl/notifications/DefaultNotificationDrawerManager.kt b/libraries/push/impl/src/main/kotlin/io/element/android/libraries/push/impl/notifications/DefaultNotificationDrawerManager.kt
-index 6834f404ed..eb7eff7f35 100644
+index 8e5b19505d..24538acf25 100644
 --- a/libraries/push/impl/src/main/kotlin/io/element/android/libraries/push/impl/notifications/DefaultNotificationDrawerManager.kt
 +++ b/libraries/push/impl/src/main/kotlin/io/element/android/libraries/push/impl/notifications/DefaultNotificationDrawerManager.kt
 @@ -18,6 +18,7 @@ import io.element.android.libraries.matrix.api.core.EventId
@@ -222,7 +222,7 @@ index 6834f404ed..eb7eff7f35 100644
  import io.element.android.libraries.matrix.api.core.ThreadId
 +import io.element.android.libraries.matrix.api.freechat.NotificationPrivacyStore
  import io.element.android.libraries.matrix.api.user.MatrixUser
- import io.element.android.libraries.matrix.ui.media.ImageLoaderHolder
+ import io.element.android.libraries.matrixmedia.api.ImageLoaderHolder
  import io.element.android.libraries.push.api.notifications.NotificationCleaner
 @@ -58,6 +59,7 @@ class DefaultNotificationDrawerManager(
      private val imageLoaderHolder: ImageLoaderHolder,
@@ -232,7 +232,7 @@ index 6834f404ed..eb7eff7f35 100644
      sessionObserver: SessionObserver,
  ) : NotificationCleaner {
      // TODO EAx add a setting per user for this
-@@ -201,6 +203,8 @@ class DefaultNotificationDrawerManager(
+@@ -226,6 +228,8 @@ class DefaultNotificationDrawerManager(
          }
  
          val isAppLocked = lockScreenService.isPinSetup().first()
@@ -241,7 +241,7 @@ index 6834f404ed..eb7eff7f35 100644
  
          for ((sessionId, notifiableEvents) in eventsForSessions) {
              val client = matrixClientProvider.getOrRestore(sessionId).getOrThrow()
-@@ -212,7 +216,7 @@ class DefaultNotificationDrawerManager(
+@@ -237,7 +241,7 @@ class DefaultNotificationDrawerManager(
              } else {
                  client.getUserProfile().getOrNull() ?: MatrixUser(sessionId)
              }
@@ -251,26 +251,26 @@ index 6834f404ed..eb7eff7f35 100644
                  // instead of per-room notifications with message content/sender info.
                  clearAllMessagesEvents(sessionId)
 diff --git a/libraries/push/impl/src/test/kotlin/io/element/android/libraries/push/impl/notifications/DefaultNotificationDrawerManagerTest.kt b/libraries/push/impl/src/test/kotlin/io/element/android/libraries/push/impl/notifications/DefaultNotificationDrawerManagerTest.kt
-index cdc6a01fad..1ab1087edd 100644
+index 0cb6997ffa..524fffb381 100644
 --- a/libraries/push/impl/src/test/kotlin/io/element/android/libraries/push/impl/notifications/DefaultNotificationDrawerManagerTest.kt
 +++ b/libraries/push/impl/src/test/kotlin/io/element/android/libraries/push/impl/notifications/DefaultNotificationDrawerManagerTest.kt
-@@ -16,6 +16,7 @@ import io.element.android.features.enterprise.test.FakeEnterpriseService
- import io.element.android.features.lockscreen.api.LockScreenService
- import io.element.android.features.lockscreen.test.FakeLockScreenService
+@@ -19,6 +19,7 @@ import io.element.android.features.lockscreen.test.FakeLockScreenService
  import io.element.android.libraries.matrix.api.core.EventId
+ import io.element.android.libraries.matrix.api.core.RoomId
+ import io.element.android.libraries.matrix.api.room.RoomInfo
 +import io.element.android.libraries.matrix.api.freechat.NotificationPrivacyStore
  import io.element.android.libraries.matrix.test.AN_EVENT_ID
  import io.element.android.libraries.matrix.test.AN_EVENT_ID_2
  import io.element.android.libraries.matrix.test.A_ROOM_ID
-@@ -27,6 +28,7 @@ import io.element.android.libraries.matrix.test.A_THREAD_ID_2
- import io.element.android.libraries.matrix.test.A_TIMESTAMP
+@@ -31,6 +32,7 @@ import io.element.android.libraries.matrix.test.A_TIMESTAMP
  import io.element.android.libraries.matrix.test.FakeMatrixClient
  import io.element.android.libraries.matrix.test.FakeMatrixClientProvider
+ import io.element.android.libraries.matrix.test.room.aRoomInfo
 +import io.element.android.libraries.matrix.test.freechat.FakeNotificationPrivacyStore
  import io.element.android.libraries.matrix.ui.components.aMatrixUser
- import io.element.android.libraries.matrix.ui.media.test.FakeImageLoaderHolder
+ import io.element.android.libraries.matrixmedia.test.FakeImageLoaderHolder
  import io.element.android.libraries.push.api.notifications.NotificationIdProvider
-@@ -600,6 +602,22 @@ class DefaultNotificationDrawerManagerTest {
+@@ -762,6 +764,22 @@ class DefaultNotificationDrawerManagerTest {
          lockScreenService = FakeLockScreenService().apply { setIsPinSetup(true) },
      )
  
@@ -293,7 +293,7 @@ index cdc6a01fad..1ab1087edd 100644
      private fun testAppLockedNotifiableEventReceived(
          notifiableEvent: NotifiableEvent,
          expectedFallbackEvent: FallbackNotifiableEvent,
-@@ -654,6 +672,7 @@ fun TestScope.createDefaultNotificationDrawerManager(
+@@ -816,6 +834,7 @@ fun TestScope.createDefaultNotificationDrawerManager(
      sessionObserver: SessionObserver = FakeSessionObserver(),
      analyticsService: FakeAnalyticsService = FakeAnalyticsService(),
      lockScreenService: LockScreenService = FakeLockScreenService(),
@@ -301,7 +301,7 @@ index cdc6a01fad..1ab1087edd 100644
  ): DefaultNotificationDrawerManager {
      return DefaultNotificationDrawerManager(
          notificationDisplayer = notificationDisplayer,
-@@ -675,6 +694,7 @@ fun TestScope.createDefaultNotificationDrawerManager(
+@@ -837,6 +856,7 @@ fun TestScope.createDefaultNotificationDrawerManager(
          imageLoaderHolder = FakeImageLoaderHolder(),
          activeNotificationsProvider = activeNotificationsProvider,
          lockScreenService = lockScreenService,

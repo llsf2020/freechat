@@ -69,11 +69,16 @@ cmd_sync() {
 
 	git -C "$dir" fetch upstream tag "$new" --no-tags
 	local backup="$branch-$base"
-	git -C "$dir" branch -f "$backup" "$branch"
-	echo "backup of current work: branch $backup"
+	# Rerun after a rebase that stopped on conflicts and was finished by hand: the branch already sits on the
+	# new tag. Only record the baseline and export; the backup branch keeps the work from before the sync.
+	if git -C "$dir" merge-base --is-ancestor "$new" "$branch"; then
+		echo "$branch is already on $new; recording the new baseline only"
+	else
+		git -C "$dir" branch -f "$backup" "$branch"
+		echo "backup of current work: branch $backup"
 
-	git -C "$dir" checkout "$branch"
-	if ! git -C "$dir" rebase --onto "$new" "$base" "$branch"; then
+		git -C "$dir" checkout "$branch"
+		if ! git -C "$dir" rebase --onto "$new" "$base" "$branch"; then
 		cat >&2 <<-EOF
 
 		rebase stopped on a conflict in forks/$name.
@@ -81,7 +86,8 @@ cmd_sync() {
 		  or give up:              git -C forks/$name rebase --abort
 		when the rebase finishes, rerun: $0 sync $name $new
 		EOF
-		exit 1
+			exit 1
+		fi
 	fi
 
 	# Record the new baseline and its commit only after a clean rebase.

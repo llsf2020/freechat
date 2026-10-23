@@ -1,7 +1,7 @@
-From 1bb77e789164a128285f17dd18864971c8703476 Mon Sep 17 00:00:00 2001
+From dbbe0412008e09631ce1e5d07a1145322a29b79c Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 09:05:19 +0000
-Subject: [PATCH 02/12] FreeChat: admin-only auto-delete, burn after reading,
+Subject: [PATCH 02/14] FreeChat: admin-only auto-delete, burn after reading,
  no deleted placeholders
 
 - Room auto-delete can only be changed by room admins (power level 100 or
@@ -50,7 +50,7 @@ Subject: [PATCH 02/12] FreeChat: admin-only auto-delete, burn after reading,
  create mode 100644 libraries/matrixui/src/main/kotlin/io/element/android/libraries/matrix/ui/freechat/DisappearingLabels.kt
 
 diff --git a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenter.kt b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenter.kt
-index 55c141c391..08d0f178b5 100644
+index 8c9eab9d5b..5f79bec274 100644
 --- a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenter.kt
 +++ b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenter.kt
 @@ -31,7 +31,7 @@ import io.element.android.features.messages.impl.crypto.sendfailure.resolve.Reso
@@ -62,7 +62,7 @@ index 55c141c391..08d0f178b5 100644
  import io.element.android.features.messages.impl.timeline.model.NewEventState
  import io.element.android.features.messages.impl.timeline.model.TimelineItem
  import io.element.android.features.messages.impl.timeline.model.virtual.TimelineItemReadMarkerModel
-@@ -53,7 +53,6 @@ import io.element.android.libraries.featureflag.api.FeatureFlags
+@@ -57,7 +57,6 @@ import io.element.android.libraries.featureflag.api.FeatureFlags
  import io.element.android.libraries.matrix.api.core.EventId
  import io.element.android.libraries.matrix.api.core.UniqueId
  import io.element.android.libraries.matrix.api.core.asEventId
@@ -70,7 +70,7 @@ index 55c141c391..08d0f178b5 100644
  import io.element.android.libraries.matrix.api.room.JoinedRoom
  import io.element.android.libraries.matrix.api.room.powerlevels.permissionsAsState
  import io.element.android.libraries.matrix.api.room.roomMembers
-@@ -79,7 +78,6 @@ import kotlinx.coroutines.flow.flowOn
+@@ -87,7 +86,6 @@ import kotlinx.coroutines.flow.flowOn
  import kotlinx.coroutines.flow.launchIn
  import kotlinx.coroutines.flow.map
  import kotlinx.coroutines.flow.onEach
@@ -78,7 +78,7 @@ index 55c141c391..08d0f178b5 100644
  import kotlinx.coroutines.launch
  import kotlinx.coroutines.withContext
  import timber.log.Timber
-@@ -323,12 +321,9 @@ class TimelinePresenter(
+@@ -373,12 +371,9 @@ class TimelinePresenter(
          }
  
          LaunchedEffect(Unit) {
@@ -132,10 +132,10 @@ index b323f69196..18745e3388 100644
      return items.mapNotNull { item ->
          when (item) {
 diff --git a/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenterTest.kt b/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenterTest.kt
-index aa4198d156..4c8a308b92 100644
+index 5f161bfea0..c35ea396d6 100644
 --- a/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenterTest.kt
 +++ b/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenterTest.kt
-@@ -873,7 +873,8 @@ class TimelinePresenterTest {
+@@ -880,7 +880,8 @@ class TimelinePresenterTest {
      }
  
      @Test
@@ -145,7 +145,7 @@ index aa4198d156..4c8a308b92 100644
          val timeline = FakeTimeline(
              timelineItems = flowOf(
                  (0 until 3).map { index ->
-@@ -886,10 +887,8 @@ class TimelinePresenterTest {
+@@ -893,10 +894,8 @@ class TimelinePresenterTest {
          )
          val presenter = createTimelinePresenter(timeline = timeline)
          presenter.test {
@@ -158,7 +158,7 @@ index aa4198d156..4c8a308b92 100644
              cancelAndIgnoreRemainingEvents()
          }
      }
-@@ -1005,7 +1004,8 @@ class TimelinePresenterTest {
+@@ -1012,7 +1011,8 @@ class TimelinePresenterTest {
          )
          presenter.test {
              assertThat(redactedVoiceMessageManager.invocations.size).isEqualTo(0)
@@ -491,41 +491,41 @@ index 0000000000..56f19d2474
 +        GlobalReadBurnSection(state)
 +    }
 diff --git a/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootNode.kt b/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootNode.kt
-index 57ed6294fa..b823c33843 100644
+index 93d6d25cbd..6f32c30f29 100644
 --- a/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootNode.kt
 +++ b/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootNode.kt
-@@ -22,6 +22,8 @@ import io.element.android.compound.theme.ElementTheme
- import io.element.android.features.logout.api.direct.DirectLogoutEvent
- import io.element.android.features.logout.api.direct.DirectLogoutView
+@@ -20,6 +20,8 @@ import dev.zacsweers.metro.AssistedInject
+ import io.element.android.annotations.ContributesNode
+ import io.element.android.compound.theme.ElementTheme
  import io.element.android.features.preferences.impl.account.PreferencesAccountCallback
 +import io.element.android.features.preferences.impl.freechat.GlobalReadBurnPresenter
 +import io.element.android.features.preferences.impl.freechat.GlobalReadBurnSection
  import io.element.android.libraries.androidutils.browser.openUrlInChromeCustomTab
  import io.element.android.libraries.architecture.callback
  import io.element.android.libraries.di.SessionScope
-@@ -35,6 +37,7 @@ class PreferencesRootNode(
+@@ -33,6 +35,7 @@ class PreferencesRootNode(
+     @Assisted plugins: List<Plugin>,
      private val presenter: PreferencesRootPresenter,
      private val emojiPickerRenderer: EmojiPickerRenderer,
-     private val directLogoutView: DirectLogoutView,
 +    private val globalReadBurnPresenter: GlobalReadBurnPresenter, // FreeChat
  ) : Node(buildContext, plugins = plugins) {
      interface Callback : PreferencesAccountCallback, Plugin {
          fun navigateToAddAccount()
-@@ -96,7 +99,8 @@ class PreferencesRootNode(
-                     callback.startSignOutFlow()
-                 }
-             },
+@@ -90,7 +93,8 @@ class PreferencesRootNode(
+             onOpenNotificationSettings = callback::navigateToNotificationSettings,
+             onEditProfileClick = callback::navigateToUserProfile,
+             onSignOutClick = callback::startSignOutFlow,
 -            onDeactivateClick = callback::startAccountDeactivationFlow
 +            onDeactivateClick = callback::startAccountDeactivationFlow,
 +            freechatSettingsView = { GlobalReadBurnSection(globalReadBurnPresenter.present()) }, // FreeChat
          )
- 
-         directLogoutView.Render(state = state.preferencesAccountState.directLogoutState)
+     }
+ }
 diff --git a/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootView.kt b/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootView.kt
-index 1449ece700..c59eeab5b8 100644
+index 79aabeea2e..ee1492944e 100644
 --- a/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootView.kt
 +++ b/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootView.kt
-@@ -96,6 +96,7 @@ fun PreferencesRootView(
+@@ -99,6 +99,7 @@ fun PreferencesRootView(
      onSignOutClick: () -> Unit,
      onDeactivateClick: () -> Unit,
      modifier: Modifier = Modifier,
@@ -533,7 +533,7 @@ index 1449ece700..c59eeab5b8 100644
  ) {
      val snackbarHostState = rememberSnackbarHostState(snackbarMessage = state.snackbarMessage)
  
-@@ -149,6 +150,7 @@ fun PreferencesRootView(
+@@ -153,6 +154,7 @@ fun PreferencesRootView(
                  onOpenMediaSettings = onOpenMediaSettings,
                  onOpenLocationSettings = onOpenLocationSettings,
              )
@@ -608,11 +608,11 @@ index 0000000000..96a45bedff
 +    }
 +}
 diff --git a/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/RoomDetailsNode.kt b/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/RoomDetailsNode.kt
-index e759f5f08f..54e69473a3 100644
+index e04613429d..7c7ca85dc3 100644
 --- a/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/RoomDetailsNode.kt
 +++ b/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/RoomDetailsNode.kt
-@@ -26,6 +26,8 @@ import io.element.android.annotations.ContributesNode
- import io.element.android.features.leaveroom.api.LeaveRoomRenderer
+@@ -27,6 +27,8 @@ import io.element.android.features.leaveroom.api.LeaveRoomRenderer
+ import io.element.android.features.roomdetails.api.RoomDetailsExtension
  import io.element.android.features.roomdetails.impl.freechat.DisappearingMessagesItem
  import io.element.android.features.roomdetails.impl.freechat.DisappearingMessagesPresenter
 +import io.element.android.features.roomdetails.impl.freechat.ReadBurnItem
@@ -620,15 +620,15 @@ index e759f5f08f..54e69473a3 100644
  import io.element.android.libraries.androidutils.system.startSharePlainTextIntent
  import io.element.android.libraries.architecture.appyx.launchMolecule
  import io.element.android.libraries.architecture.callback
-@@ -49,6 +51,7 @@ class RoomDetailsNode(
-     private val analyticsService: AnalyticsService,
+@@ -51,6 +53,7 @@ class RoomDetailsNode(
      private val leaveRoomRenderer: LeaveRoomRenderer,
+     private val roomDetailsExtension: RoomDetailsExtension,
      disappearingMessagesPresenter: DisappearingMessagesPresenter, // FreeChat
 +    readBurnPresenter: ReadBurnPresenter, // FreeChat
  ) : Node(buildContext, plugins = plugins), RoomDetailsNavigator {
      interface Callback : Plugin {
          fun navigateBack()
-@@ -97,6 +100,7 @@ class RoomDetailsNode(
+@@ -99,6 +102,7 @@ class RoomDetailsNode(
  
      private val stateFlow = launchMolecule { presenter.present() }
      private val disappearingStateFlow = launchMolecule { disappearingMessagesPresenter.present() } // FreeChat
@@ -636,7 +636,7 @@ index e759f5f08f..54e69473a3 100644
  
      fun onNewOwnersSelected() {
          stateFlow.value.eventSink(RoomDetailsEvent.LeaveRoom(needsConfirmation = false))
-@@ -145,6 +149,8 @@ class RoomDetailsNode(
+@@ -148,6 +152,8 @@ class RoomDetailsNode(
                  // FreeChat
                  val disappearingState by disappearingStateFlow.collectAsState()
                  DisappearingMessagesItem(disappearingState)

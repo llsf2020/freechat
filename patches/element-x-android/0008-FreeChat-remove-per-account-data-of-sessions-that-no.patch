@@ -1,7 +1,7 @@
-From 706439e399cc158c150686c17e5a66aa2088af2f Mon Sep 17 00:00:00 2001
+From a8e4ade0a4bf5fd172f0c7bee8998a91dba0127b Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 09:05:19 +0000
-Subject: [PATCH 08/12] FreeChat: remove per-account data of sessions that no
+Subject: [PATCH 08/14] FreeChat: remove per-account data of sessions that no
  longer exist
 
 Session preferences, push settings and the push client secret (keyed by user ID)
@@ -19,10 +19,10 @@ for every account not in the session store.
  create mode 100644 libraries/pushstore/impl/src/test/kotlin/io/element/android/libraries/pushstore/impl/freechat/StaleSessionDataCleanerTest.kt
 
 diff --git a/app/src/main/kotlin/io/element/android/x/ElementXApplication.kt b/app/src/main/kotlin/io/element/android/x/ElementXApplication.kt
-index a3712ebbf6..8d98b7f5ae 100644
+index b39dc353fc..8f4087f93b 100644
 --- a/app/src/main/kotlin/io/element/android/x/ElementXApplication.kt
 +++ b/app/src/main/kotlin/io/element/android/x/ElementXApplication.kt
-@@ -24,6 +24,7 @@ import io.element.android.x.di.ApplicationBindings
+@@ -25,6 +25,7 @@ import io.element.android.x.di.ApplicationBindings
  import io.element.android.x.info.logApplicationInfo
  import io.element.android.x.initializer.CacheCleanerInitializer
  import io.element.android.x.initializer.CrashInitializer
@@ -30,7 +30,7 @@ index a3712ebbf6..8d98b7f5ae 100644
  import io.element.android.x.initializer.PlatformInitializer
  
  class ElementXApplication : Application(), DependencyInjectionGraphOwner, Configuration.Provider {
-@@ -42,6 +43,7 @@ class ElementXApplication : Application(), DependencyInjectionGraphOwner, Config
+@@ -46,6 +47,7 @@ class ElementXApplication : Application(), DependencyInjectionGraphOwner, Config
              initializeComponent(CrashInitializer::class.java)
              initializeComponent(PlatformInitializer::class.java)
              initializeComponent(CacheCleanerInitializer::class.java)
@@ -67,7 +67,7 @@ index 0000000000..ce4da1886a
 +    override fun dependencies(): List<Class<out Initializer<*>>> = emptyList()
 +}
 diff --git a/libraries/pushstore/impl/build.gradle.kts b/libraries/pushstore/impl/build.gradle.kts
-index 4e643fd5f9..a9fec69e21 100644
+index 8691bd2196..3b84f03414 100644
 --- a/libraries/pushstore/impl/build.gradle.kts
 +++ b/libraries/pushstore/impl/build.gradle.kts
 @@ -30,6 +30,8 @@ dependencies {

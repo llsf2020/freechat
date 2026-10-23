@@ -1,7 +1,7 @@
-From a88c7545c2142d3a56161372a61d73b6c35ae70b Mon Sep 17 00:00:00 2001
+From 337e4474b1b611a3de80f35922d40bb23cfa4092 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 09:05:19 +0000
-Subject: [PATCH 05/12] FreeChat: strict mode; messages do not outlive the
+Subject: [PATCH 05/14] FreeChat: strict mode; messages do not outlive the
  process
 
 Strict mode (per device, opt-in): the session is kept in memory only, its SDK
@@ -16,7 +16,7 @@ event and media caches are dropped whenever a session's client is created.
  .../appnav/freechat/StrictSessionGuardTest.kt |  88 ++++++++++++
  .../impl/freechat/StrictModePresenter.kt      |  93 +++++++++++++
  .../impl/freechat/StrictModeView.kt           | 131 ++++++++++++++++++
- .../impl/root/PreferencesRootNode.kt          |  24 ++--
+ .../impl/root/PreferencesRootNode.kt          |  13 +-
  .../matrix/api/freechat/StrictMode.kt         |  48 +++++++
  .../matrix/impl/RustMatrixClientFactory.kt    |  15 ++
  .../auth/RustMatrixAuthenticationService.kt   |  21 ++-
@@ -25,12 +25,12 @@ event and media caches are dropped whenever a session's client is created.
  .../test/freechat/FakeStrictModeStore.kt      |  22 +++
  .../impl/freechat/DataStoreStrictModeStore.kt |  49 +++++++
  .../sessionstorage/api/StrictSessions.kt      |  20 +++
- .../impl/DatabaseSessionStore.kt              | 115 ++++++++++-----
+ .../impl/DatabaseSessionStore.kt              | 121 +++++++++++-----
  .../impl/StrictSessionStoreTest.kt            | 103 ++++++++++++++
  .../res/values-zh-rTW/freechat_strings.xml    |   9 ++
  .../main/res/values-zh/freechat_strings.xml   |   9 ++
  .../src/main/res/values/freechat_strings.xml  |   9 ++
- 20 files changed, 808 insertions(+), 44 deletions(-)
+ 20 files changed, 809 insertions(+), 38 deletions(-)
  create mode 100644 appnav/src/main/kotlin/io/element/android/appnav/freechat/StrictSessionGuard.kt
  create mode 100644 appnav/src/test/kotlin/io/element/android/appnav/freechat/StrictSessionGuardTest.kt
  create mode 100644 features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/freechat/StrictModePresenter.kt
@@ -42,7 +42,7 @@ event and media caches are dropped whenever a session's client is created.
  create mode 100644 libraries/session-storage/impl/src/test/kotlin/io/element/android/libraries/sessionstorage/impl/StrictSessionStoreTest.kt
 
 diff --git a/appnav/build.gradle.kts b/appnav/build.gradle.kts
-index 12b95d9a09..1a4067ff2b 100644
+index cc11f5c033..9474b9fff6 100644
 --- a/appnav/build.gradle.kts
 +++ b/appnav/build.gradle.kts
 @@ -56,6 +56,7 @@ dependencies {
@@ -61,10 +61,10 @@ index 12b95d9a09..1a4067ff2b 100644
      testImplementation(projects.services.analytics.test)
  }
 diff --git a/appnav/src/main/kotlin/io/element/android/appnav/LoggedInFlowNode.kt b/appnav/src/main/kotlin/io/element/android/appnav/LoggedInFlowNode.kt
-index f754b369b5..af207a83b9 100644
+index b3b3a9d2cf..4e5eb628be 100644
 --- a/appnav/src/main/kotlin/io/element/android/appnav/LoggedInFlowNode.kt
 +++ b/appnav/src/main/kotlin/io/element/android/appnav/LoggedInFlowNode.kt
-@@ -41,6 +41,7 @@ import com.bumble.appyx.navmodel.backstack.operation.singleTop
+@@ -40,6 +40,7 @@ import com.bumble.appyx.navmodel.backstack.operation.singleTop
  import dev.zacsweers.metro.Assisted
  import dev.zacsweers.metro.AssistedInject
  import io.element.android.annotations.ContributesNode
@@ -72,22 +72,22 @@ index f754b369b5..af207a83b9 100644
  import io.element.android.appnav.loggedin.LoggedInNode
  import io.element.android.appnav.loggedin.MediaPreviewConfigMigration
  import io.element.android.appnav.loggedin.SendQueues
-@@ -163,6 +164,7 @@ class LoggedInFlowNode(
-     private val activeLiveLocationShareManager: ActiveLiveLocationShareManager,
-     private val customMapTilerConfigProvider: CustomMapTilerConfigProvider,
+@@ -158,6 +159,7 @@ class LoggedInFlowNode(
+     private val locationService: LocationService,
+     private val loggedInEventProcessorFactory: LoggedInEventProcessor.Factory,
      private val screenshotPolicy: ScreenshotPolicy, // FreeChat
 +    private val strictSessionGuard: StrictSessionGuard, // FreeChat
  ) : BaseFlowNode<LoggedInFlowNode.NavTarget>(
      backstack = BackStack(
          initialElement = NavTarget.Placeholder,
-@@ -228,6 +230,7 @@ class LoggedInFlowNode(
+@@ -205,6 +207,7 @@ class LoggedInFlowNode(
          lifecycle.subscribe(
              onCreate = {
                  analyticsRoomListStateWatcher.start()
 +                strictSessionGuard.start() // FreeChat
                  appNavigationStateService.onNavigateToSession(id, matrixClient.sessionId)
                  loggedInFlowProcessor.observeEvents(sessionCoroutineScope)
-                 matrixClient.sessionVerificationService.setListener(verificationListener)
+                 mediaPreviewConfigMigration()
 diff --git a/appnav/src/main/kotlin/io/element/android/appnav/freechat/StrictSessionGuard.kt b/appnav/src/main/kotlin/io/element/android/appnav/freechat/StrictSessionGuard.kt
 new file mode 100644
 index 0000000000..4264f72664
@@ -497,10 +497,10 @@ index 0000000000..c36139b658
 +        StrictModeSection(state, onSignOut = {})
 +    }
 diff --git a/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootNode.kt b/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootNode.kt
-index b823c33843..b290e5f923 100644
+index 6f32c30f29..901579c32a 100644
 --- a/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootNode.kt
 +++ b/features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/root/PreferencesRootNode.kt
-@@ -24,6 +24,8 @@ import io.element.android.features.logout.api.direct.DirectLogoutView
+@@ -22,6 +22,8 @@ import io.element.android.compound.theme.ElementTheme
  import io.element.android.features.preferences.impl.account.PreferencesAccountCallback
  import io.element.android.features.preferences.impl.freechat.GlobalReadBurnPresenter
  import io.element.android.features.preferences.impl.freechat.GlobalReadBurnSection
@@ -509,39 +509,28 @@ index b823c33843..b290e5f923 100644
  import io.element.android.libraries.androidutils.browser.openUrlInChromeCustomTab
  import io.element.android.libraries.architecture.callback
  import io.element.android.libraries.di.SessionScope
-@@ -38,6 +40,7 @@ class PreferencesRootNode(
+@@ -36,6 +38,7 @@ class PreferencesRootNode(
+     private val presenter: PreferencesRootPresenter,
      private val emojiPickerRenderer: EmojiPickerRenderer,
-     private val directLogoutView: DirectLogoutView,
      private val globalReadBurnPresenter: GlobalReadBurnPresenter, // FreeChat
 +    private val strictModePresenter: StrictModePresenter, // FreeChat
  ) : Node(buildContext, plugins = plugins) {
      interface Callback : PreferencesAccountCallback, Plugin {
          fun navigateToAddAccount()
-@@ -69,6 +72,13 @@ class PreferencesRootNode(
+@@ -68,6 +71,8 @@ class PreferencesRootNode(
      @Composable
      override fun View(modifier: Modifier) {
          val state = presenter.present()
-+        val onSignOut = {
-+            if (state.preferencesAccountState.directLogoutState.canDoDirectSignOut) {
-+                state.preferencesAccountState.directLogoutState.eventSink(DirectLogoutEvent.Logout(ignoreSdkError = false))
-+            } else {
-+                callback.startSignOutFlow()
-+            }
-+        }
++        // FreeChat: shared by the sign-out button and turning strict mode on.
++        val onSignOut: () -> Unit = { callback.startSignOutFlow() }
          val activity = requireNotNull(LocalActivity.current)
          val isDark = ElementTheme.isLightTheme.not()
  
-@@ -92,15 +102,13 @@ class PreferencesRootNode(
+@@ -92,9 +97,13 @@ class PreferencesRootNode(
              onManageAccountClick = { onManageAccountClick(activity, it, isDark) },
              onOpenNotificationSettings = callback::navigateToNotificationSettings,
              onEditProfileClick = callback::navigateToUserProfile,
--            onSignOutClick = {
--                if (state.preferencesAccountState.directLogoutState.canDoDirectSignOut) {
--                    state.preferencesAccountState.directLogoutState.eventSink(DirectLogoutEvent.Logout(ignoreSdkError = false))
--                } else {
--                    callback.startSignOutFlow()
--                }
--            },
+-            onSignOutClick = callback::startSignOutFlow,
 +            onSignOutClick = onSignOut,
              onDeactivateClick = callback::startAccountDeactivationFlow,
 -            freechatSettingsView = { GlobalReadBurnSection(globalReadBurnPresenter.present()) }, // FreeChat
@@ -551,8 +540,8 @@ index b823c33843..b290e5f923 100644
 +                StrictModeSection(strictModePresenter.present(), onSignOut = onSignOut)
 +            },
          )
- 
-         directLogoutView.Render(state = state.preferencesAccountState.directLogoutState)
+     }
+ }
 diff --git a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/StrictMode.kt b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/StrictMode.kt
 new file mode 100644
 index 0000000000..ffe5854f52
@@ -608,7 +597,7 @@ index 0000000000..ffe5854f52
 +    suspend fun set(settings: StrictModeSettings)
 +}
 diff --git a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClientFactory.kt b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClientFactory.kt
-index 9b381460a2..41f3dd558f 100644
+index b4fd42762f..ece2120cb1 100644
 --- a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClientFactory.kt
 +++ b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClientFactory.kt
 @@ -91,6 +91,8 @@ class RustMatrixClientFactory(
@@ -617,10 +606,10 @@ index 9b381460a2..41f3dd558f 100644
  
 +        deleteMessageCaches(sessionPaths)
 +
+         // Use a dedicated delegate for this client, so that an auth error only affects this session
+         val sessionDelegate = createSessionDelegate()
          val client = getBaseClientBuilder(
-             sessionPaths = sessionPaths,
-             clientSecret = clientSecret,
-@@ -229,6 +231,19 @@ class RustMatrixClientFactory(
+@@ -225,6 +227,19 @@ class RustMatrixClientFactory(
      }
  }
  
@@ -641,7 +630,7 @@ index 9b381460a2..41f3dd558f 100644
   * Directory holding the local message search index, under the session's file directory.
   * Not the cache directory: the index is not disposable, and a cache wipe should not destroy it.
 diff --git a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationService.kt b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationService.kt
-index 1ae2a16d38..892d2c34b9 100644
+index c3644eb959..77d7471547 100644
 --- a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationService.kt
 +++ b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationService.kt
 @@ -31,6 +31,9 @@ import io.element.android.libraries.matrix.api.auth.qrlogin.MatrixQrCodeLoginDat
@@ -654,7 +643,7 @@ index 1ae2a16d38..892d2c34b9 100644
  import io.element.android.libraries.matrix.api.paths.SessionPaths
  import io.element.android.libraries.matrix.api.verification.SessionVerifiedStatus
  import io.element.android.libraries.matrix.impl.ClientBuilderSlidingSync
-@@ -74,7 +77,16 @@ class RustMatrixAuthenticationService(
+@@ -75,7 +78,16 @@ class RustMatrixAuthenticationService(
      private val enterpriseService: EnterpriseService,
      private val featureFlagService: FeatureFlagService,
      private val clientEnterpriseHook: ClientEnterpriseHook,
@@ -671,7 +660,7 @@ index 1ae2a16d38..892d2c34b9 100644
      // Any existing Element Classic session that we want to try to import secrets from during login.
      private var elementClassicSession: ElementClassicSession? = null
  
-@@ -92,9 +104,11 @@ class RustMatrixAuthenticationService(
+@@ -93,9 +105,11 @@ class RustMatrixAuthenticationService(
          newMatrixClientObservers.add(lambda)
      }
  
@@ -685,7 +674,7 @@ index 1ae2a16d38..892d2c34b9 100644
              .also { sessionPaths = it }
      }
  
-@@ -157,7 +171,8 @@ class RustMatrixAuthenticationService(
+@@ -158,7 +172,8 @@ class RustMatrixAuthenticationService(
                      username = username,
                      password = password,
                      initialDeviceName = "Element X Android",
@@ -734,10 +723,10 @@ index f40c134209..97ca60f828 100644
 +    }
  }
 diff --git a/libraries/matrix/impl/src/test/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationServiceTest.kt b/libraries/matrix/impl/src/test/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationServiceTest.kt
-index d81c6021da..41fe59f2eb 100644
+index 95047ea452..5c05c65b96 100644
 --- a/libraries/matrix/impl/src/test/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationServiceTest.kt
 +++ b/libraries/matrix/impl/src/test/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationServiceTest.kt
-@@ -31,6 +31,7 @@ import io.element.android.libraries.matrix.test.A_HOMESERVER_URL
+@@ -33,6 +33,7 @@ import io.element.android.libraries.matrix.test.A_HOMESERVER_URL
  import io.element.android.libraries.matrix.test.A_USER_ID
  import io.element.android.libraries.matrix.test.auth.FakeOAuthRedirectUrlProvider
  import io.element.android.libraries.matrix.test.core.aBuildMeta
@@ -745,7 +734,7 @@ index d81c6021da..41fe59f2eb 100644
  import io.element.android.libraries.sessionstorage.api.SessionStore
  import io.element.android.libraries.sessionstorage.test.InMemorySessionStore
  import io.element.android.libraries.workmanager.test.FakeWorkManagerScheduler
-@@ -270,6 +271,7 @@ class RustMatrixAuthenticationServiceTest {
+@@ -309,6 +310,7 @@ class RustMatrixAuthenticationServiceTest {
          )
          return RustMatrixAuthenticationService(
              sessionPathsFactory = sessionPathsFactory,
@@ -863,7 +852,7 @@ index 0000000000..7b2e4234a7
 +    fun isStrictPath(sessionPath: String): Boolean = sessionPath.trimEnd('/').substringAfterLast('/').startsWith(DIR_PREFIX)
 +}
 diff --git a/libraries/session-storage/impl/src/main/kotlin/io/element/android/libraries/sessionstorage/impl/DatabaseSessionStore.kt b/libraries/session-storage/impl/src/main/kotlin/io/element/android/libraries/sessionstorage/impl/DatabaseSessionStore.kt
-index 9be59e4bae..e402e0c76b 100644
+index 304a969f9d..7e0b61ba38 100644
 --- a/libraries/session-storage/impl/src/main/kotlin/io/element/android/libraries/sessionstorage/impl/DatabaseSessionStore.kt
 +++ b/libraries/session-storage/impl/src/main/kotlin/io/element/android/libraries/sessionstorage/impl/DatabaseSessionStore.kt
 @@ -18,9 +18,13 @@ import io.element.android.libraries.core.coroutine.CoroutineDispatchers
@@ -879,8 +868,8 @@ index 9be59e4bae..e402e0c76b 100644
 +import kotlinx.coroutines.flow.update
  import kotlinx.coroutines.sync.Mutex
  import kotlinx.coroutines.sync.withLock
- import timber.log.Timber
-@@ -33,17 +37,40 @@ class DatabaseSessionStore(
+ import kotlinx.coroutines.withContext
+@@ -34,17 +38,40 @@ class DatabaseSessionStore(
  ) : SessionStore {
      private val sessionDataMutex = Mutex()
  
@@ -925,67 +914,75 @@ index 9be59e4bae..e402e0c76b 100644
                      )
                  }
              }
-@@ -53,21 +80,33 @@ class DatabaseSessionStore(
-     override suspend fun addSession(sessionData: SessionData) {
-         sessionDataMutex.withLock {
-             val lastUsageIndex = getLastUsageIndex()
--            database.sessionDataQueries.insertSessionData(
--                sessionData
--                    .copy(
--                        // position value does not really matter, so just use lastUsageIndex + 1 to ensure that
--                        // the value is always greater than value of any existing account
--                        position = lastUsageIndex + 1,
--                        lastUsageIndex = lastUsageIndex + 1,
--                    )
--                    .toDbModel()
--            )
-+            val session = sessionData
-+                .copy(
-+                    // position value does not really matter, so just use lastUsageIndex + 1 to ensure that
-+                    // the value is always greater than value of any existing account
-+                    position = lastUsageIndex + 1,
-+                    lastUsageIndex = lastUsageIndex + 1,
-+                )
-+            if (StrictSessions.isStrict(session)) {
-+                strictSessions.update { it + (session.userId to session) }
-+            } else {
-+                database.sessionDataQueries.insertSessionData(session.toDbModel())
-+            }
+@@ -55,16 +82,18 @@ class DatabaseSessionStore(
+         withContext(dispatchers.io) {
+             sessionDataMutex.withLock {
+                 val lastUsageIndex = getLastUsageIndex()
+-                database.sessionDataQueries.insertSessionData(
+-                    sessionData
+-                        .copy(
+-                            // position value does not really matter, so just use lastUsageIndex + 1 to ensure that
+-                            // the value is always greater than value of any existing account
+-                            position = lastUsageIndex + 1,
+-                            lastUsageIndex = lastUsageIndex + 1,
+-                        )
+-                        .toDbModel()
+-                )
++                val session = sessionData
++                    .copy(
++                        // position value does not really matter, so just use lastUsageIndex + 1 to ensure that
++                        // the value is always greater than value of any existing account
++                        position = lastUsageIndex + 1,
++                        lastUsageIndex = lastUsageIndex + 1,
++                    )
++                if (StrictSessions.isStrict(session)) {
++                    strictSessions.update { it + (session.userId to session) }
++                } else {
++                    database.sessionDataQueries.insertSessionData(session.toDbModel())
++                }
+             }
          }
      }
- 
+@@ -72,6 +101,17 @@ class DatabaseSessionStore(
      override suspend fun updateData(sessionData: SessionData) {
-         sessionDataMutex.withLock {
-+            val updatedStrict = updateStrict(sessionData.userId) { old ->
-+                sessionData.copy(
-+                    loginTimestamp = old.loginTimestamp,
-+                    position = old.position,
-+                    lastUsageIndex = old.lastUsageIndex,
-+                    userDisplayName = old.userDisplayName,
-+                    userAvatarUrl = old.userAvatarUrl,
-+                )
+         withContext(dispatchers.io) {
+             sessionDataMutex.withLock {
++                val updatedStrict = updateStrict(sessionData.userId) { old ->
++                    sessionData.copy(
++                        loginTimestamp = old.loginTimestamp,
++                        position = old.position,
++                        lastUsageIndex = old.lastUsageIndex,
++                        userDisplayName = old.userDisplayName,
++                        userAvatarUrl = old.userAvatarUrl,
++                        userAvatarData = old.userAvatarData,
++                    )
++                }
++                if (updatedStrict) return@withContext
+                 val result = database.sessionDataQueries.selectByUserId(sessionData.userId)
+                     .executeAsOneOrNull()
+                     ?.toApiModel()
+@@ -98,6 +138,10 @@ class DatabaseSessionStore(
+     override suspend fun updateUserProfile(sessionId: String, displayName: String?, avatarUrl: String?, avatarData: String?) {
+         withContext(dispatchers.io) {
+             sessionDataMutex.withLock {
++                val updatedStrict = updateStrict(sessionId) {
++                    it.copy(userDisplayName = displayName, userAvatarUrl = avatarUrl, userAvatarData = avatarData)
++                }
++                if (updatedStrict) return@withContext
+                 val result = database.sessionDataQueries.selectByUserId(sessionId)
+                     .executeAsOneOrNull()
+                     ?.toApiModel()
+@@ -124,6 +168,9 @@ class DatabaseSessionStore(
+                 return@withContext
+             }
+             val lastUsageIndex = latestSession?.lastUsageIndex ?: 0
++            if (sessionDataMutex.withLock { updateStrict(sessionId) { it.copy(lastUsageIndex = lastUsageIndex + 1) } }) {
++                return@withContext
 +            }
-+            if (updatedStrict) return
-             val result = database.sessionDataQueries.selectByUserId(sessionData.userId)
-                 .executeAsOneOrNull()
-                 ?.toApiModel()
-@@ -91,6 +130,7 @@ class DatabaseSessionStore(
- 
-     override suspend fun updateUserProfile(sessionId: String, displayName: String?, avatarUrl: String?) {
-         sessionDataMutex.withLock {
-+            if (updateStrict(sessionId) { it.copy(userDisplayName = displayName, userAvatarUrl = avatarUrl) }) return
              val result = database.sessionDataQueries.selectByUserId(sessionId)
                  .executeAsOneOrNull()
                  ?.toApiModel()
-@@ -114,6 +154,7 @@ class DatabaseSessionStore(
-             return
-         }
-         val lastUsageIndex = latestSession?.lastUsageIndex ?: 0
-+        if (sessionDataMutex.withLock { updateStrict(sessionId) { it.copy(lastUsageIndex = lastUsageIndex + 1) } }) return
-         val result = database.sessionDataQueries.selectByUserId(sessionId)
-             .executeAsOneOrNull()
-             ?.toApiModel()
-@@ -132,25 +173,31 @@ class DatabaseSessionStore(
+@@ -143,25 +190,31 @@ class DatabaseSessionStore(
      }
  
      private fun getLastUsageIndex(): Long {
@@ -1000,8 +997,8 @@ index 9be59e4bae..e402e0c76b 100644
              ?: -1L
      }
  
-     override suspend fun getLatestSession(): SessionData? {
-         return sessionDataMutex.withLock {
+     override suspend fun getLatestSession(): SessionData? = withContext(dispatchers.io) {
+         sessionDataMutex.withLock {
 -            database.sessionDataQueries.selectLatest()
 -                .executeAsOneOrNull()
 -                ?.toApiModel()
@@ -1013,8 +1010,8 @@ index 9be59e4bae..e402e0c76b 100644
          }
      }
  
-     override suspend fun getSession(sessionId: String): SessionData? {
-         return sessionDataMutex.withLock {
+     override suspend fun getSession(sessionId: String): SessionData? = withContext(dispatchers.io) {
+         sessionDataMutex.withLock {
 -            database.sessionDataQueries.selectByUserId(sessionId)
 -                .executeAsOneOrNull()
 -                ?.toApiModel()
@@ -1025,8 +1022,8 @@ index 9be59e4bae..e402e0c76b 100644
          }
      }
  
-@@ -158,28 +205,34 @@ class DatabaseSessionStore(
-         return sessionDataMutex.withLock {
+@@ -169,29 +222,35 @@ class DatabaseSessionStore(
+         sessionDataMutex.withLock {
              database.sessionDataQueries.selectAll()
                  .executeAsList()
 -                .map { it.toApiModel() }
@@ -1034,8 +1031,8 @@ index 9be59e4bae..e402e0c76b 100644
          }
      }
  
-     override suspend fun numberOfSessions(): Int {
-         return sessionDataMutex.withLock {
+     override suspend fun numberOfSessions(): Int = withContext(dispatchers.io) {
+         sessionDataMutex.withLock {
 -            database.sessionDataQueries.count()
 -                .executeAsOneOrNull()
 -                ?.toInt()
@@ -1064,11 +1061,12 @@ index 9be59e4bae..e402e0c76b 100644
      }
  
      override suspend fun removeSession(sessionId: String) {
-         sessionDataMutex.withLock {
-+            strictSessions.update { it - sessionId }
-             database.sessionDataQueries.removeSession(sessionId)
+         withContext(dispatchers.io) {
+             sessionDataMutex.withLock {
++                strictSessions.update { it - sessionId }
+                 database.sessionDataQueries.removeSession(sessionId)
+             }
          }
-     }
 diff --git a/libraries/session-storage/impl/src/test/kotlin/io/element/android/libraries/sessionstorage/impl/StrictSessionStoreTest.kt b/libraries/session-storage/impl/src/test/kotlin/io/element/android/libraries/sessionstorage/impl/StrictSessionStoreTest.kt
 new file mode 100644
 index 0000000000..838c5fb5a1

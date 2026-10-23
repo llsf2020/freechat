@@ -1,7 +1,7 @@
-From 05544f53116ffce7fc8af010d57292cd1cd2917b Mon Sep 17 00:00:00 2001
+From 041b67ef25900cda67b72efc19b8731eaa46bc4a Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 09:05:19 +0000
-Subject: [PATCH 06/12] FreeChat: UnifiedPush only through the user's own
+Subject: [PATCH 06/14] FreeChat: UnifiedPush only through the user's own
  server
 
 A pusher is registered only when both the UnifiedPush endpoint and the Matrix
