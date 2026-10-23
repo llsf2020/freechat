@@ -1,6 +1,8 @@
 # Builds the FreeChat iOS app from the upstream baseline + patches (simulator build, unsigned) and runs the
-# FreeChat unit tests, through dev/build-ios.sh. The logs are kept as the ios-logs artifact and the summary
-# is shown on the run page. Standard macOS runners are free for public repositories.
+# FreeChat unit tests, through dev/build-ios.sh. The app uses FreeChat's Rust SDK (matrix-rust-sdk +
+# patches/matrix-rust-sdk), built for the simulator by dev/build-rust-sdk.sh and cached until the SDK baseline
+# or its patches change. The logs are kept as the ios-logs artifact and the summary is shown on the run page.
+# Standard macOS runners are free for public repositories.
 name: ios
 
 on:
@@ -9,9 +11,11 @@ on:
     paths:
       - upstream.conf
       - patches/element-x-ios/**
+      - patches/matrix-rust-sdk/**
       - branding/**
       - docker/checkout.sh
       - dev/build-ios.sh
+      - dev/build-rust-sdk.sh
       - .github/workflows/ios.yml
   workflow_dispatch:
 
@@ -26,7 +30,7 @@ jobs:
   build:
     # Element X iOS needs Xcode 27, which this image provides as /Applications/Xcode_27.app.
     runs-on: xcode-27
-    timeout-minutes: 150
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -42,6 +46,42 @@ jobs:
           # Upstream keeps some assets in Git LFS; with this the clone in docker/checkout.sh fetches them.
           git lfs install
           python3 -m pip install --user --break-system-packages --quiet pillow
+
+      - name: Check out Element X iOS with the FreeChat patches
+        run: docker/checkout.sh element-x-ios forks/element-x-ios
+
+      # Everything the SDK build reads: its baseline, the patches and the script.
+      - name: Rust SDK cache key
+        id: key
+        run: |
+          key=$( { grep -E '^matrix-rust-sdk ' upstream.conf; cat patches/matrix-rust-sdk/*.patch 2>/dev/null; cat dev/build-rust-sdk.sh; } | shasum -a 256 | cut -c1-20)
+          echo "key=rust-sdk-ios-sim-$key" >> "$GITHUB_OUTPUT"
+
+      - id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            forks/matrix-rust-sdk/Package.swift
+            forks/matrix-rust-sdk/bindings/apple/generated
+          key: ${{ steps.key.outputs.key }}
+
+      - name: Build the Rust SDK
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          rustup target add aarch64-apple-ios-sim
+          dev/build-rust-sdk.sh ios
+
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            forks/matrix-rust-sdk/Package.swift
+            forks/matrix-rust-sdk/bindings/apple/generated
+          key: ${{ steps.key.outputs.key }}
+
+      - name: Use the cached Rust SDK
+        if: steps.cache.outputs.cache-hit == 'true'
+        run: dev/build-rust-sdk.sh ios-point
 
       - name: Build and test
         run: dev/build-ios.sh

@@ -4,7 +4,7 @@
 #   scripts/upstream.sh status            show baselines and whether upstream has a newer release
 #   scripts/upstream.sh clone  <name>     clone forks/<name> and create the freechat branch at the baseline
 #   scripts/upstream.sh export <name>     write our commits to patches/<name>/ (reviewable record)
-#   scripts/upstream.sh sync   <name> <new-tag>
+#   scripts/upstream.sh sync   <name> <new-tag | new-commit>
 #                                         rebase our commits onto <new-tag>, keep a backup branch,
 #                                         update upstream.conf and patches/ on success
 set -euo pipefail
@@ -67,7 +67,11 @@ cmd_sync() {
 	[[ -d "$dir" ]] || die "$dir missing; run: $0 clone $name"
 	[[ -z "$(git -C "$dir" status --porcelain)" ]] || die "$dir has uncommitted changes"
 
-	git -C "$dir" fetch upstream tag "$new" --no-tags
+	if [[ $new =~ ^[0-9a-f]{40}$ ]]; then
+		git -C "$dir" fetch upstream "$new" # a baseline with no tag, e.g. matrix-rust-sdk
+	else
+		git -C "$dir" fetch upstream tag "$new" --no-tags
+	fi
 	local backup="$branch-$base"
 	# Rerun after a rebase that stopped on conflicts and was finished by hand: the branch already sits on the
 	# new tag. Only record the baseline and export; the backup branch keeps the work from before the sync.

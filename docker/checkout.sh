@@ -6,7 +6,8 @@
 # The baseline, its commit and the repository come from upstream.conf; the
 # patches from patches/<name>/. Used by the Dockerfiles and CI, so a build
 # always matches what upstream.conf records. The clone must land on the
-# recorded commit: a tag that was moved upstream fails the build.
+# recorded commit: a tag that was moved upstream fails the build. The baseline
+# can also be a bare commit hash.
 set -eu
 
 name="$1"
@@ -20,7 +21,14 @@ $line
 EOF
 [ ${#commit} -eq 40 ] || { echo "$name: no baseline commit in upstream.conf" >&2; exit 1; }
 
-git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$ref" "$repo" "$dest"
+if printf '%s' "$ref" | grep -Eq '^[0-9a-f]{40}$'; then
+	# The baseline is a commit with no tag (e.g. the matrix-rust-sdk commit a binding release was built from).
+	git init --quiet "$dest"
+	git -C "$dest" fetch --quiet --depth 1 "$repo" "$ref"
+	git -C "$dest" -c advice.detachedHead=false checkout --quiet FETCH_HEAD
+else
+	git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$ref" "$repo" "$dest"
+fi
 actual="$(git -C "$dest" rev-parse HEAD)"
 if [ "$actual" != "$commit" ]; then
 	echo "$name: $ref is $actual upstream, but upstream.conf records $commit" >&2
