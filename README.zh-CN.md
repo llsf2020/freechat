@@ -26,6 +26,7 @@
 | 网页端 | Element Web | ✅ 上述功能的界面；消息只放内存；严格模式 |
 | 安卓 | Element X Android | ✅ 上述功能的界面；禁止截屏；消息不跨进程保留；严格模式 |
 | iOS | Element X iOS | ✅ 上述功能、录屏时隐藏、多任务界面遮挡、严格模式（还没有在真机上试过） |
+| App 底层 | matrix-rust-sdk（安卓和 iOS 共用） | ✅ 会话列表的消息预览只放内存；被删除的消息从设备缓存里清掉 |
 
 目前只支持**网页、安卓、iOS**。桌面端（Windows、macOS、Linux）暂时不做。
 
@@ -50,9 +51,12 @@ docker/            镜像构建：按基线下载上游并打补丁、构建时�
 deploy/            一键安装脚本（服务器上的全部配置都由它生成）
 branding/          App 名字、包名、图标（改这里，编译时自动生效）
 dev/               本机测试环境
+.github/workflows/ CI：服务端和网页镜像、测试、安卓和 iOS 编译
 ```
 
 FreeChat 的改动以补丁形式保存在 `patches/` 里，构建时按 `upstream.conf` 下载上游源码、核对提交哈希后打上补丁。
+
+安卓和 iOS 客户端用的 Rust SDK 不是官方发布的版本，而是按 `patches/matrix-rust-sdk` 从源码编出来的（`dev/build-rust-sdk.sh`）。CI 负责编译，SDK 补丁不变时直接用缓存。
 
 ## 文档
 

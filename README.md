@@ -26,6 +26,7 @@ A self-hosted, Telegram-like messenger with chat, voice and video (including gro
 | Web | Element Web | ✅ UI for the above; messages kept in memory only; strict mode |
 | Android | Element X Android | ✅ UI for the above; screenshot blocking; messages not kept across processes; strict mode |
 | iOS | Element X iOS | ✅ the above, hidden while recording, app switcher cover, strict mode (not yet tried on a real device) |
+| App core | matrix-rust-sdk (shared by Android and iOS) | ✅ room list previews kept in memory only; deleted messages erased from the device's cache |
 
 Only **web, Android and iOS** are supported for now. Desktop apps (Windows, macOS, Linux) are not planned yet.
 
@@ -50,9 +51,12 @@ docker/            image builds: fetch the upstream baseline, apply patches, bui
 deploy/            the installer (it generates every config file on the server)
 branding/          app name, package IDs and icon (edit here; builds pick it up)
 dev/               local test environment
+.github/workflows/ CI: server and web images, tests, Android and iOS builds
 ```
 
 FreeChat's changes live as patches in `patches/`. A build downloads the upstream source listed in `upstream.conf`, checks the commit hash, then applies the patches.
+
+The Android and iOS apps are built with a Rust SDK compiled from `patches/matrix-rust-sdk` rather than the published one (`dev/build-rust-sdk.sh`). CI does this and caches the result until the SDK patches change.
 
 ## Documentation
 
