@@ -1,7 +1,7 @@
 From 5581b577ca076ef95c5ebd93aeb89fa6fa766724 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 12/12] FreeChat: cache burn-after-reading checks per room; no
+Subject: [PATCH 12/13] FreeChat: cache burn-after-reading checks per room; no
  receipt time means unknown
 
 ---

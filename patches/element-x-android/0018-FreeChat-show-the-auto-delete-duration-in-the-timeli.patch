@@ -1,0 +1,329 @@
+From 8f7585a917953f71dcb1ac7c8711c615375cfa1e Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 00:00:00 +0000
+Subject: [PATCH 18/18] FreeChat: show the auto-delete duration in the timeline
+
+The SDK drops the content of custom state events from timeline items, so the
+TTL of a com.freechat.disappearing change is read from the event's original
+JSON: "Alice set messages to auto-delete after 1 day.", "... turned off
+auto-delete." Without the JSON the notice stays generic.
+---
+ .../event/TimelineItemContentFactory.kt       |  3 ++
+ .../event/TimelineItemContentStateFactory.kt  |  6 +++
+ .../impl/DefaultTimelineEventFormatter.kt     |  7 +++
+ .../impl/StateContentFormatter.kt             | 52 +++++++++++++++---
+ .../impl/FreeChatDisappearingFormatterTest.kt | 53 +++++++++++++++++++
+ .../matrix/api/freechat/Disappearing.kt       | 16 ++++++
+ .../matrix/api/freechat/DisappearingTest.kt   |  9 ++++
+ .../res/values-zh-rTW/freechat_strings.xml    |  4 ++
+ .../main/res/values-zh/freechat_strings.xml   |  4 ++
+ .../src/main/res/values/freechat_strings.xml  |  4 ++
+ 10 files changed, 152 insertions(+), 6 deletions(-)
+ create mode 100644 libraries/eventformatter/impl/src/test/kotlin/io/element/android/libraries/eventformatter/impl/FreeChatDisappearingFormatterTest.kt
+
+diff --git a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/factories/event/TimelineItemContentFactory.kt b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/factories/event/TimelineItemContentFactory.kt
+index 3bc7f9f070..18e7b3e99c 100644
+--- a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/factories/event/TimelineItemContentFactory.kt
++++ b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/factories/event/TimelineItemContentFactory.kt
+@@ -21,6 +21,7 @@ import io.element.android.libraries.dateformatter.api.DateFormatterMode
+ import io.element.android.libraries.matrix.api.core.EventId
+ import io.element.android.libraries.matrix.api.core.SessionId
+ import io.element.android.libraries.matrix.api.core.UserId
++import io.element.android.libraries.matrix.api.freechat.isFreeChatDisappearing
+ import io.element.android.libraries.matrix.api.room.RoomMember
+ import io.element.android.libraries.matrix.api.room.toMatrixUser
+ import io.element.android.libraries.matrix.api.timeline.item.event.CallNotifyContent
+@@ -62,6 +63,8 @@ class TimelineItemContentFactory(
+     private val stringProvider: StringProvider,
+ ) {
+     suspend fun create(eventTimelineItem: EventTimelineItem, roomMembers: List<RoomMember>): TimelineItemEventContent {
++        // FreeChat: the auto-delete TTL is only in the event's JSON.
++        if (eventTimelineItem.content.isFreeChatDisappearing()) return stateFactory.create(eventTimelineItem)
+         return create(
+             itemContent = eventTimelineItem.content,
+             eventId = eventTimelineItem.eventId,
+diff --git a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/factories/event/TimelineItemContentStateFactory.kt b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/factories/event/TimelineItemContentStateFactory.kt
+index 7eb071b1d6..44fbb72208 100644
+--- a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/factories/event/TimelineItemContentStateFactory.kt
++++ b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/factories/event/TimelineItemContentStateFactory.kt
+@@ -15,6 +15,7 @@ import io.element.android.libraries.core.extensions.orEmpty
+ import io.element.android.libraries.eventformatter.api.TimelineEventFormatter
+ import io.element.android.libraries.matrix.api.core.UserId
+ import io.element.android.libraries.matrix.api.timeline.item.event.EventContent
++import io.element.android.libraries.matrix.api.timeline.item.event.EventTimelineItem
+ 
+ @Inject
+ class TimelineItemContentStateFactory(
+@@ -24,4 +25,9 @@ class TimelineItemContentStateFactory(
+         val text = timelineEventFormatter.format(eventContent, isOutgoing, sender, senderDisambiguatedDisplayName)
+         return TimelineItemStateEventContent(text.orEmpty().toString())
+     }
++
++    /** FreeChat: from the whole event, for state events whose text needs more than the SDK's content. */
++    fun create(event: EventTimelineItem): TimelineItemEventContent {
++        return TimelineItemStateEventContent(timelineEventFormatter.format(event).orEmpty().toString())
++    }
+ }
+diff --git a/libraries/eventformatter/impl/src/main/kotlin/io/element/android/libraries/eventformatter/impl/DefaultTimelineEventFormatter.kt b/libraries/eventformatter/impl/src/main/kotlin/io/element/android/libraries/eventformatter/impl/DefaultTimelineEventFormatter.kt
+index ffb98fe2ec..d8067b75ff 100644
+--- a/libraries/eventformatter/impl/src/main/kotlin/io/element/android/libraries/eventformatter/impl/DefaultTimelineEventFormatter.kt
++++ b/libraries/eventformatter/impl/src/main/kotlin/io/element/android/libraries/eventformatter/impl/DefaultTimelineEventFormatter.kt
+@@ -14,6 +14,8 @@ import io.element.android.libraries.di.SessionScope
+ import io.element.android.libraries.eventformatter.api.TimelineEventFormatter
+ import io.element.android.libraries.eventformatter.impl.mode.RenderingMode
+ import io.element.android.libraries.matrix.api.core.UserId
++import io.element.android.libraries.matrix.api.freechat.Disappearing
++import io.element.android.libraries.matrix.api.freechat.isFreeChatDisappearing
+ import io.element.android.libraries.matrix.api.timeline.item.event.CallNotifyContent
+ import io.element.android.libraries.matrix.api.timeline.item.event.EventContent
+ import io.element.android.libraries.matrix.api.timeline.item.event.EventTimelineItem
+@@ -45,6 +47,11 @@ class DefaultTimelineEventFormatter(
+     override fun format(event: EventTimelineItem): CharSequence? {
+         val isOutgoing = event.isOwn
+         val senderDisambiguatedDisplayName = event.senderProfile.getDisambiguatedDisplayName(event.sender)
++        // FreeChat: the SDK drops the content of custom state events; the auto-delete TTL is read from the event's JSON.
++        if (event.content.isFreeChatDisappearing()) {
++            val ttl = Disappearing.ttlFromEventJson(event.timelineItemDebugInfoProvider().originalJson)
++            return stateContentFormatter.formatDisappearing(ttl, senderDisambiguatedDisplayName, isOutgoing, RenderingMode.Timeline)
++        }
+         return format(event.content, isOutgoing, event.sender, senderDisambiguatedDisplayName)
+     }
+ 
+diff --git a/libraries/eventformatter/impl/src/main/kotlin/io/element/android/libraries/eventformatter/impl/StateContentFormatter.kt b/libraries/eventformatter/impl/src/main/kotlin/io/element/android/libraries/eventformatter/impl/StateContentFormatter.kt
+index a68f5f61be..0f6d7d5ef5 100644
+--- a/libraries/eventformatter/impl/src/main/kotlin/io/element/android/libraries/eventformatter/impl/StateContentFormatter.kt
++++ b/libraries/eventformatter/impl/src/main/kotlin/io/element/android/libraries/eventformatter/impl/StateContentFormatter.kt
+@@ -13,6 +13,7 @@ import io.element.android.libraries.eventformatter.impl.mode.RenderingMode
+ import io.element.android.libraries.matrix.api.freechat.Disappearing
+ import io.element.android.libraries.matrix.api.timeline.item.event.OtherState
+ import io.element.android.libraries.matrix.api.timeline.item.event.StateContent
++import io.element.android.libraries.ui.strings.CommonPlurals
+ import io.element.android.libraries.ui.strings.CommonStrings
+ import io.element.android.services.toolbox.api.strings.StringProvider
+ import timber.log.Timber
+@@ -27,14 +28,44 @@ class StateContentFormatter(
+         senderIsYou: Boolean,
+         renderingMode: RenderingMode,
+     ): CharSequence? {
+-        // FreeChat: disappearing messages TTL changes. The SDK does not expose custom state content, hence no duration.
++        // FreeChat: disappearing messages TTL changes. Without the event's JSON the duration is unknown.
+         if ((stateContent.content as? OtherState.Custom)?.eventType == Disappearing.STATE_TYPE) {
+-            return when {
+-                renderingMode == RenderingMode.RoomList -> null
+-                senderIsYou -> sp.getString(CommonStrings.freechat_disappearing_updated_by_you)
+-                else -> sp.getString(CommonStrings.freechat_disappearing_updated, senderDisambiguatedDisplayName)
+-            }
++            return formatDisappearing(null, senderDisambiguatedDisplayName, senderIsYou, renderingMode)
+         }
++        return formatUpstream(stateContent, senderDisambiguatedDisplayName, senderIsYou, renderingMode)
++    }
++
++    /** FreeChat: a change of the room's auto-delete TTL; [ttl] is null when unknown. */
++    fun formatDisappearing(
++        ttl: Long?,
++        senderDisambiguatedDisplayName: String,
++        senderIsYou: Boolean,
++        renderingMode: RenderingMode,
++    ): CharSequence? = when {
++        renderingMode == RenderingMode.RoomList -> null
++        ttl == null && senderIsYou -> sp.getString(CommonStrings.freechat_disappearing_updated_by_you)
++        ttl == null -> sp.getString(CommonStrings.freechat_disappearing_updated, senderDisambiguatedDisplayName)
++        ttl <= 0 && senderIsYou -> sp.getString(CommonStrings.freechat_disappearing_turned_off_by_you)
++        ttl <= 0 -> sp.getString(CommonStrings.freechat_disappearing_turned_off, senderDisambiguatedDisplayName)
++        senderIsYou -> sp.getString(CommonStrings.freechat_disappearing_set_by_you, durationLabel(ttl))
++        else -> sp.getString(CommonStrings.freechat_disappearing_set, senderDisambiguatedDisplayName, durationLabel(ttl))
++    }
++
++    private fun durationLabel(ttl: Long): String = when (val duration = Disappearing.describe(ttl)) {
++        Disappearing.Duration.Off -> sp.getString(CommonStrings.freechat_disappearing_off)
++        is Disappearing.Duration.Preset -> sp.getString(DISAPPEARING_PRESET_LABELS[duration.index])
++        is Disappearing.Duration.Days -> sp.getQuantityString(CommonPlurals.freechat_disappearing_days, duration.count.toInt(), duration.count)
++        is Disappearing.Duration.Hours -> sp.getQuantityString(CommonPlurals.freechat_disappearing_hours, duration.count.toInt(), duration.count)
++        is Disappearing.Duration.Minutes -> sp.getQuantityString(CommonPlurals.freechat_disappearing_minutes, duration.count.toInt(), duration.count)
++        is Disappearing.Duration.Seconds -> sp.getQuantityString(CommonPlurals.freechat_disappearing_seconds, duration.count.toInt(), duration.count)
++    }
++
++    private fun formatUpstream(
++        stateContent: StateContent,
++        senderDisambiguatedDisplayName: String,
++        senderIsYou: Boolean,
++        renderingMode: RenderingMode,
++    ): CharSequence? {
+         return when (val content = stateContent.content) {
+             is OtherState.RoomAvatar -> {
+                 val hasAvatarUrl = content.url != null
+@@ -230,3 +261,12 @@ class StateContentFormatter(
+         }
+     }
+ }
++
++// FreeChat: same order as Disappearing.PRESETS, like DisappearingLabels.
++private val DISAPPEARING_PRESET_LABELS = listOf(
++    CommonStrings.freechat_disappearing_off,
++    CommonStrings.freechat_disappearing_hour,
++    CommonStrings.freechat_disappearing_day,
++    CommonStrings.freechat_disappearing_week,
++    CommonStrings.freechat_disappearing_month,
++)
+diff --git a/libraries/eventformatter/impl/src/test/kotlin/io/element/android/libraries/eventformatter/impl/FreeChatDisappearingFormatterTest.kt b/libraries/eventformatter/impl/src/test/kotlin/io/element/android/libraries/eventformatter/impl/FreeChatDisappearingFormatterTest.kt
+new file mode 100644
+index 0000000000..656afa90fc
+--- /dev/null
++++ b/libraries/eventformatter/impl/src/test/kotlin/io/element/android/libraries/eventformatter/impl/FreeChatDisappearingFormatterTest.kt
+@@ -0,0 +1,53 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.eventformatter.impl
++
++import android.content.Context
++import com.google.common.truth.Truth.assertThat
++import io.element.android.libraries.eventformatter.impl.mode.RenderingMode
++import io.element.android.services.toolbox.impl.strings.AndroidStringProvider
++import io.element.android.tests.testutils.robolectric.RobolectricTest
++import org.junit.Before
++import org.junit.Test
++import org.robolectric.RuntimeEnvironment
++import org.robolectric.annotation.Config
++
++class FreeChatDisappearingFormatterTest : RobolectricTest() {
++    private lateinit var formatter: StateContentFormatter
++
++    @Before
++    fun setup() {
++        val context = RuntimeEnvironment.getApplication() as Context
++        formatter = StateContentFormatter(AndroidStringProvider(context.resources))
++    }
++
++    private fun format(ttl: Long?, isYou: Boolean = false, mode: RenderingMode = RenderingMode.Timeline) =
++        formatter.formatDisappearing(ttl, "Alice", isYou, mode)?.toString()
++
++    @Test
++    @Config(qualifiers = "en")
++    fun `the duration is shown when known`() {
++        assertThat(format(86_400)).isEqualTo("Alice set messages to auto-delete after 1 day.")
++        assertThat(format(2 * 86_400, isYou = true)).isEqualTo("You set messages to auto-delete after 2 days.")
++        assertThat(format(0)).isEqualTo("Alice turned off auto-delete.")
++        assertThat(format(0, isYou = true)).isEqualTo("You turned off auto-delete.")
++    }
++
++    @Test
++    @Config(qualifiers = "en")
++    fun `without the event's JSON it stays generic, and the room list shows nothing`() {
++        assertThat(format(null)).isEqualTo("Alice changed the auto-delete setting.")
++        assertThat(format(3600, mode = RenderingMode.RoomList)).isNull()
++    }
++
++    @Test
++    @Config(qualifiers = "zh")
++    fun `simplified Chinese`() {
++        assertThat(format(3600)).isEqualTo("Alice 将自动删除设为 1 小时。")
++    }
++}
+diff --git a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/Disappearing.kt b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/Disappearing.kt
+index ecc7751d4e..5e999985e9 100644
+--- a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/Disappearing.kt
++++ b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/freechat/Disappearing.kt
+@@ -7,6 +7,9 @@
+ 
+ package io.element.android.libraries.matrix.api.freechat
+ 
++import io.element.android.libraries.matrix.api.timeline.item.event.EventContent
++import io.element.android.libraries.matrix.api.timeline.item.event.OtherState
++import io.element.android.libraries.matrix.api.timeline.item.event.StateContent
+ import kotlinx.serialization.json.Json
+ import kotlinx.serialization.json.JsonObject
+ import kotlinx.serialization.json.JsonPrimitive
+@@ -93,6 +96,15 @@ object Disappearing {
+         return ttl.coerceAtLeast(0)
+     }
+ 
++    /**
++     * TTL in seconds from a whole state event's JSON (the SDK drops the content of custom state events from timeline
++     * items, but keeps the original JSON). Null when the JSON is missing or has no content object.
++     */
++    fun ttlFromEventJson(eventJson: String?): Long? {
++        val content = parseObject(eventJson)?.get("content") as? JsonObject ?: return null
++        return ttlFromContent(content.toString())
++    }
++
+     fun contentForTtl(ttl: Long): String = """{"ttl":${ttl.coerceAtLeast(0)}}"""
+ 
+     /** How a TTL should be described: a preset label or a count of the largest whole unit. */
+@@ -129,3 +141,7 @@ object Disappearing {
+         runCatching { json.parseToJsonElement(it).jsonObject }.getOrNull()
+     }
+ }
++
++/** Whether this is a change of the room's auto-delete TTL. */
++fun EventContent.isFreeChatDisappearing(): Boolean =
++    ((this as? StateContent)?.content as? OtherState.Custom)?.eventType == Disappearing.STATE_TYPE
+diff --git a/libraries/matrix/api/src/test/kotlin/io/element/android/libraries/matrix/api/freechat/DisappearingTest.kt b/libraries/matrix/api/src/test/kotlin/io/element/android/libraries/matrix/api/freechat/DisappearingTest.kt
+index 6253070329..be5a3ce15c 100644
+--- a/libraries/matrix/api/src/test/kotlin/io/element/android/libraries/matrix/api/freechat/DisappearingTest.kt
++++ b/libraries/matrix/api/src/test/kotlin/io/element/android/libraries/matrix/api/freechat/DisappearingTest.kt
+@@ -25,6 +25,15 @@ class DisappearingTest {
+         assertThat(Disappearing.ttlFromContent("not json")).isEqualTo(0)
+     }
+ 
++    @Test
++    fun `ttlFromEventJson - reads the content of a whole event`() {
++        assertThat(Disappearing.ttlFromEventJson("""{"type":"com.freechat.disappearing","content":{"ttl":3600}}""")).isEqualTo(3600)
++        assertThat(Disappearing.ttlFromEventJson("""{"type":"com.freechat.disappearing","content":{}}""")).isEqualTo(0)
++        assertThat(Disappearing.ttlFromEventJson("""{"type":"com.freechat.disappearing"}""")).isNull()
++        assertThat(Disappearing.ttlFromEventJson(null)).isNull()
++        assertThat(Disappearing.ttlFromEventJson("not json")).isNull()
++    }
++
+     @Test
+     fun `contentForTtl - round trips`() {
+         assertThat(Disappearing.ttlFromContent(Disappearing.contentForTtl(86400))).isEqualTo(86400)
+diff --git a/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml b/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml
+index 607fcffd16..792f26ff52 100644
+--- a/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml
++++ b/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml
+@@ -28,6 +28,10 @@
+     <string name="freechat_disappearing_error">無法修改自動刪除設定</string>
+     <string name="freechat_disappearing_updated">%1$s 修改了自動刪除設定。</string>
+     <string name="freechat_disappearing_updated_by_you">你修改了自動刪除設定。</string>
++    <string name="freechat_disappearing_set">%1$s 將自動刪除設為 %2$s。</string>
++    <string name="freechat_disappearing_set_by_you">你將自動刪除設為 %1$s。</string>
++    <string name="freechat_disappearing_turned_off">%1$s 關閉了自動刪除。</string>
++    <string name="freechat_disappearing_turned_off_by_you">你關閉了自動刪除。</string>
+     <string name="freechat_burn_title">我的訊息閱後即焚</string>
+     <string name="freechat_burn_description">你發出的訊息，在所有其他成員都讀過之後，經過設定時間從所有人那裡刪除。只對之後發出的訊息生效。</string>
+     <string name="freechat_burn_room_title">這個聊天裡我的訊息閱後即焚</string>
+diff --git a/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml b/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml
+index ebd4e1c141..49ba4658a0 100644
+--- a/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml
++++ b/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml
+@@ -28,6 +28,10 @@
+     <string name="freechat_disappearing_error">无法修改自动删除设置</string>
+     <string name="freechat_disappearing_updated">%1$s 修改了自动删除设置。</string>
+     <string name="freechat_disappearing_updated_by_you">你修改了自动删除设置。</string>
++    <string name="freechat_disappearing_set">%1$s 将自动删除设为 %2$s。</string>
++    <string name="freechat_disappearing_set_by_you">你将自动删除设为 %1$s。</string>
++    <string name="freechat_disappearing_turned_off">%1$s 关闭了自动删除。</string>
++    <string name="freechat_disappearing_turned_off_by_you">你关闭了自动删除。</string>
+     <string name="freechat_burn_title">我的消息阅后即焚</string>
+     <string name="freechat_burn_description">你发出的消息，在所有其他成员都读过之后，经过设定时间从所有人那里删除。只对之后发出的消息生效。</string>
+     <string name="freechat_burn_room_title">这个聊天里我的消息阅后即焚</string>
+diff --git a/libraries/ui-strings/src/main/res/values/freechat_strings.xml b/libraries/ui-strings/src/main/res/values/freechat_strings.xml
+index 562b9c0c08..47be618c12 100644
+--- a/libraries/ui-strings/src/main/res/values/freechat_strings.xml
++++ b/libraries/ui-strings/src/main/res/values/freechat_strings.xml
+@@ -33,6 +33,10 @@
+     <string name="freechat_disappearing_error">Could not change auto-delete</string>
+     <string name="freechat_disappearing_updated">%1$s changed the auto-delete setting.</string>
+     <string name="freechat_disappearing_updated_by_you">You changed the auto-delete setting.</string>
++    <string name="freechat_disappearing_set">%1$s set messages to auto-delete after %2$s.</string>
++    <string name="freechat_disappearing_set_by_you">You set messages to auto-delete after %1$s.</string>
++    <string name="freechat_disappearing_turned_off">%1$s turned off auto-delete.</string>
++    <string name="freechat_disappearing_turned_off_by_you">You turned off auto-delete.</string>
+     <string name="freechat_burn_title">Burn my messages after reading</string>
+     <string name="freechat_burn_description">Messages you send are deleted for everyone this long after every other member has read them. Applies to messages sent from now on.</string>
+     <string name="freechat_burn_room_title">Burn my messages after reading in this chat</string>

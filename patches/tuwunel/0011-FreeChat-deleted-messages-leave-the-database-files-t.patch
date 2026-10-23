@@ -1,7 +1,7 @@
 From 100f4699e54cd765a29e53a4880cf402e2e872f8 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 11/14] FreeChat: deleted messages leave the database files too
+Subject: [PATCH 11/15] FreeChat: deleted messages leave the database files too
 
 No WAL archive; after messages are purged, all memtables are flushed and the
 event maps compacted all the way down, at most daily. There is no server-side

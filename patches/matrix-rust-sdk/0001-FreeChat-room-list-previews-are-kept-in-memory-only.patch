@@ -1,7 +1,7 @@
 From a56a614894b99d425ffb3d0e2a3533cab6cf8e3a Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 00:00:00 +0000
-Subject: [PATCH 1/2] FreeChat: room list previews are kept in memory only
+Subject: [PATCH 1/3] FreeChat: room list previews are kept in memory only
 
 The latest event of a room holds the content of a message (the decrypted one
 in an encrypted room). It is no longer written to the state store with the

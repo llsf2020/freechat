@@ -1,0 +1,162 @@
+From 86b644d6471010b01c11004b82fd9b1aa81eccad Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Fri, 23 Oct 2026 00:00:00 +0000
+Subject: [PATCH 12/12] FreeChat: show auto-delete changes in the timeline,
+ with the duration
+
+Custom state events were filtered out of the timeline. Changes of
+com.freechat.disappearing are now shown, with the TTL read from the event's
+original JSON since the SDK drops the content of custom state events.
+---
+ ElementX/Sources/FreeChat/FreeChat.swift      |  7 ++++
+ .../Sources/FreeChat/FreeChatStrings.swift    | 42 +++++++++++++++++--
+ .../RoomTimelineItemFactory.swift             |  7 ++++
+ UnitTests/Sources/FreeChatTests.swift         | 20 +++++++++
+ 4 files changed, 73 insertions(+), 3 deletions(-)
+
+diff --git a/ElementX/Sources/FreeChat/FreeChat.swift b/ElementX/Sources/FreeChat/FreeChat.swift
+index 19c47ac36..175efddeb 100644
+--- a/ElementX/Sources/FreeChat/FreeChat.swift
++++ b/ElementX/Sources/FreeChat/FreeChat.swift
+@@ -29,6 +29,13 @@ nonisolated enum FreeChat {
+         nonNegative(object(from: json)?["ttl"]) ?? 0
+     }
+ 
++    /// The TTL from a whole `com.freechat.disappearing` event's JSON: the SDK drops the content of custom state events
++    /// from timeline items but keeps the original JSON. Nil when there is no content.
++    static func roomTTL(fromEventJSON json: String?) -> UInt64? {
++        guard let content = object(from: json)?["content"] as? [String: Any] else { return nil }
++        return nonNegative(content["ttl"]) ?? 0
++    }
++
+     static func contentJSON(forRoomTTL ttl: UInt64) -> String {
+         "{\"ttl\":\(ttl)}"
+     }
+diff --git a/ElementX/Sources/FreeChat/FreeChatStrings.swift b/ElementX/Sources/FreeChat/FreeChatStrings.swift
+index aa55889db..3b9c06656 100644
+--- a/ElementX/Sources/FreeChat/FreeChatStrings.swift
++++ b/ElementX/Sources/FreeChat/FreeChatStrings.swift
+@@ -18,12 +18,30 @@ nonisolated enum FreeChatStrings {
+         case strictSection, strictTitle, strictFooter, strictOn, strictOffPending, strictIdle
+         case strictConfirmTitle, strictConfirmMessage, strictConfirmButton, strictTurnOff
+         case screenshotTaken, screenshotTakenMessage, screenHidden
++        case autoDeleteChanged, autoDeleteChangedByYou, autoDeleteSet, autoDeleteSetByYou
++        case autoDeleteTurnedOff, autoDeleteTurnedOffByYou
+     }
+ 
+     static func string(_ key: Key) -> String {
+         table[key] ?? english[key] ?? key.rawValue
+     }
+ 
++    /// The timeline notice for a change of the room's auto-delete TTL; `ttl` is nil when unknown.
++    static func autoDeleteChange(ttl: UInt64?, sender: String, isOutgoing: Bool) -> String {
++        let key: Key = switch (ttl, isOutgoing) {
++        case (nil, true): .autoDeleteChangedByYou
++        case (nil, false): .autoDeleteChanged
++        case (0, true): .autoDeleteTurnedOffByYou
++        case (0, false): .autoDeleteTurnedOff
++        case (_, true): .autoDeleteSetByYou
++        case (_, false): .autoDeleteSet
++        }
++        // The duration first, so a display name containing "{duration}" stays as it is.
++        return string(key)
++            .replacingOccurrences(of: "{duration}", with: duration(ttl ?? 0))
++            .replacingOccurrences(of: "{name}", with: sender)
++    }
++
+     /// A duration in seconds as the largest whole unit, e.g. "5 minutes".
+     static func duration(_ seconds: UInt64) -> String {
+         guard seconds > 0 else { return string(.off) }
+@@ -115,7 +133,13 @@ nonisolated enum FreeChatStrings {
+         .strictTurnOff: "Turn off from the next sign-in",
+         .screenshotTaken: "Screenshot taken",
+         .screenshotTakenMessage: "This room asks members not to take screenshots.",
+-        .screenHidden: "Hidden while the screen is being recorded"
++        .screenHidden: "Hidden while the screen is being recorded",
++        .autoDeleteChanged: "{name} changed the auto-delete setting.",
++        .autoDeleteChangedByYou: "You changed the auto-delete setting.",
++        .autoDeleteSet: "{name} set messages to auto-delete after {duration}.",
++        .autoDeleteSetByYou: "You set messages to auto-delete after {duration}.",
++        .autoDeleteTurnedOff: "{name} turned off auto-delete.",
++        .autoDeleteTurnedOffByYou: "You turned off auto-delete."
+     ]
+ 
+     private static let simplified: [Key: String] = [
+@@ -157,7 +181,13 @@ nonisolated enum FreeChatStrings {
+         .strictTurnOff: "下次登录起关闭",
+         .screenshotTaken: "检测到截屏",
+         .screenshotTakenMessage: "这个房间要求成员不要截屏。",
+-        .screenHidden: "正在录屏，内容已隐藏"
++        .screenHidden: "正在录屏，内容已隐藏",
++        .autoDeleteChanged: "{name} 修改了自动删除设置。",
++        .autoDeleteChangedByYou: "你修改了自动删除设置。",
++        .autoDeleteSet: "{name} 将自动删除设为 {duration}。",
++        .autoDeleteSetByYou: "你将自动删除设为 {duration}。",
++        .autoDeleteTurnedOff: "{name} 关闭了自动删除。",
++        .autoDeleteTurnedOffByYou: "你关闭了自动删除。"
+     ]
+ 
+     private static let traditional: [Key: String] = [
+@@ -199,6 +229,12 @@ nonisolated enum FreeChatStrings {
+         .strictTurnOff: "下次登入起關閉",
+         .screenshotTaken: "偵測到截圖",
+         .screenshotTakenMessage: "這個房間要求成員不要截圖。",
+-        .screenHidden: "正在錄影，內容已隱藏"
++        .screenHidden: "正在錄影，內容已隱藏",
++        .autoDeleteChanged: "{name} 修改了自動刪除設定。",
++        .autoDeleteChangedByYou: "你修改了自動刪除設定。",
++        .autoDeleteSet: "{name} 將自動刪除設為 {duration}。",
++        .autoDeleteSetByYou: "你將自動刪除設為 {duration}。",
++        .autoDeleteTurnedOff: "{name} 關閉了自動刪除。",
++        .autoDeleteTurnedOffByYou: "你關閉了自動刪除。"
+     ]
+ }
+diff --git a/ElementX/Sources/Services/Timeline/TimelineItems/RoomTimelineItemFactory.swift b/ElementX/Sources/Services/Timeline/TimelineItems/RoomTimelineItemFactory.swift
+index 6cc60ce46..a9a84b0dd 100644
+--- a/ElementX/Sources/Services/Timeline/TimelineItems/RoomTimelineItemFactory.swift
++++ b/ElementX/Sources/Services/Timeline/TimelineItems/RoomTimelineItemFactory.swift
+@@ -916,6 +916,13 @@ nonisolated struct RoomTimelineItemFactory: RoomTimelineItemFactoryProtocol {
+     private func buildStateTimelineItem(for eventItemProxy: EventTimelineItemProxy,
+                                         state: OtherState,
+                                         isOutgoing: Bool) -> RoomTimelineItemProtocol? {
++        // FreeChat: the SDK drops the content of custom state events; the auto-delete TTL is read from the event's JSON.
++        if case .custom(let eventType) = state, eventType == FreeChat.disappearingStateType {
++            let ttl = FreeChat.roomTTL(fromEventJSON: eventItemProxy.item.lazyProvider.debugInfo().originalJson)
++            let sender = eventItemProxy.sender.disambiguatedDisplayName ?? eventItemProxy.sender.id
++            let text = FreeChatStrings.autoDeleteChange(ttl: ttl, sender: sender, isOutgoing: isOutgoing)
++            return buildStateTimelineItem(for: eventItemProxy, text: text, isOutgoing: isOutgoing)
++        }
+         guard let text = stateEventStringBuilder.buildString(for: state, sender: eventItemProxy.sender, isOutgoing: isOutgoing) else { return nil }
+         return buildStateTimelineItem(for: eventItemProxy, text: text, isOutgoing: isOutgoing)
+     }
+diff --git a/UnitTests/Sources/FreeChatTests.swift b/UnitTests/Sources/FreeChatTests.swift
+index ee098331b..a8079fd61 100644
+--- a/UnitTests/Sources/FreeChatTests.swift
++++ b/UnitTests/Sources/FreeChatTests.swift
+@@ -30,6 +30,26 @@ struct FreeChatTests {
+         #expect(FreeChat.contentJSON(forRoomTTL: 60) == #"{"ttl":60}"#)
+     }
+ 
++    @Test
++    func roomTTLFromWholeEvent() {
++        #expect(FreeChat.roomTTL(fromEventJSON: #"{"type":"com.freechat.disappearing","content":{"ttl":3600}}"#) == 3600)
++        #expect(FreeChat.roomTTL(fromEventJSON: #"{"type":"com.freechat.disappearing","content":{}}"#) == 0)
++        #expect(FreeChat.roomTTL(fromEventJSON: #"{"type":"com.freechat.disappearing"}"#) == nil)
++        #expect(FreeChat.roomTTL(fromEventJSON: nil) == nil)
++    }
++
++    @Test
++    func autoDeleteNoticeNamesTheSenderAndDuration() {
++        let set = FreeChatStrings.autoDeleteChange(ttl: 3600, sender: "Alice", isOutgoing: false)
++        #expect(set.contains("Alice"))
++        #expect(set.contains(FreeChatStrings.duration(3600)))
++        #expect(!FreeChatStrings.autoDeleteChange(ttl: 3600, sender: "Alice", isOutgoing: true).contains("Alice"))
++        #expect(FreeChatStrings.autoDeleteChange(ttl: 0, sender: "Alice", isOutgoing: false) != set)
++        #expect(FreeChatStrings.autoDeleteChange(ttl: nil, sender: "Alice", isOutgoing: false) != set)
++        // Placeholders in a display name are left alone.
++        #expect(FreeChatStrings.autoDeleteChange(ttl: 60, sender: "{duration}", isOutgoing: false).contains("{duration}"))
++    }
++
+     @Test
+     func screenshotBlockingIsStrict() {
+         #expect(FreeChat.blocksScreenshots(privacyContentJSON: #"{"block_screenshots":true}"#))
