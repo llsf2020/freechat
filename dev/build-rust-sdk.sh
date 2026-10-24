@@ -76,7 +76,7 @@ case "${1:-}" in
 		compgen -G "$src/jniLibs/*/libmatrix_sdk_ffi.so" > /dev/null \
 			|| { echo "nothing built for Android in $src: run android-target first" >&2; exit 1; }
 		# The checkout carries upstream's bindings; ours have the FreeChat additions.
-		grep -q "fun eraseEventsLocally" "$src/kotlin/org/matrix/rustcomponents/sdk/matrix_sdk_ffi.kt" \
+		grep -q 'fun .eraseEventsLocally.(' "$src/kotlin/org/matrix/rustcomponents/sdk/matrix_sdk_ffi.kt" \
 			|| { echo "the Kotlin bindings in $src are not FreeChat's" >&2; exit 1; }
 		ls "$src"/jniLibs/
 		(cd "$KOTLIN" && bash scripts/build-aar.sh -r -m sdk -o "$aar")
