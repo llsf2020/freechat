@@ -12,7 +12,7 @@ A self-hosted, Telegram-like messenger with chat, voice and video (including gro
 - **Burn after reading**: anyone can make their own messages disappear a set time after everyone has read them.
 - **Server-wide retention cap**: no message stays on the server longer than this (set at install time, 7 days by default).
 - **Private rooms**: joining takes a password or a request an admin approves.
-- **Minimal metadata**: the server records no IP addresses or device names and keeps no logs by default. Pushes carry only an event ID, never content or sender. Android push runs through your own ntfy, not Google.
+- **Minimal metadata**: the server records no IP addresses or device names and keeps no logs by default. Pushes carry only an event ID, never content or sender. Android push runs through your own server (its ntfy, with or without the ntfy app), never Google.
 - **Strict mode**: the login session and keys live in memory only, and the device signs itself out when the app or page is closed.
 - **Screenshot blocking**: Android can block screenshots and screen recording; iOS hides protected rooms while the screen is recorded.
 - **One-script install**: a 1-core, 1 GB VPS is enough. HTTPS certificates are set up automatically, and the database can optionally live on an encrypted volume.

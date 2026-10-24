@@ -1,7 +1,7 @@
 From 5eec680783b4b151becbb94bba799be781149887 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 05/19] FreeChat: strict mode; messages do not outlive the
+Subject: [PATCH 05/20] FreeChat: strict mode; messages do not outlive the
  process
 
 Strict mode (per device, opt-in): the session is kept in memory only, its SDK

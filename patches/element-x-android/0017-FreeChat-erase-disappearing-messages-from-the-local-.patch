@@ -1,7 +1,7 @@
 From e2b09e3f861ef009bdfa2c6ef06d6bcfbc68aa3c Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 00:00:00 +0000
-Subject: [PATCH 17/19] FreeChat: erase disappearing messages from the local
+Subject: [PATCH 17/20] FreeChat: erase disappearing messages from the local
  event cache
 
 Messages hidden because they expired or the server purged them are also erased

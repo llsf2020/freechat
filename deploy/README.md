@@ -94,13 +94,23 @@ The database goes into a LUKS-encrypted volume (8 GB by default; write `--encryp
 
 ## Android push notifications
 
-FreeChat pushes go **through neither Google nor any phone maker**: the server runs its own push service, ntfy, and the ntfy app on the phone stays connected to it. A push only says "a room has new messages", with no content and no sender; FreeChat then fetches the messages from the server and decrypts them on the phone.
+FreeChat notifications go **through neither Google nor any phone maker**: everything stays between the phone and your server. A push only says "a room has new messages", with no content and no sender; FreeChat then fetches the messages from the server and decrypts them on the phone.
 
-Set up each Android phone once:
+Choose how each phone gets them in FreeChat → Settings → Notifications → Advanced settings → **Push notification provider**:
+
+| Method | Arrives | Needs | Costs |
+|---|---|---|---|
+| **ntfy** | instantly | the ntfy app, set up as below | nothing extra in FreeChat |
+| **Check every 15 minutes** (default without ntfy) | within about 15 minutes, later while the phone saves battery | nothing | very little battery |
+| **Built-in connection** | instantly | nothing | a permanent silent notification and some battery for the open connection |
+
+The built-in connection does in FreeChat what the ntfy app would do: it keeps a connection to the server's ntfy open. It starts again after the phone restarts; on phones that stop background apps aggressively, give FreeChat the same background permissions as described for ntfy in step 4.
+
+To use ntfy, set up each Android phone once:
 
 1. Install the **ntfy** app from F-Droid, Google Play or GitHub (https://github.com/binwiederhier/ntfy-android/releases).
 2. Open ntfy → menu at the top right → **Settings** → **Default server**, and enter `https://your-domain` (the same address as the FreeChat server). **You must change this**: otherwise pushes would go through ntfy's public server, and FreeChat refuses to use it.
-3. Open FreeChat → Settings → Notifications and choose **ntfy** as the push method.
+3. Open FreeChat → Settings → Notifications → **Push notification provider** and choose **ntfy**.
 4. On phones that stop background apps aggressively (many Huawei, Xiaomi, OPPO, vivo, Honor and Samsung models), also let **ntfy** run in the background, or the system kills it:
    - **allow auto-start** (in the phone manager / app launch settings, switch to manual management and turn everything on)
    - **Battery → unrestricted / don't optimize**

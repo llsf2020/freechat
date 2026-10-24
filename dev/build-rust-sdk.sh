@@ -67,6 +67,13 @@ case "${1:-}" in
 		KOTLIN="$ROOT/forks/matrix-rust-components-kotlin"
 		[[ -d "$KOTLIN" ]] || sh "$ROOT/docker/checkout.sh" matrix-rust-components-kotlin "$KOTLIN"
 		bash "$KOTLIN/scripts/build-rust-for-target.sh" -p "$SDK" -m sdk -t "$2" -r
+		# The release profile keeps the symbol table, about half the library: strip it as upstream's release does.
+		# The dynamic symbols the JNI bindings look up stay.
+		strip=$(compgen -G "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/*/bin/llvm-strip" | head -n 1)
+		[[ -n "$strip" ]] || { echo "no llvm-strip in the NDK" >&2; exit 1; }
+		for lib in "$KOTLIN"/sdk/sdk-android/src/main/jniLibs/*/libmatrix_sdk_ffi.so; do
+			"$strip" --strip-unneeded "$lib"
+		done
 		;;
 	android-aar)
 		aar="$(realpath -m "${2:-$ROOT/forks/element-x-android/libraries/rustsdk/matrix-rust-sdk.aar}")"

@@ -1,7 +1,7 @@
 From 8f7585a917953f71dcb1ac7c8711c615375cfa1e Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 00:00:00 +0000
-Subject: [PATCH 18/19] FreeChat: show the auto-delete duration in the timeline
+Subject: [PATCH 18/20] FreeChat: show the auto-delete duration in the timeline
 
 The SDK drops the content of custom state events from timeline items, so the
 TTL of a com.freechat.disappearing change is read from the event's original

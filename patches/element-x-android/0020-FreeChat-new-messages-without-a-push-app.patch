@@ -1,0 +1,1570 @@
+From 48bda7fa2154417ba49d8ed5c9bf4ddb6b5ef00d Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 00:00:00 +0000
+Subject: [PATCH 20/20] FreeChat: new messages without a push app
+
+Two more ways to get notifications, offered next to UnifiedPush under
+"Push notification provider":
+- Periodic checks (the default without a UnifiedPush app): about every
+  15 minutes a WorkManager job asks the homeserver's /notifications for
+  unread notifications newer than the last check, and hands them to the
+  push handler like pushed ones. No pusher is registered.
+- Built-in connection: the app subscribes to a random up* topic of the
+  ntfy on the user's own homeserver and registers it as the pusher, so
+  it does what the ntfy app would. A specialUse foreground service with
+  a silent notification keeps the JSON stream open, reconnects with a
+  backoff or as soon as the network is back, and starts again after a
+  reboot or an update.
+MatrixClient.clientApiRequest generalises freechatRequest to any
+client-server API path. The push loopback test is hidden for periodic
+checks, which have no pusher.
+---
+ .../libraries/matrix/api/MatrixClient.kt      |   7 +
+ .../libraries/matrix/impl/RustMatrixClient.kt |   8 +-
+ .../libraries/matrix/test/FakeMatrixClient.kt |   6 +
+ .../impl/troubleshoot/PushLoopbackTest.kt     |   4 +
+ .../unifiedpush/build.gradle.kts              |   6 +
+ .../unifiedpush/src/main/AndroidManifest.xml  |  21 +++
+ .../freechat/BuiltInPushConnection.kt         | 137 +++++++++++++++
+ .../freechat/BuiltInPushProvider.kt           |  80 +++++++++
+ .../freechat/BuiltInPushService.kt            | 161 ++++++++++++++++++
+ .../freechat/FreeChatPushConfig.kt            |  23 +++
+ .../unifiedpush/freechat/FreeChatPushStore.kt |  80 +++++++++
+ .../freechat/NotificationsPoller.kt           |  86 ++++++++++
+ .../unifiedpush/freechat/NtfyStream.kt        |  74 ++++++++
+ .../freechat/PollingPushProvider.kt           |  74 ++++++++
+ .../unifiedpush/freechat/PushPollWorker.kt    |  84 +++++++++
+ .../freechat/BuiltInPushConnectionTest.kt     |  94 ++++++++++
+ .../freechat/FakeFreeChatPushStore.kt         |  33 ++++
+ .../freechat/FreeChatPushProvidersTest.kt     | 145 ++++++++++++++++
+ .../freechat/NotificationsPollerTest.kt       |  99 +++++++++++
+ .../unifiedpush/freechat/NtfyStreamTest.kt    |  57 +++++++
+ .../res/values-zh-rTW/freechat_strings.xml    |   4 +
+ .../main/res/values-zh/freechat_strings.xml   |   4 +
+ .../src/main/res/values/freechat_strings.xml  |   4 +
+ .../workmanager/api/WorkManagerScheduler.kt   |   4 +
+ 24 files changed, 1293 insertions(+), 2 deletions(-)
+ create mode 100644 libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/BuiltInPushConnection.kt
+ create mode 100644 libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/BuiltInPushProvider.kt
+ create mode 100644 libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/BuiltInPushService.kt
+ create mode 100644 libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/FreeChatPushConfig.kt
+ create mode 100644 libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/FreeChatPushStore.kt
+ create mode 100644 libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/NotificationsPoller.kt
+ create mode 100644 libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/NtfyStream.kt
+ create mode 100644 libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/PollingPushProvider.kt
+ create mode 100644 libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/PushPollWorker.kt
+ create mode 100644 libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/BuiltInPushConnectionTest.kt
+ create mode 100644 libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/FakeFreeChatPushStore.kt
+ create mode 100644 libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/FreeChatPushProvidersTest.kt
+ create mode 100644 libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/NotificationsPollerTest.kt
+ create mode 100644 libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/NtfyStreamTest.kt
+
+diff --git a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/MatrixClient.kt b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/MatrixClient.kt
+index 3b8172a4e8..8d02065911 100644
+--- a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/MatrixClient.kt
++++ b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/MatrixClient.kt
+@@ -526,6 +526,13 @@ interface MatrixClient : ClientUrlContentFetcher {
+     suspend fun freechatRequest(method: String, path: String, jsonBody: String?): Result<String> =
+         Result.failure(UnsupportedOperationException("freechatRequest"))
+ 
++    /**
++     * FreeChat: calls a client-server API [path] of the homeserver (e.g. `/_matrix/client/v3/notifications`) with this
++     * session's access token, for the few endpoints the SDK does not expose. Same answers as [freechatRequest].
++     */
++    suspend fun clientApiRequest(method: String, path: String, jsonBody: String?): Result<String> =
++        Result.failure(UnsupportedOperationException("clientApiRequest"))
++
+     /**
+      * FreeChat: erases events from this device only, without telling the server (disappearing messages the server
+      * has already deleted). In the Rust SDK's event cache, in memory and on disk, each event and its edits and
+diff --git a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt
+index 451fdc4d3b..7229268688 100644
+--- a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt
++++ b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt
+@@ -963,9 +963,13 @@ class RustMatrixClient(
+     }
+ 
+     // FreeChat: homeserver extensions. Plain HttpURLConnection keeps the module free of new dependencies.
+-    override suspend fun freechatRequest(method: String, path: String, jsonBody: String?): Result<String> = withContext(sessionDispatcher) {
++    override suspend fun freechatRequest(method: String, path: String, jsonBody: String?): Result<String> =
++        clientApiRequest(method, FreeChatApi.PREFIX + path, jsonBody)
++
++    override suspend fun clientApiRequest(method: String, path: String, jsonBody: String?): Result<String> = withContext(sessionDispatcher) {
+         runCatchingExceptions {
+-            val url = java.net.URL(homeserverUrl.trimEnd('/') + FreeChatApi.PREFIX + path)
++            require(path.startsWith("/_matrix/client/")) { "not a client-server API path" }
++            val url = java.net.URL(homeserverUrl.trimEnd('/') + path)
+             val connection = url.openConnection() as java.net.HttpURLConnection
+             try {
+                 connection.requestMethod = method
+diff --git a/libraries/matrix/test/src/main/kotlin/io/element/android/libraries/matrix/test/FakeMatrixClient.kt b/libraries/matrix/test/src/main/kotlin/io/element/android/libraries/matrix/test/FakeMatrixClient.kt
+index b864daefcc..9aed99cc42 100644
+--- a/libraries/matrix/test/src/main/kotlin/io/element/android/libraries/matrix/test/FakeMatrixClient.kt
++++ b/libraries/matrix/test/src/main/kotlin/io/element/android/libraries/matrix/test/FakeMatrixClient.kt
+@@ -140,6 +140,8 @@ class FakeMatrixClient(
+     private val enableAutomaticCallStatusLambda: (Boolean) -> Unit = { },
+     override val contentScanner: ContentScanner? = null,
+     private val isShuttingDownResult: () -> Boolean = { false },
++    // FreeChat
++    private val clientApiRequestLambda: (String, String, String?) -> Result<String> = { _, _, _ -> lambdaError() },
+ ) : MatrixClient {
+     var setDisplayNameCalled: Boolean = false
+         private set
+@@ -466,6 +468,10 @@ class FakeMatrixClient(
+         return resetWellKnownConfigLambda()
+     }
+ 
++    override suspend fun clientApiRequest(method: String, path: String, jsonBody: String?): Result<String> {
++        return clientApiRequestLambda(method, path, jsonBody)
++    }
++
+     override fun homeserverCapabilities(): HomeserverCapabilitiesProvider {
+         return homeserverCapabilitiesProvider
+     }
+diff --git a/libraries/push/impl/src/main/kotlin/io/element/android/libraries/push/impl/troubleshoot/PushLoopbackTest.kt b/libraries/push/impl/src/main/kotlin/io/element/android/libraries/push/impl/troubleshoot/PushLoopbackTest.kt
+index 0277d7d2c8..deffe9663e 100644
+--- a/libraries/push/impl/src/main/kotlin/io/element/android/libraries/push/impl/troubleshoot/PushLoopbackTest.kt
++++ b/libraries/push/impl/src/main/kotlin/io/element/android/libraries/push/impl/troubleshoot/PushLoopbackTest.kt
+@@ -18,6 +18,7 @@ import io.element.android.libraries.troubleshoot.api.test.NotificationTroublesho
+ import io.element.android.libraries.troubleshoot.api.test.NotificationTroubleshootTest
+ import io.element.android.libraries.troubleshoot.api.test.NotificationTroubleshootTestDelegate
+ import io.element.android.libraries.troubleshoot.api.test.NotificationTroubleshootTestState
++import io.element.android.libraries.troubleshoot.api.test.TestFilterData
+ import io.element.android.services.toolbox.api.strings.StringProvider
+ import io.element.android.services.toolbox.api.systemclock.SystemClock
+ import kotlinx.coroutines.CompletableDeferred
+@@ -44,6 +45,9 @@ class PushLoopbackTest(
+     )
+     override val state: StateFlow<NotificationTroubleshootTestState> = delegate.state
+ 
++    // FreeChat: periodic checks (FreeChatPushConfig.POLLING_NAME) register no pusher, so there is no push to loop back.
++    override fun isRelevant(data: TestFilterData): Boolean = data.currentPushProviderName != "FreeChatPolling"
++
+     override suspend fun run(coroutineScope: CoroutineScope) {
+         delegate.start()
+         val startTime = clock.epochMillis()
+diff --git a/libraries/pushproviders/unifiedpush/build.gradle.kts b/libraries/pushproviders/unifiedpush/build.gradle.kts
+index 7aa19b093b..16d13aa9b8 100644
+--- a/libraries/pushproviders/unifiedpush/build.gradle.kts
++++ b/libraries/pushproviders/unifiedpush/build.gradle.kts
+@@ -32,6 +32,10 @@ dependencies {
+     implementation(projects.libraries.architecture)
+     implementation(projects.libraries.core)
+     implementation(projects.services.toolbox.api)
++    // FreeChat: periodic checks and the built-in connection
++    implementation(projects.libraries.designsystem)
++    implementation(projects.libraries.uiStrings)
++    implementation(projects.libraries.workmanager.api)
+ 
+     implementation(projects.libraries.network)
+     implementation(platform(libs.network.okhttp.bom))
+@@ -51,4 +55,6 @@ dependencies {
+     testImplementation(projects.libraries.pushstore.test)
+     testImplementation(projects.libraries.troubleshoot.test)
+     testImplementation(projects.services.toolbox.test)
++    testImplementation(projects.libraries.workmanager.test)
++    testImplementation(libs.network.mockwebserver)
+ }
+diff --git a/libraries/pushproviders/unifiedpush/src/main/AndroidManifest.xml b/libraries/pushproviders/unifiedpush/src/main/AndroidManifest.xml
+index 5845883c5b..3998e239cc 100644
+--- a/libraries/pushproviders/unifiedpush/src/main/AndroidManifest.xml
++++ b/libraries/pushproviders/unifiedpush/src/main/AndroidManifest.xml
+@@ -7,7 +7,28 @@
+   -->
+ <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+     xmlns:tools="http://schemas.android.com/tools">
++    <!-- FreeChat: the built-in connection, a foreground service that is started again after a reboot. -->
++    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
++    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
++    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
++
+     <application>
++        <service
++            android:name=".freechat.BuiltInPushService"
++            android:exported="false"
++            android:foregroundServiceType="specialUse">
++            <property
++                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
++                android:value="Keeps a connection to the user's own push server open, to receive new message notifications without a separate push app." />
++        </service>
++        <receiver
++            android:name=".freechat.BuiltInPushBootReceiver"
++            android:exported="false">
++            <intent-filter>
++                <action android:name="android.intent.action.BOOT_COMPLETED" />
++                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
++            </intent-filter>
++        </receiver>
+         <receiver
+             android:name=".VectorUnifiedPushMessagingReceiver"
+             android:enabled="true"
+diff --git a/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/BuiltInPushConnection.kt b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/BuiltInPushConnection.kt
+new file mode 100644
+index 0000000000..c6c3b46fbf
+--- /dev/null
++++ b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/BuiltInPushConnection.kt
+@@ -0,0 +1,137 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.pushproviders.unifiedpush.freechat
++
++import dev.zacsweers.metro.AppScope
++import dev.zacsweers.metro.Inject
++import dev.zacsweers.metro.SingleIn
++import io.element.android.libraries.push.api.push.FetchPushForegroundServiceManager
++import io.element.android.libraries.pushproviders.api.PushHandler
++import io.element.android.libraries.pushproviders.unifiedpush.UnifiedPushParser
++import io.element.android.libraries.pushstore.api.clientsecret.PushClientSecret
++import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.awaitCancellation
++import kotlinx.coroutines.coroutineScope
++import kotlinx.coroutines.currentCoroutineContext
++import kotlinx.coroutines.flow.MutableSharedFlow
++import kotlinx.coroutines.flow.first
++import kotlinx.coroutines.isActive
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
++import kotlinx.coroutines.withTimeoutOrNull
++import okhttp3.OkHttpClient
++import okhttp3.Request
++import timber.log.Timber
++import java.io.IOException
++import java.util.concurrent.ConcurrentHashMap
++import java.util.concurrent.TimeUnit
++import kotlin.time.Duration
++import kotlin.time.Duration.Companion.minutes
++import kotlin.time.Duration.Companion.seconds
++
++/**
++ * FreeChat: the built-in connection. Keeps an ntfy JSON stream open to the user's own homeserver for each session using
++ * it, and hands each push to the [PushHandler] like a UnifiedPush app would. Runs inside [BuiltInPushService].
++ */
++@SingleIn(AppScope::class)
++@Inject
++class BuiltInPushConnection(
++    private val pushClientSecret: PushClientSecret,
++    private val pushParser: UnifiedPushParser,
++    private val pushHandler: PushHandler,
++    private val fetchPushForegroundServiceManager: FetchPushForegroundServiceManager,
++) {
++    // Its own client: the app's shared one may log bodies, which would wait for a stream that never ends. ntfy sends a
++    // keepalive every 45 seconds, so a connection silent for longer than the read timeout is dead.
++    private val httpClient = OkHttpClient.Builder()
++        .connectTimeout(30, TimeUnit.SECONDS)
++        .readTimeout(100, TimeUnit.SECONDS)
++        .followRedirects(false)
++        .followSslRedirects(false)
++        .build()
++
++    // The last message read per topic, to resume from after a reconnection. In memory only.
++    private val lastMessageIds = ConcurrentHashMap<String, String>()
++
++    private val networkAvailable = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
++
++    /** The network is back: reconnect now instead of waiting out the backoff. */
++    fun onNetworkAvailable() {
++        networkAvailable.tryEmit(Unit)
++    }
++
++    /** Reads [subscription]'s topic until cancelled, reconnecting whenever the connection drops. */
++    suspend fun run(subscription: BuiltInSubscription) {
++        var backoff = MIN_BACKOFF
++        while (currentCoroutineContext().isActive) {
++            try {
++                read(subscription) { backoff = MIN_BACKOFF }
++            } catch (e: CancellationException) {
++                throw e
++            } catch (e: Exception) {
++                // Anything else must not end the loop either: it would take the whole service down.
++                Timber.d(e, "Built-in push connection dropped")
++            }
++            withTimeoutOrNull(backoff) { networkAvailable.first() }
++            backoff = (backoff * 2).coerceAtMost(MAX_BACKOFF)
++        }
++    }
++
++    private suspend fun read(subscription: BuiltInSubscription, onConnected: () -> Unit) {
++        val url = NtfyUrls.stream(subscription.endpoint, lastMessageIds[subscription.endpoint])
++        val call = httpClient.newCall(Request.Builder().url(url).build())
++        coroutineScope {
++            // Blocking reads do not see coroutine cancellation; cancelling the call ends them.
++            val cancelWithScope = launch {
++                try {
++                    awaitCancellation()
++                } finally {
++                    call.cancel()
++                }
++            }
++            try {
++                withContext(Dispatchers.IO) {
++                    call.execute().use { response ->
++                        if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
++                        onConnected()
++                        val source = response.body.source()
++                        while (true) {
++                            val line = source.readUtf8Line() ?: break
++                            val message = NtfyStream.parse(line) ?: continue
++                            lastMessageIds[subscription.endpoint] = message.id
++                            handle(subscription, message)
++                        }
++                    }
++                }
++            } finally {
++                cancelWithScope.cancel()
++            }
++        }
++    }
++
++    private suspend fun handle(subscription: BuiltInSubscription, message: NtfyStream.Message) {
++        val clientSecret = pushClientSecret.getSecretForUser(subscription.sessionId)
++        val pushData = pushParser.parse(message.body, clientSecret)
++        if (pushData == null) {
++            pushHandler.handleInvalid(providerInfo = PROVIDER_INFO, data = String(message.body))
++            return
++        }
++        // Keeps the device awake while the notification is fetched, as for UnifiedPush.
++        fetchPushForegroundServiceManager.start()
++        if (!pushHandler.handle(pushData = pushData, providerInfo = PROVIDER_INFO)) {
++            fetchPushForegroundServiceManager.stop()
++        }
++    }
++
++    companion object {
++        const val PROVIDER_INFO = "FreeChat - built-in connection"
++        private val MIN_BACKOFF: Duration = 5.seconds
++        private val MAX_BACKOFF: Duration = 5.minutes
++    }
++}
+diff --git a/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/BuiltInPushProvider.kt b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/BuiltInPushProvider.kt
+new file mode 100644
+index 0000000000..51e769e8c4
+--- /dev/null
++++ b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/BuiltInPushProvider.kt
+@@ -0,0 +1,80 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.pushproviders.unifiedpush.freechat
++
++import dev.zacsweers.metro.AppScope
++import dev.zacsweers.metro.ContributesIntoSet
++import io.element.android.libraries.matrix.api.MatrixClient
++import io.element.android.libraries.matrix.api.core.SessionId
++import io.element.android.libraries.pushproviders.api.Config
++import io.element.android.libraries.pushproviders.api.Distributor
++import io.element.android.libraries.pushproviders.api.PushProvider
++import io.element.android.libraries.pushproviders.api.PusherSubscriber
++import io.element.android.libraries.ui.strings.CommonStrings
++import io.element.android.services.toolbox.api.strings.StringProvider
++
++/**
++ * FreeChat: real-time pushes without a UnifiedPush app. The app itself does what the ntfy app would: it subscribes to a
++ * random topic of the ntfy on the user's own homeserver and registers it as the pusher, so pushes go from the homeserver
++ * to the phone without any third party. Costs a permanent notification and some battery for the open connection.
++ */
++@ContributesIntoSet(AppScope::class)
++class BuiltInPushProvider(
++    private val store: FreeChatPushStore,
++    private val pusherSubscriber: PusherSubscriber,
++    private val serviceStarter: BuiltInPushServiceStarter,
++    private val stringProvider: StringProvider,
++) : PushProvider {
++    override val index = FreeChatPushConfig.BUILT_IN_INDEX
++    override val name = FreeChatPushConfig.BUILT_IN_NAME
++    override val supportMultipleDistributors = false
++
++    private fun distributor() = Distributor(FreeChatPushConfig.BUILT_IN_DISTRIBUTOR, stringProvider.getString(CommonStrings.freechat_push_built_in))
++
++    override fun getDistributors(): List<Distributor> = listOf(distributor())
++
++    override suspend fun registerWith(matrixClient: MatrixClient, distributor: Distributor): Result<Unit> {
++        val sessionId = matrixClient.sessionId
++        // Registered again at every start: keep the topic, so pushes sent meanwhile are not lost.
++        val subscription = store.getBuiltInSubscription(sessionId) ?: run {
++            val base = NtfyUrls.base(matrixClient.homeserverUrl)
++                ?: return Result.failure(IllegalStateException("FreeChat: unusable homeserver URL"))
++            BuiltInSubscription(sessionId, NtfyUrls.endpoint(base, NtfyUrls.newTopic()), NtfyUrls.gateway(base))
++        }
++        return pusherSubscriber.registerPusher(matrixClient, subscription.endpoint, subscription.gateway)
++            .onSuccess {
++                store.setBuiltInSubscription(sessionId, subscription.endpoint, subscription.gateway)
++                serviceStarter.refresh()
++            }
++    }
++
++    override suspend fun getCurrentDistributorValue(sessionId: SessionId): String? =
++        FreeChatPushConfig.BUILT_IN_DISTRIBUTOR.takeIf { store.getBuiltInSubscription(sessionId) != null }
++
++    override suspend fun getCurrentDistributor(sessionId: SessionId): Distributor? =
++        distributor().takeIf { store.getBuiltInSubscription(sessionId) != null }
++
++    override suspend fun unregister(matrixClient: MatrixClient): Result<Unit> {
++        val subscription = store.getBuiltInSubscription(matrixClient.sessionId) ?: return Result.success(Unit)
++        return pusherSubscriber.unregisterPusher(matrixClient, subscription.endpoint, subscription.gateway)
++            .onSuccess { stop(matrixClient.sessionId) }
++    }
++
++    // The homeserver drops the pusher along with the session.
++    override suspend fun onSessionDeleted(sessionId: SessionId) = stop(sessionId)
++
++    private fun stop(sessionId: SessionId) {
++        store.setBuiltInSubscription(sessionId, null, null)
++        serviceStarter.refresh()
++    }
++
++    override suspend fun getPushConfig(sessionId: SessionId): Config? =
++        store.getBuiltInSubscription(sessionId)?.let { Config(url = it.gateway, pushKey = it.endpoint) }
++
++    override fun canRotateToken(): Boolean = false
++}
+diff --git a/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/BuiltInPushService.kt b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/BuiltInPushService.kt
+new file mode 100644
+index 0000000000..aeed9308d9
+--- /dev/null
++++ b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/BuiltInPushService.kt
+@@ -0,0 +1,161 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.pushproviders.unifiedpush.freechat
++
++import android.app.PendingIntent
++import android.app.Service
++import android.content.BroadcastReceiver
++import android.content.Context
++import android.content.Intent
++import android.content.pm.ServiceInfo
++import android.net.ConnectivityManager
++import android.net.Network
++import android.os.Build
++import android.os.IBinder
++import androidx.core.app.NotificationChannelCompat
++import androidx.core.app.NotificationCompat
++import androidx.core.app.NotificationManagerCompat
++import androidx.core.app.ServiceCompat
++import androidx.core.content.ContextCompat
++import androidx.core.content.getSystemService
++import dev.zacsweers.metro.AppScope
++import dev.zacsweers.metro.ContributesBinding
++import dev.zacsweers.metro.ContributesTo
++import dev.zacsweers.metro.Inject
++import io.element.android.libraries.architecture.bindings
++import io.element.android.libraries.core.extensions.runCatchingExceptions
++import io.element.android.libraries.designsystem.utils.CommonDrawables
++import io.element.android.libraries.di.annotations.ApplicationContext
++import io.element.android.libraries.ui.strings.CommonStrings
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.Job
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.cancel
++import kotlinx.coroutines.launch
++import timber.log.Timber
++
++private const val NOTIFICATION_ID = 1002
++private const val CHANNEL_ID = "freechat_built_in_push_channel"
++
++/**
++ * FreeChat: keeps the built-in connection running. A foreground service, so Android lets it keep its connection while
++ * the app is in the background; its notification sits silently at the bottom of the list.
++ */
++class BuiltInPushService : Service() {
++    @Inject lateinit var connection: BuiltInPushConnection
++    @Inject lateinit var store: FreeChatPushStore
++
++    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
++    private var connectionsJob: Job? = null
++    private var isOnForeground = false
++
++    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
++        override fun onAvailable(network: Network) = connection.onNetworkAvailable()
++    }
++
++    override fun onBind(intent: Intent?): IBinder? = null
++
++    override fun onCreate() {
++        super.onCreate()
++        bindings<BuiltInPushBindings>().inject(this)
++        NotificationManagerCompat.from(this).createNotificationChannel(
++            NotificationChannelCompat.Builder(CHANNEL_ID, NotificationManagerCompat.IMPORTANCE_MIN)
++                .setName(getString(CommonStrings.freechat_push_built_in_channel))
++                .setShowBadge(false)
++                .setVibrationEnabled(false)
++                .setSound(null, null)
++                .build()
++        )
++        val openApp = packageManager.getLaunchIntentForPackage(packageName)?.let {
++            PendingIntent.getActivity(this, 0, it, PendingIntent.FLAG_IMMUTABLE)
++        }
++        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
++            .setSmallIcon(CommonDrawables.ic_notification)
++            .setContentTitle(getString(CommonStrings.freechat_push_built_in_notification))
++            .setContentIntent(openApp)
++            .setPriority(NotificationCompat.PRIORITY_MIN)
++            .setOngoing(true)
++            .setSilent(true)
++            .build()
++        val serviceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
++            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
++        } else {
++            0
++        }
++        // Android may refuse it, e.g. when the app is in the background without an exemption.
++        isOnForeground = runCatchingExceptions {
++            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, serviceType)
++        }
++            .onFailure { Timber.w(it, "The built-in push connection could not start") }
++            .isSuccess
++        getSystemService<ConnectivityManager>()?.registerDefaultNetworkCallback(networkCallback)
++    }
++
++    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
++        val subscriptions = store.getBuiltInSubscriptions()
++        if (!isOnForeground || subscriptions.isEmpty()) {
++            stopSelf()
++            return START_NOT_STICKY
++        }
++        // Started again when a session starts or stops using it: connect to exactly the current topics.
++        connectionsJob?.cancel()
++        connectionsJob = scope.launch {
++            subscriptions.forEach { launch { connection.run(it) } }
++        }
++        return START_STICKY
++    }
++
++    override fun onDestroy() {
++        scope.cancel()
++        runCatchingExceptions { getSystemService<ConnectivityManager>()?.unregisterNetworkCallback(networkCallback) }
++        if (isOnForeground) {
++            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
++        }
++        super.onDestroy()
++    }
++}
++
++/** Starts [BuiltInPushService] while any session uses the built-in connection, and stops it once none does. */
++interface BuiltInPushServiceStarter {
++    fun refresh()
++}
++
++@ContributesBinding(AppScope::class)
++class DefaultBuiltInPushServiceStarter(
++    @ApplicationContext private val context: Context,
++    private val store: FreeChatPushStore,
++) : BuiltInPushServiceStarter {
++    override fun refresh() {
++        val intent = Intent(context, BuiltInPushService::class.java)
++        if (store.getBuiltInSubscriptions().isEmpty()) {
++            context.stopService(intent)
++            return
++        }
++        // Refused from the background on recent Android versions; it is tried again when the app is opened.
++        runCatchingExceptions { ContextCompat.startForegroundService(context, intent) }
++            .onFailure { Timber.w(it, "Could not start the built-in push connection") }
++    }
++}
++
++/** Reconnects the built-in connection after the phone starts or the app is updated. */
++class BuiltInPushBootReceiver : BroadcastReceiver() {
++    @Inject lateinit var starter: BuiltInPushServiceStarter
++
++    override fun onReceive(context: Context, intent: Intent) {
++        if (intent.action != Intent.ACTION_BOOT_COMPLETED && intent.action != Intent.ACTION_MY_PACKAGE_REPLACED) return
++        context.bindings<BuiltInPushBindings>().inject(this)
++        starter.refresh()
++    }
++}
++
++@ContributesTo(AppScope::class)
++interface BuiltInPushBindings {
++    fun inject(service: BuiltInPushService)
++    fun inject(receiver: BuiltInPushBootReceiver)
++}
+diff --git a/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/FreeChatPushConfig.kt b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/FreeChatPushConfig.kt
+new file mode 100644
+index 0000000000..0583b442ae
+--- /dev/null
++++ b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/FreeChatPushConfig.kt
+@@ -0,0 +1,23 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.pushproviders.unifiedpush.freechat
++
++/**
++ * FreeChat's two ways of getting new messages without a UnifiedPush app, offered next to UnifiedPush in the notification
++ * settings. Sorted after it, so a phone with a UnifiedPush app keeps using it by default, and one without checks
++ * periodically.
++ */
++object FreeChatPushConfig {
++    const val POLLING_INDEX = 2
++    const val POLLING_NAME = "FreeChatPolling"
++    const val POLLING_DISTRIBUTOR = "freechat.polling"
++
++    const val BUILT_IN_INDEX = 3
++    const val BUILT_IN_NAME = "FreeChatBuiltIn"
++    const val BUILT_IN_DISTRIBUTOR = "freechat.builtin"
++}
+diff --git a/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/FreeChatPushStore.kt b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/FreeChatPushStore.kt
+new file mode 100644
+index 0000000000..8e724a2ca5
+--- /dev/null
++++ b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/FreeChatPushStore.kt
+@@ -0,0 +1,80 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.pushproviders.unifiedpush.freechat
++
++import android.content.SharedPreferences
++import androidx.core.content.edit
++import dev.zacsweers.metro.AppScope
++import dev.zacsweers.metro.ContributesBinding
++import io.element.android.libraries.matrix.api.core.SessionId
++
++/** Where a session using the built-in connection gets its pushes: the ntfy topic on its own server. */
++data class BuiltInSubscription(
++    val sessionId: SessionId,
++    val endpoint: String,
++    val gateway: String,
++)
++
++/**
++ * What the two FreeChat ways of getting new messages without a push app keep per session. Only what they need to work:
++ * when the last check saw a notification, and the random topic of the built-in connection.
++ */
++interface FreeChatPushStore {
++    /** Server time (ms) of the newest notification the last check saw; null when the session does not check. */
++    fun getPollSince(sessionId: SessionId): Long?
++    fun setPollSince(sessionId: SessionId, since: Long?)
++
++    fun getBuiltInSubscription(sessionId: SessionId): BuiltInSubscription?
++    fun setBuiltInSubscription(sessionId: SessionId, endpoint: String?, gateway: String?)
++
++    /** Every session using the built-in connection. */
++    fun getBuiltInSubscriptions(): List<BuiltInSubscription>
++}
++
++@ContributesBinding(AppScope::class)
++class SharedPreferencesFreeChatPushStore(
++    private val sharedPreferences: SharedPreferences,
++) : FreeChatPushStore {
++    override fun getPollSince(sessionId: SessionId): Long? =
++        sharedPreferences.getLong(PREFS_POLL_SINCE + sessionId, -1).takeIf { it >= 0 }
++
++    override fun setPollSince(sessionId: SessionId, since: Long?) {
++        sharedPreferences.edit {
++            if (since == null) remove(PREFS_POLL_SINCE + sessionId) else putLong(PREFS_POLL_SINCE + sessionId, since)
++        }
++    }
++
++    override fun getBuiltInSubscription(sessionId: SessionId): BuiltInSubscription? {
++        val endpoint = sharedPreferences.getString(PREFS_BUILT_IN_ENDPOINT + sessionId, null) ?: return null
++        val gateway = sharedPreferences.getString(PREFS_BUILT_IN_GATEWAY + sessionId, null) ?: return null
++        return BuiltInSubscription(sessionId, endpoint, gateway)
++    }
++
++    override fun setBuiltInSubscription(sessionId: SessionId, endpoint: String?, gateway: String?) {
++        sharedPreferences.edit {
++            if (endpoint == null || gateway == null) {
++                remove(PREFS_BUILT_IN_ENDPOINT + sessionId)
++                remove(PREFS_BUILT_IN_GATEWAY + sessionId)
++            } else {
++                putString(PREFS_BUILT_IN_ENDPOINT + sessionId, endpoint)
++                putString(PREFS_BUILT_IN_GATEWAY + sessionId, gateway)
++            }
++        }
++    }
++
++    override fun getBuiltInSubscriptions(): List<BuiltInSubscription> =
++        sharedPreferences.all.keys
++            .filter { it.startsWith(PREFS_BUILT_IN_ENDPOINT) }
++            .mapNotNull { getBuiltInSubscription(SessionId(it.removePrefix(PREFS_BUILT_IN_ENDPOINT))) }
++
++    companion object {
++        private const val PREFS_POLL_SINCE = "FREECHAT_POLL_SINCE_"
++        private const val PREFS_BUILT_IN_ENDPOINT = "FREECHAT_BUILT_IN_ENDPOINT_"
++        private const val PREFS_BUILT_IN_GATEWAY = "FREECHAT_BUILT_IN_GATEWAY_"
++    }
++}
+diff --git a/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/NotificationsPoller.kt b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/NotificationsPoller.kt
+new file mode 100644
+index 0000000000..8e1a0e5f66
+--- /dev/null
++++ b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/NotificationsPoller.kt
+@@ -0,0 +1,86 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.pushproviders.unifiedpush.freechat
++
++import dev.zacsweers.metro.Inject
++import io.element.android.libraries.core.extensions.runCatchingExceptions
++import io.element.android.libraries.matrix.api.MatrixClient
++import io.element.android.libraries.matrix.api.core.EventId
++import io.element.android.libraries.matrix.api.core.RoomId
++import io.element.android.libraries.pushproviders.api.PushData
++import io.element.android.libraries.pushproviders.api.PushHandler
++import io.element.android.libraries.pushstore.api.clientsecret.PushClientSecret
++import kotlinx.serialization.SerialName
++import kotlinx.serialization.Serializable
++import kotlinx.serialization.json.Json
++
++/**
++ * Asks the homeserver which messages the user would have been notified about since the last check, and hands the
++ * unread ones to the [PushHandler] as if they had been pushed, so they are shown like pushed ones.
++ */
++@Inject
++class NotificationsPoller(
++    private val pushHandler: PushHandler,
++    private val pushClientSecret: PushClientSecret,
++    private val store: FreeChatPushStore,
++) {
++    /** Starts checking from the newest notification on the server, so older ones are not shown again. */
++    suspend fun start(client: MatrixClient, now: Long = System.currentTimeMillis()) {
++        val newest = fetch(client, limit = 1).getOrNull()?.maxOfOrNull { it.ts }
++        store.setPollSince(client.sessionId, newest ?: now)
++    }
++
++    /** Returns how many new notifications were handed over. */
++    suspend fun poll(client: MatrixClient): Result<Int> = runCatchingExceptions {
++        val since = store.getPollSince(client.sessionId)
++        if (since == null) {
++            start(client)
++            return@runCatchingExceptions 0
++        }
++        val newer = fetch(client, limit = LIMIT).getOrThrow().filter { it.ts > since }
++        val clientSecret = pushClientSecret.getSecretForUser(client.sessionId)
++        val unread = newer.filterNot { it.read }.sortedBy { it.ts }.mapNotNull { it.toPushData(clientSecret) }
++        for (pushData in unread) {
++            pushHandler.handle(pushData = pushData, providerInfo = PROVIDER_INFO)
++        }
++        newer.maxOfOrNull { it.ts }?.let { store.setPollSince(client.sessionId, it) }
++        unread.size
++    }
++
++    // A malformed ID is skipped rather than failing every later check too.
++    private fun Notification.toPushData(clientSecret: String): PushData? = runCatchingExceptions {
++        PushData(eventId = EventId(event.eventId), roomId = RoomId(roomId), unread = null, clientSecret = clientSecret)
++    }.getOrNull()
++
++    private suspend fun fetch(client: MatrixClient, limit: Int): Result<List<Notification>> =
++        client.clientApiRequest("GET", "/_matrix/client/v3/notifications?limit=$limit", null).mapCatching { body ->
++            json.decodeFromString<NotificationsResponse>(body).notifications
++        }
++
++    @Serializable
++    internal data class NotificationsResponse(val notifications: List<Notification> = emptyList())
++
++    @Serializable
++    internal data class Notification(
++        @SerialName("room_id") val roomId: String = "",
++        val event: NotifiedEvent = NotifiedEvent(),
++        val ts: Long = 0,
++        val read: Boolean = false,
++    )
++
++    @Serializable
++    internal data class NotifiedEvent(@SerialName("event_id") val eventId: String = "")
++
++    companion object {
++        /** Most notifications one check asks for; the server's own default. */
++        const val LIMIT = 50
++        const val PROVIDER_INFO = "FreeChat - periodic check"
++
++        private val json = Json { ignoreUnknownKeys = true }
++    }
++}
+diff --git a/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/NtfyStream.kt b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/NtfyStream.kt
+new file mode 100644
+index 0000000000..2f29e734f9
+--- /dev/null
++++ b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/NtfyStream.kt
+@@ -0,0 +1,74 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.pushproviders.unifiedpush.freechat
++
++import io.element.android.libraries.core.extensions.runCatchingExceptions
++import kotlinx.serialization.Serializable
++import kotlinx.serialization.json.Json
++import java.net.URI
++import java.security.SecureRandom
++import kotlin.io.encoding.Base64
++
++/** The ntfy topic URLs of the built-in connection, on the user's own homeserver (FreeChat runs ntfy there). */
++object NtfyUrls {
++    private const val TOPIC_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
++
++    /** `https://host[:port]` of [homeserverUrl], or null when it is not an HTTP(S) URL. */
++    fun base(homeserverUrl: String): String? {
++        val uri = runCatchingExceptions { URI(homeserverUrl) }.getOrNull() ?: return null
++        if (uri.scheme !in listOf("https", "http") || uri.host.isNullOrEmpty()) return null
++        return "${uri.scheme}://${uri.rawAuthority}"
++    }
++
++    /**
++     * A new random topic. ntfy on a FreeChat server only serves topics starting with `up`; the random part keeps
++     * others from reading or posting to it.
++     */
++    fun newTopic(random: SecureRandom = SecureRandom()): String =
++        "up" + (1..32).map { TOPIC_CHARS[random.nextInt(TOPIC_CHARS.length)] }.joinToString("")
++
++    /** What the homeserver pushes to: the topic in UnifiedPush mode, through ntfy's Matrix gateway. */
++    fun endpoint(base: String, topic: String) = "$base/$topic?up=1"
++
++    fun gateway(base: String) = "$base/_matrix/push/v1/notify"
++
++    /** Where the phone reads the topic: one JSON object per line, as long as the connection stays open. */
++    fun stream(endpoint: String, since: String?): String =
++        endpoint.substringBefore('?') + "/json" + (since?.let { "?since=$it" } ?: "")
++}
++
++/** One line of an ntfy JSON stream: `open` and `keepalive` events, and `message` events carrying a push. */
++object NtfyStream {
++    @Serializable
++    internal data class Event(
++        val id: String = "",
++        val event: String = "",
++        val message: String? = null,
++        val encoding: String? = null,
++    )
++
++    private val json = Json { ignoreUnknownKeys = true }
++
++    /** A message: its ID, to resume from after a reconnection, and the push body the homeserver sent. */
++    class Message(val id: String, val body: ByteArray)
++
++    /** The message on [line], or null for any other event or a line that cannot be read. */
++    fun parse(line: String): Message? {
++        if (line.isBlank()) return null
++        val event = runCatchingExceptions { json.decodeFromString<Event>(line) }.getOrNull() ?: return null
++        if (event.event != "message" || event.id.isEmpty()) return null
++        val message = event.message ?: return null
++        // ntfy sends bodies that are not UTF-8 in base64.
++        val body = if (event.encoding == "base64") {
++            runCatchingExceptions { Base64.decode(message) }.getOrNull() ?: return null
++        } else {
++            message.toByteArray()
++        }
++        return Message(event.id, body)
++    }
++}
+diff --git a/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/PollingPushProvider.kt b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/PollingPushProvider.kt
+new file mode 100644
+index 0000000000..845483a79b
+--- /dev/null
++++ b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/PollingPushProvider.kt
+@@ -0,0 +1,74 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.pushproviders.unifiedpush.freechat
++
++import dev.zacsweers.metro.AppScope
++import dev.zacsweers.metro.ContributesIntoSet
++import io.element.android.libraries.matrix.api.MatrixClient
++import io.element.android.libraries.matrix.api.core.SessionId
++import io.element.android.libraries.pushproviders.api.Config
++import io.element.android.libraries.pushproviders.api.Distributor
++import io.element.android.libraries.pushproviders.api.PushProvider
++import io.element.android.libraries.ui.strings.CommonStrings
++import io.element.android.libraries.workmanager.api.WorkManagerRequestType
++import io.element.android.libraries.workmanager.api.WorkManagerScheduler
++import io.element.android.services.toolbox.api.strings.StringProvider
++
++/**
++ * FreeChat: no push at all. The phone asks its own homeserver for new messages about every 15 minutes (later while it
++ * saves battery), and shows them like pushed ones. Nothing but the homeserver is involved, and it registers no pusher.
++ */
++@ContributesIntoSet(AppScope::class)
++class PollingPushProvider(
++    private val store: FreeChatPushStore,
++    private val notificationsPoller: NotificationsPoller,
++    private val workManagerScheduler: WorkManagerScheduler,
++    private val stringProvider: StringProvider,
++) : PushProvider {
++    override val index = FreeChatPushConfig.POLLING_INDEX
++    override val name = FreeChatPushConfig.POLLING_NAME
++    override val supportMultipleDistributors = false
++
++    private fun distributor() = Distributor(FreeChatPushConfig.POLLING_DISTRIBUTOR, stringProvider.getString(CommonStrings.freechat_push_polling))
++
++    override fun getDistributors(): List<Distributor> = listOf(distributor())
++
++    override suspend fun registerWith(matrixClient: MatrixClient, distributor: Distributor): Result<Unit> {
++        val sessionId = matrixClient.sessionId
++        if (store.getPollSince(sessionId) == null) {
++            notificationsPoller.start(matrixClient)
++        }
++        if (!workManagerScheduler.hasPendingWork(sessionId, WorkManagerRequestType.PUSH_POLL)) {
++            workManagerScheduler.submit(PushPollRequestBuilder(sessionId))
++        }
++        return Result.success(Unit)
++    }
++
++    override suspend fun getCurrentDistributorValue(sessionId: SessionId): String? =
++        FreeChatPushConfig.POLLING_DISTRIBUTOR.takeIf { store.getPollSince(sessionId) != null }
++
++    override suspend fun getCurrentDistributor(sessionId: SessionId): Distributor? =
++        distributor().takeIf { store.getPollSince(sessionId) != null }
++
++    override suspend fun unregister(matrixClient: MatrixClient): Result<Unit> {
++        stop(matrixClient.sessionId)
++        return Result.success(Unit)
++    }
++
++    override suspend fun onSessionDeleted(sessionId: SessionId) = stop(sessionId)
++
++    private fun stop(sessionId: SessionId) {
++        workManagerScheduler.cancel(sessionId, WorkManagerRequestType.PUSH_POLL)
++        store.setPollSince(sessionId, null)
++    }
++
++    // There is no pusher, so nothing to test a push against.
++    override suspend fun getPushConfig(sessionId: SessionId): Config? = null
++
++    override fun canRotateToken(): Boolean = false
++}
+diff --git a/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/PushPollWorker.kt b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/PushPollWorker.kt
+new file mode 100644
+index 0000000000..535e635764
+--- /dev/null
++++ b/libraries/pushproviders/unifiedpush/src/main/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/PushPollWorker.kt
+@@ -0,0 +1,84 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.pushproviders.unifiedpush.freechat
++
++import android.content.Context
++import androidx.work.Constraints
++import androidx.work.CoroutineWorker
++import androidx.work.Data
++import androidx.work.NetworkType
++import androidx.work.PeriodicWorkRequest
++import androidx.work.WorkerParameters
++import dev.zacsweers.metro.AppScope
++import dev.zacsweers.metro.Assisted
++import dev.zacsweers.metro.AssistedFactory
++import dev.zacsweers.metro.AssistedInject
++import dev.zacsweers.metro.ContributesIntoMap
++import dev.zacsweers.metro.binding
++import io.element.android.libraries.di.annotations.ApplicationContext
++import io.element.android.libraries.matrix.api.MatrixClientProvider
++import io.element.android.libraries.matrix.api.core.SessionId
++import io.element.android.libraries.workmanager.api.WorkManagerRequestBuilder
++import io.element.android.libraries.workmanager.api.WorkManagerRequestType
++import io.element.android.libraries.workmanager.api.WorkManagerRequestWrapper
++import io.element.android.libraries.workmanager.api.di.MetroWorkerFactory
++import io.element.android.libraries.workmanager.api.di.WorkerKey
++import io.element.android.libraries.workmanager.api.workManagerTag
++import timber.log.Timber
++import java.util.concurrent.TimeUnit
++
++/** FreeChat: one periodic check for new messages of a session that gets no pushes. */
++@AssistedInject
++class PushPollWorker(
++    @Assisted params: WorkerParameters,
++    @ApplicationContext context: Context,
++    private val matrixClientProvider: MatrixClientProvider,
++    private val notificationsPoller: NotificationsPoller,
++    private val store: FreeChatPushStore,
++) : CoroutineWorker(context, params) {
++    override suspend fun doWork(): Result {
++        val sessionId = inputData.getString(SESSION_ID_PARAM)?.let(::SessionId) ?: return Result.failure()
++        // The session switched to another way of getting messages.
++        if (store.getPollSince(sessionId) == null) return Result.success()
++        // A strict-mode session does not survive its process, so there is nothing to check for.
++        val client = matrixClientProvider.getOrRestore(sessionId).getOrNull() ?: return Result.success()
++        notificationsPoller.poll(client)
++            .onSuccess { Timber.d("Periodic check: $it new notification(s)") }
++            .onFailure { Timber.w(it, "Periodic check failed") }
++        // A failed check is not retried early: the next one comes soon anyway.
++        return Result.success()
++    }
++
++    @ContributesIntoMap(AppScope::class, binding = binding<MetroWorkerFactory.WorkerInstanceFactory<*>>())
++    @WorkerKey(PushPollWorker::class)
++    @AssistedFactory
++    interface Factory : MetroWorkerFactory.WorkerInstanceFactory<PushPollWorker>
++
++    companion object {
++        const val SESSION_ID_PARAM = "session_id"
++    }
++}
++
++class PushPollRequestBuilder(
++    private val sessionId: SessionId,
++) : WorkManagerRequestBuilder {
++    override suspend fun build(): kotlin.Result<List<WorkManagerRequestWrapper>> {
++        val data = Data.Builder().putString(PushPollWorker.SESSION_ID_PARAM, sessionId.value).build()
++        val workRequest = PeriodicWorkRequest.Builder(
++            workerClass = PushPollWorker::class,
++            // The shortest period Android allows; it may run later while the phone saves battery.
++            repeatInterval = PeriodicWorkRequest.MIN_PERIODIC_INTERVAL_MILLIS,
++            repeatIntervalTimeUnit = TimeUnit.MILLISECONDS,
++        )
++            .addTag(workManagerTag(sessionId, WorkManagerRequestType.PUSH_POLL))
++            .setInputData(data)
++            .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
++            .build()
++        return kotlin.Result.success(listOf(WorkManagerRequestWrapper(workRequest)))
++    }
++}
+diff --git a/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/BuiltInPushConnectionTest.kt b/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/BuiltInPushConnectionTest.kt
+new file mode 100644
+index 0000000000..f811fab087
+--- /dev/null
++++ b/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/BuiltInPushConnectionTest.kt
+@@ -0,0 +1,94 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.pushproviders.unifiedpush.freechat
++
++import com.google.common.truth.Truth.assertThat
++import io.element.android.libraries.matrix.test.AN_EVENT_ID
++import io.element.android.libraries.matrix.test.A_ROOM_ID
++import io.element.android.libraries.matrix.test.A_SECRET
++import io.element.android.libraries.matrix.test.A_SESSION_ID
++import io.element.android.libraries.push.test.push.FakeFetchPushForegroundServiceManager
++import io.element.android.libraries.push.test.test.FakePushHandler
++import io.element.android.libraries.pushproviders.api.PushData
++import io.element.android.libraries.pushproviders.unifiedpush.createUnifiedPushParser
++import io.element.android.libraries.pushstore.test.userpushstore.clientsecret.FakePushClientSecret
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.channels.Channel
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.runBlocking
++import kotlinx.coroutines.withTimeout
++import okhttp3.mockwebserver.MockResponse
++import okhttp3.mockwebserver.MockWebServer
++import org.junit.After
++import org.junit.Test
++import java.util.concurrent.TimeUnit
++import kotlin.time.Duration.Companion.seconds
++
++class BuiltInPushConnectionTest {
++    private val server = MockWebServer().apply { start() }
++    private val handled = Channel<PushData>(Channel.UNLIMITED)
++    private val invalid = Channel<String>(Channel.UNLIMITED)
++    private val connection = BuiltInPushConnection(
++        pushClientSecret = FakePushClientSecret(getSecretForUserResult = { A_SECRET }),
++        pushParser = createUnifiedPushParser(),
++        pushHandler = FakePushHandler(
++            handleResult = { pushData, _ -> handled.trySend(pushData).isSuccess },
++            handleInvalidResult = { _, data -> invalid.trySend(data) },
++        ),
++        fetchPushForegroundServiceManager = FakeFetchPushForegroundServiceManager(),
++    )
++    private val subscription = BuiltInSubscription(A_SESSION_ID, server.url("/upAbc").toString() + "?up=1", "unused")
++
++    @After
++    fun tearDown() = server.shutdown()
++
++    @Test
++    fun `pushes are handed over, and a reconnection resumes after the last one`() = runBlocking {
++        server.enqueue(MockResponse().setBody(lines(OPEN, message("m1", PUSH))))
++        server.enqueue(MockResponse().setBody(lines(KEEPALIVE, message("m2", "not a push"))))
++        val job = launch(Dispatchers.Default) { connection.run(subscription) }
++
++        val pushData = withTimeout(10.seconds) { handled.receive() }
++        assertThat(pushData).isEqualTo(PushData(AN_EVENT_ID, A_ROOM_ID, 1, A_SECRET))
++        // The first stream ended: it reconnects after a short backoff.
++        assertThat(withTimeout(20.seconds) { invalid.receive() }).isEqualTo("not a push")
++        job.cancel()
++        job.join()
++
++        assertThat(server.takeRequest().path).isEqualTo("/upAbc/json")
++        assertThat(server.takeRequest().path).isEqualTo("/upAbc/json?since=m1")
++    }
++
++    @Test
++    fun `stopping ends a connection that is waiting for data`() = runBlocking {
++        // Sends one byte an hour: the read blocks.
++        server.enqueue(MockResponse().setBody(lines(OPEN)).throttleBody(1, 1, TimeUnit.HOURS))
++        val job = launch(Dispatchers.Default) { connection.run(subscription) }
++        assertThat(server.takeRequest(10, TimeUnit.SECONDS)?.path).isEqualTo("/upAbc/json")
++        delay(500)
++        withTimeout(5.seconds) {
++            job.cancel()
++            job.join()
++        }
++        assertThat(job.isCancelled).isTrue()
++    }
++
++    private fun lines(vararg lines: String) = lines.joinToString("\n", postfix = "\n")
++
++    private fun message(id: String, body: String): String {
++        val escaped = body.replace("\\", "\\\\").replace("\"", "\\\"")
++        return """{"id":"$id","time":1,"event":"message","topic":"upAbc","message":"$escaped"}"""
++    }
++
++    private companion object {
++        const val OPEN = """{"id":"o1","time":1,"event":"open","topic":"upAbc"}"""
++        const val KEEPALIVE = """{"id":"k1","time":1,"event":"keepalive","topic":"upAbc"}"""
++        val PUSH = """{"notification":{"event_id":"$AN_EVENT_ID","room_id":"$A_ROOM_ID","counts":{"unread":1},"prio":"high"}}"""
++    }
++}
+diff --git a/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/FakeFreeChatPushStore.kt b/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/FakeFreeChatPushStore.kt
+new file mode 100644
+index 0000000000..65666df7e1
+--- /dev/null
++++ b/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/FakeFreeChatPushStore.kt
+@@ -0,0 +1,33 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.pushproviders.unifiedpush.freechat
++
++import io.element.android.libraries.matrix.api.core.SessionId
++
++class FakeFreeChatPushStore : FreeChatPushStore {
++    val pollSince = mutableMapOf<SessionId, Long>()
++    val subscriptions = mutableMapOf<SessionId, BuiltInSubscription>()
++
++    override fun getPollSince(sessionId: SessionId): Long? = pollSince[sessionId]
++
++    override fun setPollSince(sessionId: SessionId, since: Long?) {
++        if (since == null) pollSince.remove(sessionId) else pollSince[sessionId] = since
++    }
++
++    override fun getBuiltInSubscription(sessionId: SessionId): BuiltInSubscription? = subscriptions[sessionId]
++
++    override fun setBuiltInSubscription(sessionId: SessionId, endpoint: String?, gateway: String?) {
++        if (endpoint == null || gateway == null) {
++            subscriptions.remove(sessionId)
++        } else {
++            subscriptions[sessionId] = BuiltInSubscription(sessionId, endpoint, gateway)
++        }
++    }
++
++    override fun getBuiltInSubscriptions(): List<BuiltInSubscription> = subscriptions.values.toList()
++}
+diff --git a/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/FreeChatPushProvidersTest.kt b/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/FreeChatPushProvidersTest.kt
+new file mode 100644
+index 0000000000..14efea0c45
+--- /dev/null
++++ b/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/FreeChatPushProvidersTest.kt
+@@ -0,0 +1,145 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.pushproviders.unifiedpush.freechat
++
++import com.google.common.truth.Truth.assertThat
++import io.element.android.libraries.matrix.test.AN_EXCEPTION
++import io.element.android.libraries.matrix.test.A_SECRET
++import io.element.android.libraries.matrix.test.A_SESSION_ID
++import io.element.android.libraries.matrix.test.FakeMatrixClient
++import io.element.android.libraries.push.test.FakePusherSubscriber
++import io.element.android.libraries.push.test.test.FakePushHandler
++import io.element.android.libraries.pushproviders.api.Config
++import io.element.android.libraries.pushstore.test.userpushstore.clientsecret.FakePushClientSecret
++import io.element.android.libraries.workmanager.api.WorkManagerRequestBuilder
++import io.element.android.libraries.workmanager.api.WorkManagerRequestType
++import io.element.android.libraries.workmanager.test.FakeWorkManagerScheduler
++import io.element.android.services.toolbox.test.strings.FakeStringProvider
++import kotlinx.coroutines.test.runTest
++import org.junit.Test
++
++class FreeChatPushProvidersTest {
++    private val store = FakeFreeChatPushStore()
++
++    @Test
++    fun `periodic checks start from the server's newest notification and are scheduled once`() = runTest {
++        val submitted = mutableListOf<WorkManagerRequestBuilder>()
++        val cancelled = mutableListOf<Pair<Any, WorkManagerRequestType?>>()
++        var pending = false
++        val provider = PollingPushProvider(
++            store = store,
++            notificationsPoller = NotificationsPoller(
++                pushHandler = FakePushHandler(),
++                pushClientSecret = FakePushClientSecret(getSecretForUserResult = { A_SECRET }),
++                store = store,
++            ),
++            workManagerScheduler = FakeWorkManagerScheduler(
++                submitLambda = { submitted.add(it); pending = true },
++                hasPendingWorkLambda = { _, type -> type == WorkManagerRequestType.PUSH_POLL && pending },
++                cancelLambda = { sessionId, type -> cancelled.add(sessionId to type); pending = false },
++            ),
++            stringProvider = FakeStringProvider("Check every 15 minutes"),
++        )
++        val client = FakeMatrixClient(clientApiRequestLambda = { _, _, _ -> Result.success("""{"notifications":[]}""") })
++        assertThat(provider.getCurrentDistributor(A_SESSION_ID)).isNull()
++
++        assertThat(provider.registerWith(client, provider.getDistributors().single()).isSuccess).isTrue()
++        provider.registerWith(client, provider.getDistributors().single())
++
++        assertThat(submitted).hasSize(1)
++        assertThat(store.getPollSince(A_SESSION_ID)).isNotNull()
++        assertThat(provider.getCurrentDistributor(A_SESSION_ID)?.value).isEqualTo(FreeChatPushConfig.POLLING_DISTRIBUTOR)
++        assertThat(provider.getCurrentDistributor(A_SESSION_ID)?.name).isEqualTo("Check every 15 minutes")
++        assertThat(provider.getPushConfig(A_SESSION_ID)).isNull()
++
++        assertThat(provider.unregister(client).isSuccess).isTrue()
++        assertThat(cancelled).containsExactly(A_SESSION_ID to WorkManagerRequestType.PUSH_POLL)
++        assertThat(provider.getCurrentDistributor(A_SESSION_ID)).isNull()
++    }
++
++    @Test
++    fun `the built-in connection registers a random topic on the homeserver and keeps it`() = runTest {
++        val registered = mutableListOf<Pair<String, String>>()
++        var refreshes = 0
++        val provider = builtInProvider(
++            subscriber = FakePusherSubscriber(registerPusherResult = { _, key, gateway -> registered.add(key to gateway); Result.success(Unit) }),
++            onRefresh = { refreshes++ },
++        )
++        val client = FakeMatrixClient(homeserverUrl = "https://chat.example.org")
++
++        assertThat(provider.registerWith(client, provider.getDistributors().single()).isSuccess).isTrue()
++        provider.registerWith(client, provider.getDistributors().single())
++
++        val (endpoint, gateway) = registered.first()
++        assertThat(endpoint).matches("https://chat\\.example\\.org/up[A-Za-z0-9]{32}\\?up=1")
++        assertThat(gateway).isEqualTo("https://chat.example.org/_matrix/push/v1/notify")
++        assertThat(registered).containsExactly(endpoint to gateway, endpoint to gateway)
++        assertThat(store.getBuiltInSubscriptions().map { it.endpoint }).containsExactly(endpoint)
++        assertThat(provider.getPushConfig(A_SESSION_ID)).isEqualTo(Config(url = gateway, pushKey = endpoint))
++        assertThat(provider.getCurrentDistributor(A_SESSION_ID)?.value).isEqualTo(FreeChatPushConfig.BUILT_IN_DISTRIBUTOR)
++        assertThat(refreshes).isEqualTo(2)
++    }
++
++    @Test
++    fun `the built-in connection is not kept when the homeserver refuses the pusher`() = runTest {
++        val provider = builtInProvider(subscriber = FakePusherSubscriber(registerPusherResult = { _, _, _ -> Result.failure(AN_EXCEPTION) }))
++        val result = provider.registerWith(FakeMatrixClient(homeserverUrl = "https://chat.example.org"), provider.getDistributors().single())
++        assertThat(result.isFailure).isTrue()
++        assertThat(provider.getCurrentDistributor(A_SESSION_ID)).isNull()
++    }
++
++    @Test
++    fun `stopping the built-in connection removes the pusher and the topic`() = runTest {
++        store.setBuiltInSubscription(A_SESSION_ID, ENDPOINT, GATEWAY)
++        val removed = mutableListOf<Pair<String, String>>()
++        var refreshes = 0
++        val provider = builtInProvider(
++            subscriber = FakePusherSubscriber(unregisterPusherResult = { _, key, gateway -> removed.add(key to gateway); Result.success(Unit) }),
++            onRefresh = { refreshes++ },
++        )
++        assertThat(provider.unregister(FakeMatrixClient()).isSuccess).isTrue()
++        assertThat(removed).containsExactly(ENDPOINT to GATEWAY)
++        assertThat(store.getBuiltInSubscriptions()).isEmpty()
++        assertThat(refreshes).isEqualTo(1)
++    }
++
++    @Test
++    fun `a pusher that cannot be removed keeps the built-in connection`() = runTest {
++        store.setBuiltInSubscription(A_SESSION_ID, ENDPOINT, GATEWAY)
++        val provider = builtInProvider(subscriber = FakePusherSubscriber(unregisterPusherResult = { _, _, _ -> Result.failure(AN_EXCEPTION) }))
++        assertThat(provider.unregister(FakeMatrixClient()).isFailure).isTrue()
++        assertThat(store.getBuiltInSubscriptions()).isNotEmpty()
++    }
++
++    @Test
++    fun `a deleted session stops using the built-in connection`() = runTest {
++        store.setBuiltInSubscription(A_SESSION_ID, ENDPOINT, GATEWAY)
++        builtInProvider(subscriber = FakePusherSubscriber()).onSessionDeleted(A_SESSION_ID)
++        assertThat(store.getBuiltInSubscriptions()).isEmpty()
++    }
++
++    @Test
++    fun `the push app comes first, then periodic checks, then the built-in connection`() {
++        assertThat(FreeChatPushConfig.POLLING_INDEX).isGreaterThan(io.element.android.libraries.pushproviders.unifiedpush.UnifiedPushConfig.INDEX)
++        assertThat(FreeChatPushConfig.BUILT_IN_INDEX).isGreaterThan(FreeChatPushConfig.POLLING_INDEX)
++    }
++
++    private fun builtInProvider(subscriber: FakePusherSubscriber, onRefresh: () -> Unit = {}) = BuiltInPushProvider(
++        store = store,
++        pusherSubscriber = subscriber,
++        serviceStarter = object : BuiltInPushServiceStarter {
++            override fun refresh() = onRefresh()
++        },
++        stringProvider = FakeStringProvider("Built-in connection"),
++    )
++
++    private companion object {
++        const val ENDPOINT = "https://chat.example.org/upAbc?up=1"
++        const val GATEWAY = "https://chat.example.org/_matrix/push/v1/notify"
++    }
++}
+diff --git a/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/NotificationsPollerTest.kt b/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/NotificationsPollerTest.kt
+new file mode 100644
+index 0000000000..dd4ab2affe
+--- /dev/null
++++ b/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/NotificationsPollerTest.kt
+@@ -0,0 +1,99 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.pushproviders.unifiedpush.freechat
++
++import com.google.common.truth.Truth.assertThat
++import io.element.android.libraries.matrix.api.core.EventId
++import io.element.android.libraries.matrix.test.AN_EXCEPTION
++import io.element.android.libraries.matrix.test.A_SECRET
++import io.element.android.libraries.matrix.test.A_SESSION_ID
++import io.element.android.libraries.matrix.test.FakeMatrixClient
++import io.element.android.libraries.push.test.test.FakePushHandler
++import io.element.android.libraries.pushproviders.api.PushData
++import io.element.android.libraries.pushstore.test.userpushstore.clientsecret.FakePushClientSecret
++import kotlinx.coroutines.test.runTest
++import org.junit.Test
++
++class NotificationsPollerTest {
++    private val handled = mutableListOf<PushData>()
++    private val store = FakeFreeChatPushStore()
++    private val poller = NotificationsPoller(
++        pushHandler = FakePushHandler(handleResult = { pushData, _ -> handled.add(pushData) }),
++        pushClientSecret = FakePushClientSecret(getSecretForUserResult = { A_SECRET }),
++        store = store,
++    )
++    private val paths = mutableListOf<String>()
++
++    private fun client(response: Result<String>) = FakeMatrixClient(
++        clientApiRequestLambda = { method, path, _ ->
++            assertThat(method).isEqualTo("GET")
++            paths.add(path)
++            response
++        },
++    )
++
++    @Test
++    fun `starts from the newest notification on the server`() = runTest {
++        poller.start(client(Result.success(notifications(notification("\$e1", ts = 500)))), now = 9)
++        assertThat(store.getPollSince(A_SESSION_ID)).isEqualTo(500)
++        assertThat(paths).containsExactly("/_matrix/client/v3/notifications?limit=1")
++    }
++
++    @Test
++    fun `starts from now when the server cannot be asked or has nothing`() = runTest {
++        poller.start(client(Result.failure(AN_EXCEPTION)), now = 9)
++        assertThat(store.getPollSince(A_SESSION_ID)).isEqualTo(9)
++        poller.start(client(Result.success(notifications())), now = 10)
++        assertThat(store.getPollSince(A_SESSION_ID)).isEqualTo(10)
++    }
++
++    @Test
++    fun `hands over the new unread notifications, oldest first`() = runTest {
++        store.setPollSince(A_SESSION_ID, 100)
++        val body = notifications(
++            notification("\$new2", ts = 300),
++            notification("\$read", ts = 250, read = true),
++            notification("\$new1", ts = 200),
++            notification("\$old", ts = 100),
++            """{"room_id":"not a room","event":{"event_id":"${'$'}bad"},"ts":260,"read":false}""",
++        )
++        val result = poller.poll(client(Result.success(body)))
++        assertThat(result.getOrNull()).isEqualTo(2)
++        assertThat(handled.map { it.eventId }).containsExactly(EventId("\$new1"), EventId("\$new2")).inOrder()
++        assertThat(handled.map { it.clientSecret }.toSet()).containsExactly(A_SECRET)
++        assertThat(store.getPollSince(A_SESSION_ID)).isEqualTo(300)
++        assertThat(paths).containsExactly("/_matrix/client/v3/notifications?limit=50")
++    }
++
++    @Test
++    fun `nothing new keeps the position`() = runTest {
++        store.setPollSince(A_SESSION_ID, 100)
++        assertThat(poller.poll(client(Result.success(notifications(notification("\$old", ts = 100))))).getOrNull()).isEqualTo(0)
++        assertThat(handled).isEmpty()
++        assertThat(store.getPollSince(A_SESSION_ID)).isEqualTo(100)
++    }
++
++    @Test
++    fun `a failed check keeps the position`() = runTest {
++        store.setPollSince(A_SESSION_ID, 100)
++        assertThat(poller.poll(client(Result.failure(AN_EXCEPTION))).isFailure).isTrue()
++        assertThat(store.getPollSince(A_SESSION_ID)).isEqualTo(100)
++    }
++
++    @Test
++    fun `the first check only sets the position`() = runTest {
++        assertThat(poller.poll(client(Result.success(notifications(notification("\$e1", ts = 500))))).getOrNull()).isEqualTo(0)
++        assertThat(handled).isEmpty()
++        assertThat(store.getPollSince(A_SESSION_ID)).isEqualTo(500)
++    }
++
++    private fun notifications(vararg items: String) = """{"notifications":[${items.joinToString(",")}],"next_token":"1"}"""
++
++    private fun notification(eventId: String, ts: Long, read: Boolean = false) =
++        """{"room_id":"!room:example.org","event":{"event_id":"$eventId","type":"m.room.message"},"ts":$ts,"read":$read,"actions":["notify"]}"""
++}
+diff --git a/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/NtfyStreamTest.kt b/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/NtfyStreamTest.kt
+new file mode 100644
+index 0000000000..5ab1537a48
+--- /dev/null
++++ b/libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/NtfyStreamTest.kt
+@@ -0,0 +1,57 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.pushproviders.unifiedpush.freechat
++
++import com.google.common.truth.Truth.assertThat
++import org.junit.Test
++
++class NtfyStreamTest {
++    @Test
++    fun `a message event carries the push body`() {
++        val message = NtfyStream.parse("""{"id":"abc123","time":1,"event":"message","topic":"upX","message":"{\"notification\":{}}"}""")
++        assertThat(message?.id).isEqualTo("abc123")
++        assertThat(message?.body?.let(::String)).isEqualTo("""{"notification":{}}""")
++    }
++
++    @Test
++    fun `a base64 message is decoded`() {
++        val message = NtfyStream.parse("""{"id":"abc123","event":"message","message":"aGVsbG8=","encoding":"base64"}""")
++        assertThat(message?.body?.let(::String)).isEqualTo("hello")
++    }
++
++    @Test
++    fun `other events and unreadable lines are skipped`() {
++        assertThat(NtfyStream.parse("""{"id":"a","event":"open","topic":"upX"}""")).isNull()
++        assertThat(NtfyStream.parse("""{"id":"b","event":"keepalive","topic":"upX"}""")).isNull()
++        assertThat(NtfyStream.parse("""{"event":"message","message":"x"}""")).isNull()
++        assertThat(NtfyStream.parse("""{"id":"c","event":"message","message":"%%","encoding":"base64"}""")).isNull()
++        assertThat(NtfyStream.parse("not json")).isNull()
++        assertThat(NtfyStream.parse("")).isNull()
++    }
++
++    @Test
++    fun `topics are random and served by a FreeChat server`() {
++        val topic = NtfyUrls.newTopic()
++        assertThat(topic).matches("up[A-Za-z0-9]{32}")
++        assertThat(NtfyUrls.newTopic()).isNotEqualTo(topic)
++    }
++
++    @Test
++    fun `urls are on the homeserver`() {
++        val base = NtfyUrls.base("https://chat.example.org/")
++        assertThat(base).isEqualTo("https://chat.example.org")
++        assertThat(NtfyUrls.base("http://localhost:8008")).isEqualTo("http://localhost:8008")
++        assertThat(NtfyUrls.base("matrix.org")).isNull()
++        assertThat(NtfyUrls.base("ftp://chat.example.org")).isNull()
++        val endpoint = NtfyUrls.endpoint(base!!, "upAbc")
++        assertThat(endpoint).isEqualTo("https://chat.example.org/upAbc?up=1")
++        assertThat(NtfyUrls.gateway(base)).isEqualTo("https://chat.example.org/_matrix/push/v1/notify")
++        assertThat(NtfyUrls.stream(endpoint, null)).isEqualTo("https://chat.example.org/upAbc/json")
++        assertThat(NtfyUrls.stream(endpoint, "m1")).isEqualTo("https://chat.example.org/upAbc/json?since=m1")
++    }
++}
+diff --git a/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml b/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml
+index 792f26ff52..0e9c5172ae 100644
+--- a/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml
++++ b/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml
+@@ -71,4 +71,8 @@
+     <string name="freechat_device_privacy_title">本機隱私</string>
+     <string name="freechat_notification_content">通知裡顯示訊息內容</string>
+     <string name="freechat_notification_content_description">關閉時，通知只顯示「你有新訊息」，不顯示是誰發的、說了什麼。手機系統會把通知存進通知歷史，也會同步到手錶等裝置。</string>
++    <string name="freechat_push_polling">定時檢查（約 15 分鐘一次，不用裝其他應用程式）</string>
++    <string name="freechat_push_built_in">內建連線（即時，通知列常駐一則提示）</string>
++    <string name="freechat_push_built_in_channel">新訊息連線</string>
++    <string name="freechat_push_built_in_notification">正在等待新訊息</string>
+ </resources>
+diff --git a/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml b/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml
+index 49ba4658a0..e10a837d36 100644
+--- a/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml
++++ b/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml
+@@ -71,4 +71,8 @@
+     <string name="freechat_device_privacy_title">本机隐私</string>
+     <string name="freechat_notification_content">通知里显示消息内容</string>
+     <string name="freechat_notification_content_description">关闭时，通知只显示"你有新消息"，不显示是谁发的、说了什么。手机系统会把通知存进通知历史，也会同步到手表等设备。</string>
++    <string name="freechat_push_polling">定时检查（约 15 分钟一次，不用装其他应用）</string>
++    <string name="freechat_push_built_in">内置连接（实时，通知栏常驻一条提示）</string>
++    <string name="freechat_push_built_in_channel">新消息连接</string>
++    <string name="freechat_push_built_in_notification">正在等待新消息</string>
+ </resources>
+diff --git a/libraries/ui-strings/src/main/res/values/freechat_strings.xml b/libraries/ui-strings/src/main/res/values/freechat_strings.xml
+index 47be618c12..f3227a9956 100644
+--- a/libraries/ui-strings/src/main/res/values/freechat_strings.xml
++++ b/libraries/ui-strings/src/main/res/values/freechat_strings.xml
+@@ -76,4 +76,8 @@
+     <string name="freechat_device_privacy_title">Privacy on this device</string>
+     <string name="freechat_notification_content">Show message content in notifications</string>
+     <string name="freechat_notification_content_description">Off: notifications only say that you have new messages, without who sent them or what they say. Android keeps notifications in its history and on connected watches.</string>
++    <string name="freechat_push_polling">Check every 15 minutes (no other app needed)</string>
++    <string name="freechat_push_built_in">Built-in connection (instant, shows a permanent notification)</string>
++    <string name="freechat_push_built_in_channel">Connection for new messages</string>
++    <string name="freechat_push_built_in_notification">Waiting for new messages</string>
+ </resources>
+diff --git a/libraries/workmanager/api/src/main/kotlin/io/element/android/libraries/workmanager/api/WorkManagerScheduler.kt b/libraries/workmanager/api/src/main/kotlin/io/element/android/libraries/workmanager/api/WorkManagerScheduler.kt
+index 178171953d..77b73eee1a 100644
+--- a/libraries/workmanager/api/src/main/kotlin/io/element/android/libraries/workmanager/api/WorkManagerScheduler.kt
++++ b/libraries/workmanager/api/src/main/kotlin/io/element/android/libraries/workmanager/api/WorkManagerScheduler.kt
+@@ -44,6 +44,7 @@ fun workManagerTag(sessionId: SessionId, requestType: WorkManagerRequestType): S
+         WorkManagerRequestType.NOTIFICATION_SYNC -> "notifications"
+         WorkManagerRequestType.DB_VACUUM -> "db_vacuum"
+         WorkManagerRequestType.SEARCH_BACKFILL -> "search_backfill"
++        WorkManagerRequestType.PUSH_POLL -> "push_poll"
+     }
+     return "$prefix-$sessionId"
+ }
+@@ -52,4 +53,7 @@ enum class WorkManagerRequestType {
+     NOTIFICATION_SYNC,
+     DB_VACUUM,
+     SEARCH_BACKFILL,
++
++    /** FreeChat: periodic checks for new messages, for sessions that get no pushes. */
++    PUSH_POLL,
+ }

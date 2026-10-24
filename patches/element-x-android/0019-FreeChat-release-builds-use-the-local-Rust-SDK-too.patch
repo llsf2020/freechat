@@ -1,7 +1,7 @@
 From 0070ab4fbd9ea28ec8adfd0085ca8e547145439f Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 00:00:00 +0000
-Subject: [PATCH 19/19] FreeChat: release builds use the local Rust SDK too
+Subject: [PATCH 19/20] FreeChat: release builds use the local Rust SDK too
 
 The app calls the SDK's FreeChat additions, which the published SDK does not have, so with
 libraries/rustsdk/matrix-rust-sdk.aar in place release builds use it as debug builds do.

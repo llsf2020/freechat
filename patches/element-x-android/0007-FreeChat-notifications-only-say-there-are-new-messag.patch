@@ -1,7 +1,7 @@
 From af48f097b23bc5780a657d68589383491cb4f5f2 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 07/19] FreeChat: notifications only say there are new messages
+Subject: [PATCH 07/20] FreeChat: notifications only say there are new messages
 
 A per-device setting, off by default: notifications are shown like with app
 lock, a single 'new messages' notification without sender, room or content.

@@ -488,8 +488,9 @@ $tls_line
 		-Server
 	}
 
-	# Android push (UnifiedPush): ntfy serves the random up* topics the phone's ntfy app subscribes to,
-	# its API, and the Matrix push gateway the homeserver posts to. Pushes carry event IDs only.
+	# Android push (UnifiedPush): ntfy serves the random up* topics the phone's ntfy app (or FreeChat's built-in
+	# connection) subscribes to, its API, and the Matrix push gateway the homeserver posts to. Pushes carry event
+	# IDs only.
 	@push path /_matrix/push/* /v1/*
 	handle @push {
 		reverse_proxy 127.0.0.1:8090
@@ -853,7 +854,8 @@ summary() {
                       The first account to register becomes the server admin.
                       Show it again later: freechat token
  Message retention:   messages are kept for at most $RETENTION (0 = no limit); change: freechat retention 3d
- Android push:        install the ntfy app and set its "Default server" to https://$DOMAIN
+ Android push:        works without setup (checks every 15 minutes); for instant pushes choose the
+                      built-in connection, or install the ntfy app with "Default server" https://$DOMAIN
 
  Management:          freechat help  (status, update, backup, debug-logs, unlock/lock...)
  Logs:                nothing is logged by default; to troubleshoot run freechat debug-logs on

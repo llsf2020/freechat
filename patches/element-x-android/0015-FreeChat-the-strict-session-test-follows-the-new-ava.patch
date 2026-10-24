@@ -1,7 +1,7 @@
 From fb95a7df98091b6266de7936dca3d1caa8f563a5 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 00:00:00 +0000
-Subject: [PATCH 15/19] FreeChat: the strict session test follows the new
+Subject: [PATCH 15/20] FreeChat: the strict session test follows the new
  avatar data field
 
 ---
