@@ -1,0 +1,50 @@
+From 0070ab4fbd9ea28ec8adfd0085ca8e547145439f Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 00:00:00 +0000
+Subject: [PATCH 19/19] FreeChat: release builds use the local Rust SDK too
+
+The app calls the SDK's FreeChat additions, which the published SDK does not have, so with
+libraries/rustsdk/matrix-rust-sdk.aar in place release builds use it as debug builds do.
+---
+ libraries/matrix/impl/build.gradle.kts | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/libraries/matrix/impl/build.gradle.kts b/libraries/matrix/impl/build.gradle.kts
+index 17f5c37ef9..c7e9713b43 100644
+--- a/libraries/matrix/impl/build.gradle.kts
++++ b/libraries/matrix/impl/build.gradle.kts
+@@ -30,28 +30,28 @@ val usesLocalRustSdk = file("${rootDir.path}/libraries/rustsdk/matrix-rust-sdk.a
+ 
+ if (usesLocalRustSdk) {
+     // element-call-matrix declares the Rust SDK as an ordinary Maven dependency, so with the local
+-    // AAR in place a debug classpath would carry two copies of org.matrix.rustcomponents.sdk.
++    // AAR in place a classpath would carry two copies of org.matrix.rustcomponents.sdk.
+     // Point the library's dependency at the same local AAR the app is using.
+-    configurations.matching { it.name.startsWith("debug") }.configureEach {
++    // FreeChat: release builds use the local AAR too, since the app needs the SDK's FreeChat patches.
++    configurations.configureEach {
+         resolutionStrategy.dependencySubstitution {
+             substitute(module("org.matrix.rustcomponents:sdk-android"))
+                 .using(project(":libraries:rustsdk"))
+-                .because("the local Rust SDK AAR replaces the published one on debug builds")
++                .because("the local Rust SDK AAR replaces the published one")
+         }
+     }
+ }
+ 
+ dependencies {
+-    releaseImplementation(libs.matrix.sdk)
+     if (usesLocalRustSdk) {
+         println(
+             "\nNote: Using local binary of the Rust SDK." +
+                 "\n      element-call-matrix is substituted onto it as well, so the native call runs" +
+                 "\n      against this SDK rather than the one it was published against.\n"
+         )
+-        debugImplementation(projects.libraries.rustsdk)
++        implementation(projects.libraries.rustsdk)
+     } else {
+-        debugImplementation(libs.matrix.sdk)
++        implementation(libs.matrix.sdk)
+     }
+     implementation(variantOf(libs.rustls.platform.verifier) { artifactType("aar") })
+ 

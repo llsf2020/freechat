@@ -1,0 +1,238 @@
+# Builds the FreeChat for Android release APKs (F-Droid flavour, no Google services). Run by hand.
+#   sdk:     FreeChat's Rust SDK in release mode, one job per Android target, through
+#            dev/build-rust-sdk.sh android-target. Each target is cached: it is only rebuilt when the SDK
+#            baseline, its patches or the script change.
+#   aar:     the four libraries and the Kotlin bindings packaged into one AAR (dev/build-rust-sdk.sh android-aar).
+#   release: the release APKs (one per ABI and a universal one) with that AAR, kept as an artifact.
+# Signing: with the repository secrets FREECHAT_KEYSTORE (the keystore, base64), FREECHAT_KEYSTORE_PASSWORD,
+# FREECHAT_KEY_ALIAS and FREECHAT_KEY_PASSWORD the APKs are signed with that key. Without them they keep the
+# public debug key, which anyone can sign with: such APKs are for testing only, never for distribution.
+name: android-release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-release
+  cancel-in-progress: true
+
+env:
+  GRADLE_OPTS: -Dorg.gradle.jvmargs="-Xmx7g -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8" -Dkotlin.daemon.jvm.options=-Xmx2g -XX:+UseG1GC
+
+jobs:
+  sdk:
+    strategy:
+      matrix:
+        target: [aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android, i686-linux-android]
+    name: sdk (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      # The NDK that upstream's matrix-rust-components-kotlin builds with.
+      NDK_VERSION: 28.2.13676358
+      CARGO_NDK_VERSION: 4.1.2
+      OUT: forks/matrix-rust-components-kotlin/sdk/sdk-android/src/main
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Everything the SDK build reads: its baseline, the packaging tool's baseline, the patches and the script.
+      - name: Cache key
+        id: key
+        run: |
+          key=$( { grep -E '^matrix-rust-(sdk|components-kotlin) ' upstream.conf; cat patches/matrix-rust-sdk/*.patch 2>/dev/null; cat dev/build-rust-sdk.sh; } | sha256sum | cut -c1-20)
+          echo "key=rust-sdk-android-release-${{ matrix.target }}-$key" >> "$GITHUB_OUTPUT"
+
+      - id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: rust-sdk
+          key: ${{ steps.key.outputs.key }}
+
+      - name: Free disk space
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force > /dev/null
+          df -h /
+
+      - name: Rust, cargo-ndk, protoc and the NDK
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup toolchain install stable --profile minimal --target "$TARGET"
+          rustup default stable
+          cargo install cargo-ndk --locked --version "$CARGO_NDK_VERSION"
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends protobuf-compiler
+          ndk="$ANDROID_HOME/ndk/$NDK_VERSION"
+          [ -d "$ndk" ] || "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null
+          [ -d "$ndk" ] || { echo "NDK $NDK_VERSION did not install"; exit 1; }
+          echo "ANDROID_NDK_HOME=$ndk" >> "$GITHUB_ENV"
+
+      # rust-sdk/ gets the library under jniLibs/<ABI>/ and the Kotlin bindings (the same for every target).
+      - name: Build the Rust SDK
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          dev/build-rust-sdk.sh android-target "$TARGET"
+          mkdir -p rust-sdk
+          cp -r "$OUT/jniLibs" "$OUT/kotlin" rust-sdk/
+          find rust-sdk/jniLibs -type f -exec ls -lh {} +
+
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: rust-sdk
+          key: ${{ steps.key.outputs.key }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rust-sdk-${{ matrix.target }}
+          path: rust-sdk/jniLibs/
+          retention-days: 3
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: matrix.target == 'aarch64-linux-android'
+        with:
+          name: rust-sdk-kotlin
+          path: rust-sdk/kotlin/
+          retention-days: 3
+          if-no-files-found: error
+
+  aar:
+    needs: sdk
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      OUT: forks/matrix-rust-components-kotlin/sdk/sdk-android/src/main
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # The checkout carries upstream's bindings; they are replaced by ours.
+      - name: Check out matrix-rust-components-kotlin
+        run: |
+          docker/checkout.sh matrix-rust-components-kotlin forks/matrix-rust-components-kotlin
+          rm -rf "$OUT/kotlin" "$OUT/jniLibs"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: rust-sdk-*-linux-android*
+          merge-multiple: true
+          path: ${{ env.OUT }}/jniLibs
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: rust-sdk-kotlin
+          path: ${{ env.OUT }}/kotlin
+
+      - name: Package the AAR
+        run: |
+          mkdir -p rust-sdk
+          dev/build-rust-sdk.sh android-aar rust-sdk/matrix-rust-sdk.aar
+          libs=$(unzip -l rust-sdk/matrix-rust-sdk.aar | grep -c 'jni/.*/libmatrix_sdk_ffi.so$' || true)
+          [ "$libs" = 4 ] || { echo "the AAR has $libs native libraries, not 4"; exit 1; }
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: rust-sdk-android-release
+          path: rust-sdk/matrix-rust-sdk.aar
+          retention-days: 3
+          if-no-files-found: error
+
+  release:
+    needs: aar
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force > /dev/null
+          df -h /
+
+      # The build gets terminated when memory runs out (as upstream's CI found too), so add swap.
+      - name: More swap
+        run: |
+          sudo swapoff -a
+          sudo fallocate -l 8G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile > /dev/null
+          sudo swapon /mnt/swapfile
+          free -h
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+
+      - name: Check out Element X Android with the FreeChat patches
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends python3-pil
+          # Upstream keeps some assets in Git LFS; with this the clone fetches them.
+          git lfs install
+          docker/checkout.sh element-x-android forks/element-x-android
+
+      # With libraries/rustsdk/matrix-rust-sdk.aar in place, every build uses it instead of the published SDK.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: rust-sdk-android-release
+          path: forks/element-x-android/libraries/rustsdk
+
+      - name: Release APKs
+        run: dev/build-android.sh :app:assembleFdroidRelease --stacktrace --no-configuration-cache
+
+      - name: Sign
+        id: sign
+        env:
+          KEYSTORE: ${{ secrets.FREECHAT_KEYSTORE }}
+          KEYSTORE_PASSWORD: ${{ secrets.FREECHAT_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.FREECHAT_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.FREECHAT_KEY_PASSWORD }}
+        run: |
+          apks=forks/element-x-android/app/build/outputs/apk/fdroid/release
+          mkdir -p apk
+          libs=$(unzip -l "$apks"/*universal*.apk | grep -c 'lib/.*/libmatrix_sdk_ffi.so$' || true)
+          [ "$libs" = 4 ] || { echo "the universal APK has $libs Rust SDK libraries, not 4"; exit 1; }
+          if [ -z "$KEYSTORE" ]; then
+            echo "::warning::No signing key in the repository secrets: the APKs keep the public debug key and are for testing only."
+            cp "$apks"/*.apk apk/
+            echo "name=freechat-android-release-debug-key" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          apksigner=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n 1)
+          ks="$RUNNER_TEMP/freechat.keystore"
+          printf '%s' "$KEYSTORE" | base64 -d > "$ks"
+          for apk in "$apks"/*.apk; do
+            "$apksigner" sign --ks "$ks" --ks-pass env:KEYSTORE_PASSWORD --ks-key-alias "$KEY_ALIAS" \
+              --key-pass env:KEY_PASSWORD --out "apk/$(basename "$apk")" "$apk"
+            "$apksigner" verify "apk/$(basename "$apk")"
+          done
+          rm -f "$ks" apk/*.idsig
+          echo "name=freechat-android-release" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.sign.outputs.name }}
+          path: apk/*.apk
+          retention-days: 14
+          if-no-files-found: error

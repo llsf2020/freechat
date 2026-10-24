@@ -51,12 +51,12 @@ docker/            镜像构建：按基线下载上游并打补丁、构建时�
 deploy/            一键安装脚本（服务器上的全部配置都由它生成）
 branding/          App 名字、包名、图标（改这里，编译时自动生效）
 dev/               本机测试环境
-.github/workflows/ CI：服务端和网页镜像、测试、安卓和 iOS 编译
+.github/workflows/ CI：服务端和网页镜像、测试、安卓和 iOS 编译、安卓正式版 APK（手动运行）、网页锁文件更新
 ```
 
 FreeChat 的改动以补丁形式保存在 `patches/` 里，构建时按 `upstream.conf` 下载上游源码、核对提交哈希后打上补丁。
 
-安卓和 iOS 客户端用的 Rust SDK 不是官方发布的版本，而是按 `patches/matrix-rust-sdk` 从源码编出来的（`dev/build-rust-sdk.sh`）。CI 负责编译，SDK 补丁不变时直接用缓存。
+安卓和 iOS 客户端用的 Rust SDK 不是官方发布的版本，而是按 `patches/matrix-rust-sdk` 从源码编出来的（`dev/build-rust-sdk.sh`）。CI 负责编译，SDK 补丁不变时直接用缓存。安卓正式版 APK 由手动运行的 `android-release` 工作流生成，SDK 会编全部四种安卓架构；APK 用仓库密钥 `FREECHAT_KEYSTORE`（base64）、`FREECHAT_KEYSTORE_PASSWORD`、`FREECHAT_KEY_ALIAS`、`FREECHAT_KEY_PASSWORD` 里的签名密钥签名，没配置时用公开的调试密钥签名，只能用于测试。
 
 ## 文档
 

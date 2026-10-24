@@ -4,8 +4,15 @@
 #
 #   dev/build-rust-sdk.sh android [AAR]
 #                                   build for Android (arm64) into AAR, by default
-#                                   forks/element-x-android/libraries/rustsdk/matrix-rust-sdk.aar, which debug
-#                                   builds of the Android app use instead of the published SDK
+#                                   forks/element-x-android/libraries/rustsdk/matrix-rust-sdk.aar, which the
+#                                   Android app builds use instead of the published SDK
+#   dev/build-rust-sdk.sh android-target TARGET
+#                                   release build for one Android target (e.g. armv7-linux-androideabi) into
+#                                   forks/matrix-rust-components-kotlin/sdk/sdk-android/src/main: the library
+#                                   under jniLibs/<ABI>/, the Kotlin bindings under kotlin/
+#   dev/build-rust-sdk.sh android-aar [AAR]
+#                                   package what android-target built (one or more targets) into a release
+#                                   AAR, by default the path of the android command
 #   dev/build-rust-sdk.sh ios       build for the iOS simulator (Apple silicon) into the Swift package
 #                                   forks/matrix-rust-components-swift, and point forks/element-x-ios/project.yml
 #                                   at it (on a Mac)
@@ -26,7 +33,7 @@ IOS="$ROOT/forks/element-x-ios"
 # Named like upstream's binary package: Swift packages are known by their directory name, and the app's other
 # packages ask for matrix-rust-components-swift.
 SWIFT_PKG="$ROOT/forks/matrix-rust-components-swift"
-[[ -d "$SDK" || ${1:-} == ios-point ]] || sh "$ROOT/docker/checkout.sh" matrix-rust-sdk "$SDK"
+[[ -d "$SDK" || ${1:-} == ios-point || ${1:-} == android-aar ]] || sh "$ROOT/docker/checkout.sh" matrix-rust-sdk "$SDK"
 
 # The app's MatrixRustSDK package becomes the local one (the path is relative to project.yml).
 point_ios_project() {
@@ -54,6 +61,26 @@ case "${1:-}" in
 		# Only arm64: what phones run. The other ABIs would each add a long build.
 		"$KOTLIN/scripts/build.sh" -p "$SDK" -m sdk -t aarch64-linux-android -o "$aar"
 		;;
+	android-target)
+		: "${ANDROID_NDK_HOME:?set ANDROID_NDK_HOME to the Android NDK}"
+		[[ -n "${2:-}" ]] || { echo "which target?" >&2; exit 1; }
+		KOTLIN="$ROOT/forks/matrix-rust-components-kotlin"
+		[[ -d "$KOTLIN" ]] || sh "$ROOT/docker/checkout.sh" matrix-rust-components-kotlin "$KOTLIN"
+		bash "$KOTLIN/scripts/build-rust-for-target.sh" -p "$SDK" -m sdk -t "$2" -r
+		;;
+	android-aar)
+		aar="$(realpath -m "${2:-$ROOT/forks/element-x-android/libraries/rustsdk/matrix-rust-sdk.aar}")"
+		[[ -d "$(dirname "$aar")" ]] || { echo "$(dirname "$aar") does not exist" >&2; exit 1; }
+		KOTLIN="$ROOT/forks/matrix-rust-components-kotlin"
+		src="$KOTLIN/sdk/sdk-android/src/main"
+		compgen -G "$src/jniLibs/*/libmatrix_sdk_ffi.so" > /dev/null \
+			|| { echo "nothing built for Android in $src: run android-target first" >&2; exit 1; }
+		# The checkout carries upstream's bindings; ours have the FreeChat additions.
+		grep -q "fun eraseEventsLocally" "$src/kotlin/org/matrix/rustcomponents/sdk/matrix_sdk_ffi.kt" \
+			|| { echo "the Kotlin bindings in $src are not FreeChat's" >&2; exit 1; }
+		ls "$src"/jniLibs/
+		(cd "$KOTLIN" && bash scripts/build-aar.sh -r -m sdk -o "$aar")
+		;;
 	ios)
 		[[ -f "$IOS/project.yml" ]] || { echo "forks/element-x-ios is missing" >&2; exit 1; }
 		# Copies the xcframework and the Swift sources into the package; its manifest is the SDK's own one for
@@ -72,7 +99,7 @@ case "${1:-}" in
 		point_ios_project
 		;;
 	*)
-		sed -n '2,15p' "$0"
+		sed -n '2,22p' "$0"
 		exit 1
 		;;
 esac

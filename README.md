@@ -51,12 +51,12 @@ docker/            image builds: fetch the upstream baseline, apply patches, bui
 deploy/            the installer (it generates every config file on the server)
 branding/          app name, package IDs and icon (edit here; builds pick it up)
 dev/               local test environment
-.github/workflows/ CI: server and web images, tests, Android and iOS builds
+.github/workflows/ CI: server and web images, tests, Android and iOS builds, Android release APKs (run by hand), web lockfile updates
 ```
 
 FreeChat's changes live as patches in `patches/`. A build downloads the upstream source listed in `upstream.conf`, checks the commit hash, then applies the patches.
 
-The Android and iOS apps are built with a Rust SDK compiled from `patches/matrix-rust-sdk` rather than the published one (`dev/build-rust-sdk.sh`). CI does this and caches the result until the SDK patches change.
+The Android and iOS apps are built with a Rust SDK compiled from `patches/matrix-rust-sdk` rather than the published one (`dev/build-rust-sdk.sh`). CI does this and caches the result until the SDK patches change. Android release APKs come from the `android-release` workflow, which builds the SDK for all four Android ABIs; they are signed with the key in the repository secrets `FREECHAT_KEYSTORE` (base64), `FREECHAT_KEYSTORE_PASSWORD`, `FREECHAT_KEY_ALIAS` and `FREECHAT_KEY_PASSWORD`, or else with the public debug key, for testing only.
 
 ## Documentation
 
