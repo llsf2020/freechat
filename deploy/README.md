@@ -25,6 +25,7 @@ curl -fsSL https://raw.githubusercontent.com/llsf2020/freechat/main/deploy/insta
 The installer asks for your domain, an email address and the **message retention** (7 days by default), then:
 - installs Docker
 - on servers with less than 2 GB of memory, adds 2 GB of **encrypted** swap. It gets a new random key at every boot and the key is never written to disk, so after a reboot nothing left in the old swap (which may include decrypted messages) can be read. A plain `/swapfile` from an earlier install is replaced when you run the installer again. No swap is created on VPSes without disk encryption support (OpenVZ / LXC) or without systemd
+- turns on **BBR** TCP congestion control when the kernel has it: faster web pages, sync and file transfers on long or lossy routes (calls use UDP and are not affected). Skipped where the VPS does not allow it (often OpenVZ / LXC)
 - generates the secrets and configuration
 - gets an HTTPS certificate
 - configures the firewall (ufw / firewalld)
