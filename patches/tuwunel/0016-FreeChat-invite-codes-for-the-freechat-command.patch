@@ -1,0 +1,195 @@
+From 4e9c94f27dec5ac829b38747b835b5b4ae70f344 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Tue, 03 Nov 2026 00:00:00 +0000
+Subject: [PATCH 16/16] FreeChat: invite codes for the freechat command
+
+Local-only routes under /_freechat/admin/ issue, list and revoke
+database registration tokens limited in uses and time. Caddy does not
+proxy them, and they only answer with FREECHAT_ADMIN_SECRET, compared
+in constant time; without it set they refuse everything. The token of
+the configuration file is neither listed nor revocable there.
+---
+ src/api/client/freechat.rs | 124 ++++++++++++++++++++++++++++++++++++-
+ src/api/router.rs          |  11 +++-
+ 2 files changed, 133 insertions(+), 2 deletions(-)
+
+diff --git a/src/api/client/freechat.rs b/src/api/client/freechat.rs
+index 7c93eaa8f..4f2e68c62 100644
+--- a/src/api/client/freechat.rs
++++ b/src/api/client/freechat.rs
+@@ -3,8 +3,10 @@
+ //! Plain axum handlers: ruma's endpoint macros need crate features this crate
+ //! does not define, so the access token is checked here the same way the
+ //! router does for typed routes.
++//!
++//! Also the registration invites of the `freechat` command, under `/_freechat/admin/`.
+ 
+-use std::time::SystemTime;
++use std::time::{Duration, SystemTime};
+ 
+ use axum::{
+ 	Json,
+@@ -15,10 +17,12 @@
+ 	TypedHeader,
+ 	headers::{Authorization, authorization::Bearer},
+ };
++use futures::StreamExt;
+ use ruma::{OwnedEventId, OwnedRoomId, OwnedUserId};
+ use serde::Deserialize;
+ use serde_json::json;
+ use tuwunel_core::{Err, Result, matrix::pdu::PduId};
++use tuwunel_service::registration_tokens::{TokenExpires, TokenInfo};
+ 
+ /// `GET /_matrix/client/unstable/com.freechat/rooms/{roomId}/join_password`
+ ///
+@@ -174,3 +178,121 @@ async fn authenticate(services: &crate::State, token: &str) -> Result<OwnedUserI
+ 
+ 	Ok(user_id)
+ }
++
++// Registration invites for the `freechat` command on the server, under `/_freechat/admin/`. Caddy only proxies
++// `/_matrix/` to the internet, and these routes only answer requests carrying the `FREECHAT_ADMIN_SECRET` the
++// installer generated; without it set they refuse everything.
++
++/// Longest an invite may stay valid: a year.
++const MAX_INVITE_AGE: Duration = Duration::from_secs(366 * 24 * 3600);
++
++#[derive(Deserialize)]
++pub(crate) struct IssueInvite {
++	/// How many accounts it may create; absent means any number until it expires.
++	#[serde(default)]
++	max_uses: Option<u64>,
++	/// Seconds until it expires; absent means it does not expire by time.
++	#[serde(default)]
++	max_age_secs: Option<u64>,
++}
++
++/// `POST /_freechat/admin/invites`
++///
++/// Issues a registration token limited in uses and/or time. Answers with the token on the first line and a
++/// description of its limits on the second, as plain text for the shell.
++pub(crate) async fn issue_invite_route(
++	State(services): State<crate::State>,
++	TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
++	Json(body): Json<IssueInvite>,
++) -> Result<String> {
++	check_admin_secret(bearer.token())?;
++	if body.max_uses == Some(0) {
++		return Err!(Request(InvalidParam("max_uses must be at least 1")));
++	}
++	let max_age = match body.max_age_secs {
++		| None => None,
++		| Some(secs) if secs == 0 || Duration::from_secs(secs) > MAX_INVITE_AGE =>
++			return Err!(Request(InvalidParam("max_age_secs must be between 1 and a year"))),
++		| Some(secs) => SystemTime::now().checked_add(Duration::from_secs(secs)),
++	};
++	let expires = TokenExpires { max_uses: body.max_uses, max_age };
++	let (token, info) = services
++		.registration_tokens
++		.create_token(None, None, expires)
++		.await?;
++
++	Ok(format!("{token}\n{info}\n"))
++}
++
++/// `GET /_freechat/admin/invites`
++///
++/// Lists the invites that can still be used, one per line: the token, then its uses and limits. The
++/// registration token of the configuration file is left out.
++pub(crate) async fn list_invites_route(
++	State(services): State<crate::State>,
++	TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
++) -> Result<String> {
++	check_admin_secret(bearer.token())?;
++	let tokens: Vec<_> = services
++		.registration_tokens
++		.iterate_tokens()
++		.await
++		.collect()
++		.await;
++
++	Ok(tokens
++		.into_iter()
++		.filter_map(|valid| match valid.info {
++			| TokenInfo::Config => None,
++			| TokenInfo::Database(info) => Some(format!("{}  {info}\n", valid.token)),
++		})
++		.collect())
++}
++
++/// `DELETE /_freechat/admin/invites/{token}`
++///
++/// Revokes an invite so it can no longer create accounts. Accounts it created stay.
++pub(crate) async fn revoke_invite_route(
++	State(services): State<crate::State>,
++	TypedHeader(Authorization(bearer)): TypedHeader<Authorization<Bearer>>,
++	Path(token): Path<String>,
++) -> Result<String> {
++	check_admin_secret(bearer.token())?;
++	if matches!(services.registration_tokens.get_token_info(&token).await, Ok(TokenInfo::Config)) {
++		return Err!(Request(Forbidden("The registration token of the configuration file is not an invite")));
++	}
++	services
++		.registration_tokens
++		.revoke_token(&token)
++		.await?;
++
++	Ok(String::from("revoked\n"))
++}
++
++fn check_admin_secret(given: &str) -> Result {
++	let expected = std::env::var("FREECHAT_ADMIN_SECRET").unwrap_or_default();
++	// A missing or short secret must not let an empty or guessed one in.
++	if expected.len() < 32 || !constant_time_eq(expected.as_bytes(), given.as_bytes()) {
++		return Err!(Request(Forbidden("Not allowed.")));
++	}
++
++	Ok(())
++}
++
++/// Equal-length inputs take the same time whatever they hold; only the length can show.
++fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
++	a.len() == b.len() && a.iter().zip(b).fold(0_u8, |acc, (x, y)| acc | (x ^ y)) == 0
++}
++
++#[cfg(test)]
++mod tests {
++	use super::constant_time_eq;
++
++	#[test]
++	fn admin_secret_comparison() {
++		assert!(constant_time_eq(b"secret", b"secret"));
++		assert!(!constant_time_eq(b"secret", b"secreT"));
++		assert!(!constant_time_eq(b"secret", b"secret2"));
++		assert!(!constant_time_eq(b"secret", b""));
++	}
++}
+diff --git a/src/api/router.rs b/src/api/router.rs
+index 589babcfa..81d12bf67 100644
+--- a/src/api/router.rs
++++ b/src/api/router.rs
+@@ -9,7 +9,7 @@
+ use axum::{
+ 	Router,
+ 	response::IntoResponse,
+-	routing::{any, get, post},
++	routing::{any, delete, get, post},
+ };
+ pub use client_ip::{ConfiguredIpSource, TrustedPeerSubnets};
+ use const_str::{concat, join, replace};
+@@ -339,6 +339,15 @@ fn register_client_room_routes(router: Router<State>) -> Router<State> {
+ 			"/_matrix/client/unstable/com.freechat/rooms/{room_id}/event_media",
+ 			post(client::freechat::event_media_route),
+ 		)
++		// FreeChat: registration invites for the `freechat` command (not proxied to the internet)
++		.route(
++			"/_freechat/admin/invites",
++			get(client::freechat::list_invites_route).post(client::freechat::issue_invite_route),
++		)
++		.route(
++			"/_freechat/admin/invites/{token}",
++			delete(client::freechat::revoke_invite_route),
++		)
+ 		.ruma_route(&client::report_event_route)
+ 		.ruma_route(&client::report_room_route)
+ 		.ruma_route(&client::report_user_route)

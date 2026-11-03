@@ -315,10 +315,13 @@ load_or_create_secrets() {
 		REGISTRATION_TOKEN=$(sed -n 's/^REGISTRATION_TOKEN=//p' "$DIR/.env")
 		LIVEKIT_KEY=$(sed -n 's/^LIVEKIT_KEY=//p' "$DIR/.env")
 		LIVEKIT_SECRET=$(sed -n 's/^LIVEKIT_SECRET=//p' "$DIR/.env")
+		ADMIN_SECRET=$(sed -n 's/^FREECHAT_ADMIN_SECRET=//p' "$DIR/.env")
 	fi
 	[ -n "${REGISTRATION_TOKEN:-}" ] || REGISTRATION_TOKEN=$(openssl rand -hex 12)
 	[ -n "${LIVEKIT_KEY:-}" ] || LIVEKIT_KEY="fc$(openssl rand -hex 9)"
 	[ -n "${LIVEKIT_SECRET:-}" ] || LIVEKIT_SECRET=$(openssl rand -hex 32)
+	# Lets the freechat command manage invites through the server's local-only admin routes.
+	[ -n "${ADMIN_SECRET:-}" ] || ADMIN_SECRET=$(openssl rand -hex 32)
 	umask 077
 	cat > "$DIR/.env" <<EOF
 # FreeChat install settings and secrets (keep private)
@@ -334,6 +337,7 @@ BACKUP_DIR=$BACKUP_DIR
 REGISTRATION_TOKEN=$REGISTRATION_TOKEN
 LIVEKIT_KEY=$LIVEKIT_KEY
 LIVEKIT_SECRET=$LIVEKIT_SECRET
+FREECHAT_ADMIN_SECRET=$ADMIN_SECRET
 RETENTION=$RETENTION
 FREECHAT_MAX_RETENTION_SECS=$RETENTION_SECS
 EOF
@@ -597,6 +601,7 @@ services:
     ports: ["127.0.0.1:8008:8008"]
     environment:
       FREECHAT_MAX_RETENTION_SECS: ${FREECHAT_MAX_RETENTION_SECS:-0}
+      FREECHAT_ADMIN_SECRET: ${FREECHAT_ADMIN_SECRET:-}
     volumes:
       # Never created on the fly: while the encrypted volume is locked the server refuses
       # to start instead of creating an empty database.
@@ -696,6 +701,20 @@ BACKUP_DIR=${BACKUP_DIR:-./backups}
 TUWUNEL_DATA=$(env_get TUWUNEL_DATA)
 TUWUNEL_DATA=${TUWUNEL_DATA:-./data/tuwunel}
 
+# The server's invite routes, reachable only from this machine (Caddy does not proxy them). The secret goes to
+# curl on stdin, so it never shows in the process list.
+admin_api() {
+	secret=$(env_get FREECHAT_ADMIN_SECRET)
+	[ -n "$secret" ] || { echo "Invites are new: run the installer again once to set them up (data and settings are kept)" >&2; exit 1; }
+	method=$1 path=$2 body=${3:-}
+	if [ -n "$body" ]; then
+		printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\ndata = "%s"\n' "$secret" \
+			"$(printf '%s' "$body" | sed 's/"/\\"/g')" | curl -fsS --max-time 15 -K - -X "$method" "http://127.0.0.1:8008/_freechat/admin$path"
+	else
+		printf 'header = "Authorization: Bearer %s"\n' "$secret" | curl -fsS --max-time 15 -K - -X "$method" "http://127.0.0.1:8008/_freechat/admin$path"
+	fi || { echo "The server refused or did not answer: check that it runs (freechat status); after an update, run the installer again once" >&2; exit 1; }
+}
+
 read_secret() {
 	printf '%s' "$1" >/dev/tty
 	stty -echo </dev/tty
@@ -750,7 +769,46 @@ YAML
 		echo "Stopped and locked; the data cannot be opened without the passphrase" ;;
 	update) dc pull && dc up -d --remove-orphans && docker image prune -f >/dev/null && dc ps ;;
 	restart) dc restart ;;
-	token) env_get REGISTRATION_TOKEN ;;
+	token)
+		case "${2:-}" in
+			"") env_get REGISTRATION_TOKEN
+				echo "(yours: it never expires, so do not share it; give others an invite: freechat invite)" >&2 ;;
+			rotate)
+				new=$(openssl rand -hex 12)
+				tmp="$DIR/.env.tmp"
+				sed "s/^REGISTRATION_TOKEN=.*/REGISTRATION_TOKEN=$new/" "$DIR/.env" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$DIR/.env"
+				sed -i "s/^registration_token = .*/registration_token = \"$new\"/" "$DIR/config/tuwunel.toml"
+				dc up -d --force-recreate server >/dev/null
+				echo "New registration token: $new (the old one no longer works)" ;;
+			*) echo "usage: freechat token [rotate]"; exit 1 ;;
+		esac ;;
+	invite)
+		uses=1 days=7
+		shift
+		while [ $# -gt 0 ]; do
+			case "$1" in
+				--uses) uses=${2:-}; shift 2 || exit 1 ;;
+				--days) days=${2:-}; shift 2 || exit 1 ;;
+				*) echo "usage: freechat invite [--uses N] [--days D]   (0 = no limit)"; exit 1 ;;
+			esac
+		done
+		case "$uses$days" in "" | *[!0-9]*) echo "--uses and --days take a number"; exit 1 ;; esac
+		[ "$uses" -gt 0 ] || [ "$days" -gt 0 ] || { echo "an invite must run out after some uses or some days"; exit 1; }
+		body="{"
+		[ "$uses" -gt 0 ] && body="$body\"max_uses\":$uses"
+		[ "$uses" -gt 0 ] && [ "$days" -gt 0 ] && body="$body,"
+		[ "$days" -gt 0 ] && body="$body\"max_age_secs\":$((days * 86400))"
+		body="$body}"
+		out=$(admin_api POST /invites "$body") || exit 1
+		echo "Invite code: $(printf '%s\n' "$out" | sed -n 1p)"
+		printf '%s\n' "$out" | sed -n 2p
+		echo "Give it to the person you invite; they enter it as the registration token when they sign up." ;;
+	invites)
+		out=$(admin_api GET /invites) || exit 1
+		if [ -n "$out" ]; then printf '%s\n' "$out"; else echo "No invite can be used right now. New one: freechat invite"; fi ;;
+	revoke)
+		case "${2:-}" in "" | *[!A-Za-z0-9_-]*) echo "usage: freechat revoke <invite code>"; exit 1 ;; esac
+		admin_api DELETE "/invites/$2" >/dev/null && echo "Revoked: $2 can no longer create accounts" ;;
 	retention)
 		if [ -z "${2:-}" ]; then
 			cur=$(env_get RETENTION)
@@ -796,7 +854,12 @@ usage: freechat <command>
   status              show the services
   update              update to the latest version
   restart             restart
-  token               show the registration token
+  token [rotate]      show your own registration token (never expires: do not share it) / replace it
+  invite [--uses N] [--days D]
+                      make an invite code for someone else; by default it creates one account
+                      within 7 days (0 = no limit)
+  invites             list the invite codes that can still be used
+  revoke <code>       revoke an invite code
   retention [age]     show / change how long messages are kept, e.g. 7d, 24h, 30m; 0 = no limit
   backup              back up the database, configuration and secrets (inside the encrypted
                       volume when there is one); backups older than the retention go daily
@@ -879,6 +942,8 @@ summary() {
  Web client:          https://$DOMAIN
  Server address:      https://$DOMAIN   (enter this when signing in on the phone apps)
  Registration token:  $REGISTRATION_TOKEN
+                      For your own account; it never expires, so do not share it.
+                      Invite others with codes that run out: freechat invite
                       The first account to register becomes the server admin.
                       Show it again later: freechat token
  Message retention:   messages are kept for at most $RETENTION (0 = no limit); change: freechat retention 3d

@@ -31,7 +31,7 @@ The installer asks for your domain, an email address and the **message retention
 - configures the firewall (ufw / firewalld)
 - starts all services
 
-When it finishes, it shows the **registration token**. **The first account to register becomes the server admin.**
+When it finishes, it shows the **registration token**. **The first account to register becomes the server admin.** The registration token never expires, so keep it for yourself: give everyone else an **invite code** (`freechat invite`), which by default creates one account within 7 days.
 
 To skip the questions, pass everything at once:
 
@@ -86,7 +86,9 @@ The database goes into a LUKS-encrypted volume (8 GB by default; write `--encryp
 | `freechat unlock` / `freechat lock` | Unlock / lock the encrypted volume (installs with `--encrypt-data`) |
 | `freechat update` | Update to the latest version |
 | `freechat backup` | Back up the database, configuration and secrets to `/opt/freechat/backups/`. A backup holds the messages that had not expired when it was made, so **backups older than the message retention are deleted daily** (`freechat prune-backups`) |
-| `freechat token` | Show the registration token |
+| `freechat token` | Show your own registration token (never expires: do not share it); `freechat token rotate` replaces it |
+| `freechat invite` | Make an invite code for someone else: one account within 7 days by default; `--uses N` and `--days D` change that (`0` = no limit) |
+| `freechat invites` / `freechat revoke <code>` | List the invite codes that can still be used / revoke one (accounts it created stay) |
 | `freechat retention [age]` | Show / change how long messages are kept, e.g. `7d`, `24h`, `0` (no limit) |
 | `freechat restart` | Restart |
 | `freechat uninstall` | Stop the services (data is kept) |
