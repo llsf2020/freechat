@@ -1,7 +1,7 @@
 From 48bda7fa2154417ba49d8ed5c9bf4ddb6b5ef00d Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 00:00:00 +0000
-Subject: [PATCH 20/22] FreeChat: new messages without a push app
+Subject: [PATCH 20/23] FreeChat: new messages without a push app
 
 Two more ways to get notifications, offered next to UnifiedPush under
 "Push notification provider":

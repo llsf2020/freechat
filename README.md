@@ -11,6 +11,7 @@ A self-hosted, Telegram-like messenger with chat, voice and video (including gro
 - **Auto-delete**: room admins pick a lifetime (1 hour to 1 month). When it runs out, the message is removed from the server database for good, with no redaction left behind, and every device deletes its local copy.
 - **Burn after reading**: anyone can make their own messages disappear a set time after everyone has read them.
 - **Server-wide retention cap**: no message stays on the server longer than this (set at install time, 7 days by default).
+- **Channels**: rooms where only moderators and admins post; everyone else reads and reacts.
 - **Private rooms**: joining takes a password or a request an admin approves.
 - **Minimal metadata**: the server records no IP addresses or device names and keeps no logs by default. Pushes carry only an event ID, never content or sender. Android push runs through your own server (its ntfy, with or without the ntfy app), never Google.
 - **Emergency PIN**: unlocking the app with it instead of the PIN signs out and erases the device at once, for when someone forces you to unlock it (Android, iOS).
@@ -40,7 +41,7 @@ You need a Linux server and a domain name pointing at it. As root, run:
 curl -fsSL https://raw.githubusercontent.com/llsf2020/freechat/main/deploy/install.sh | sudo sh
 ```
 
-Server requirements, firewall ports, options and day-to-day commands are in the [deployment guide](deploy/README.md).
+Server requirements, firewall ports, options and day-to-day commands are in the [deployment guide](deploy/README.md). Never set up a server before? The [step-by-step guide](deploy/BEGINNERS.md) explains everything from renting a server to inviting people.
 
 ## Repository layout
 
@@ -62,6 +63,7 @@ The Android and iOS apps are built with a Rust SDK compiled from `patches/matrix
 
 ## Documentation
 
+- [Step-by-step setup for beginners](deploy/BEGINNERS.md)
 - [Deployment guide](deploy/README.md)
 - [Branding: name, package IDs, icon](branding/README.md)
 

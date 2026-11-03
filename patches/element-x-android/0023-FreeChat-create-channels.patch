@@ -1,0 +1,216 @@
+From 15fb50647c96497aba8bfbb8351dc8ec4276e2a9 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Tue, 03 Nov 2026 00:00:00 +0000
+Subject: [PATCH 23/23] FreeChat: create channels
+
+Creating a room offers "Channel": its power levels let only moderators
+and admins post, while everyone can still react. Members get the usual
+"no permission to post" composer.
+---
+ .../impl/configureroom/ConfigureRoomEvent.kt  |  1 +
+ .../configureroom/ConfigureRoomPresenter.kt   |  3 +++
+ .../impl/configureroom/ConfigureRoomView.kt   | 10 +++++++++
+ .../impl/configureroom/CreateRoomConfig.kt    |  1 +
+ .../configureroom/CreateRoomConfigStore.kt    |  5 +++++
+ .../impl/ConfigureRoomPresenterTest.kt        | 22 +++++++++++++++++++
+ .../api/createroom/CreateRoomParameters.kt    |  2 ++
+ .../libraries/matrix/impl/RustMatrixClient.kt |  7 ++++++
+ .../res/values-zh-rTW/freechat_strings.xml    |  2 ++
+ .../main/res/values-zh/freechat_strings.xml   |  2 ++
+ .../src/main/res/values/freechat_strings.xml  |  2 ++
+ 11 files changed, 57 insertions(+)
+
+diff --git a/features/createroom/impl/src/main/kotlin/io/element/android/features/createroom/impl/configureroom/ConfigureRoomEvent.kt b/features/createroom/impl/src/main/kotlin/io/element/android/features/createroom/impl/configureroom/ConfigureRoomEvent.kt
+index e22e08a5b0..8baa733385 100644
+--- a/features/createroom/impl/src/main/kotlin/io/element/android/features/createroom/impl/configureroom/ConfigureRoomEvent.kt
++++ b/features/createroom/impl/src/main/kotlin/io/element/android/features/createroom/impl/configureroom/ConfigureRoomEvent.kt
+@@ -20,4 +20,5 @@ sealed interface ConfigureRoomEvent {
+     data class HandleAvatarAction(val action: AvatarAction) : ConfigureRoomEvent
+     data class SetParentSpace(val space: SpaceRoom?) : ConfigureRoomEvent
+     data object CancelCreateRoom : ConfigureRoomEvent
++    data class ChannelChanged(val isChannel: Boolean) : ConfigureRoomEvent // FreeChat
+ }
+diff --git a/features/createroom/impl/src/main/kotlin/io/element/android/features/createroom/impl/configureroom/ConfigureRoomPresenter.kt b/features/createroom/impl/src/main/kotlin/io/element/android/features/createroom/impl/configureroom/ConfigureRoomPresenter.kt
+index 86cd67546e..1bf295dac4 100644
+--- a/features/createroom/impl/src/main/kotlin/io/element/android/features/createroom/impl/configureroom/ConfigureRoomPresenter.kt
++++ b/features/createroom/impl/src/main/kotlin/io/element/android/features/createroom/impl/configureroom/ConfigureRoomPresenter.kt
+@@ -197,6 +197,7 @@ class ConfigureRoomPresenter(
+             when (event) {
+                 is ConfigureRoomEvent.RoomNameChanged -> dataStore.setRoomName(event.name)
+                 is ConfigureRoomEvent.TopicChanged -> dataStore.setTopic(event.topic)
++                is ConfigureRoomEvent.ChannelChanged -> dataStore.setChannel(event.isChannel) // FreeChat
+                 is ConfigureRoomEvent.JoinRuleChanged -> dataStore.setJoinRule(event.joinRuleItem)
+                 is ConfigureRoomEvent.RoomAddressChanged -> dataStore.setRoomAddress(event.roomAddress)
+                 is ConfigureRoomEvent.CreateRoom -> createRoom(createRoomConfig)
+@@ -257,6 +258,7 @@ class ConfigureRoomPresenter(
+                         avatar = avatarUrl,
+                         roomAliasName = config.visibilityState.roomAddress(),
+                         isSpace = isSpace,
++                        isChannel = config.isChannel && !isSpace, // FreeChat
+                     )
+                 }
+                 is RoomVisibilityState.Private -> {
+@@ -274,6 +276,7 @@ class ConfigureRoomPresenter(
+                         invite = config.invites.map { it.userId },
+                         avatar = avatarUrl,
+                         isSpace = isSpace,
++                        isChannel = config.isChannel && !isSpace, // FreeChat
+                     )
+                 }
+             }
+diff --git a/features/createroom/impl/src/main/kotlin/io/element/android/features/createroom/impl/configureroom/ConfigureRoomView.kt b/features/createroom/impl/src/main/kotlin/io/element/android/features/createroom/impl/configureroom/ConfigureRoomView.kt
+index 053149ccfe..0930b0d5ca 100644
+--- a/features/createroom/impl/src/main/kotlin/io/element/android/features/createroom/impl/configureroom/ConfigureRoomView.kt
++++ b/features/createroom/impl/src/main/kotlin/io/element/android/features/createroom/impl/configureroom/ConfigureRoomView.kt
+@@ -48,6 +48,7 @@ import io.element.android.libraries.designsystem.components.avatar.AvatarSize
+ import io.element.android.libraries.designsystem.components.avatar.AvatarType
+ import io.element.android.libraries.designsystem.components.button.BackButton
+ import io.element.android.libraries.designsystem.components.list.ListItemContent
++import io.element.android.libraries.designsystem.components.preferences.PreferenceSwitch
+ import io.element.android.libraries.designsystem.modifiers.clearFocusOnTap
+ import io.element.android.libraries.designsystem.preview.ElementPreviewDark
+ import io.element.android.libraries.designsystem.preview.ElementPreviewLight
+@@ -138,6 +139,15 @@ fun ConfigureRoomView(
+                     state.eventSink(ConfigureRoomEvent.JoinRuleChanged(it))
+                 },
+             )
++            // FreeChat: a channel, where only moderators and admins post.
++            if (!state.isSpace) {
++                PreferenceSwitch(
++                    title = stringResource(CommonStrings.freechat_channel_title),
++                    subtitle = stringResource(CommonStrings.freechat_channel_description),
++                    isChecked = state.config.isChannel,
++                    onCheckedChange = { state.eventSink(ConfigureRoomEvent.ChannelChanged(it)) },
++                )
++            }
+             if (state.config.visibilityState !is RoomVisibilityState.Private) {
+                 ListSectionHeader(title = stringResource(R.string.screen_create_room_room_address_section_title))
+                 RoomAddressField(
+diff --git a/features/createroom/impl/src/main/kotlin/io/element/android/features/createroom/impl/configureroom/CreateRoomConfig.kt b/features/createroom/impl/src/main/kotlin/io/element/android/features/createroom/impl/configureroom/CreateRoomConfig.kt
+index dc9321eb91..35cf093770 100644
+--- a/features/createroom/impl/src/main/kotlin/io/element/android/features/createroom/impl/configureroom/CreateRoomConfig.kt
++++ b/features/createroom/impl/src/main/kotlin/io/element/android/features/createroom/impl/configureroom/CreateRoomConfig.kt
+@@ -20,4 +20,5 @@ data class CreateRoomConfig(
+     val invites: ImmutableList<MatrixUser> = persistentListOf(),
+     val visibilityState: RoomVisibilityState = RoomVisibilityState.Private(JoinRuleItem.PrivateVisibility.Private),
+     val parentSpace: SpaceRoom? = null,
++    val isChannel: Boolean = false, // FreeChat
+ )
+diff --git a/features/createroom/impl/src/main/kotlin/io/element/android/features/createroom/impl/configureroom/CreateRoomConfigStore.kt b/features/createroom/impl/src/main/kotlin/io/element/android/features/createroom/impl/configureroom/CreateRoomConfigStore.kt
+index f1d2966cd0..b110efab8f 100644
+--- a/features/createroom/impl/src/main/kotlin/io/element/android/features/createroom/impl/configureroom/CreateRoomConfigStore.kt
++++ b/features/createroom/impl/src/main/kotlin/io/element/android/features/createroom/impl/configureroom/CreateRoomConfigStore.kt
+@@ -52,6 +52,11 @@ class CreateRoomConfigStore(
+         }
+     }
+ 
++    // FreeChat
++    fun setChannel(isChannel: Boolean) {
++        createRoomConfigFlow.getAndUpdate { config -> config.copy(isChannel = isChannel) }
++    }
++
+     fun setTopic(topic: String) {
+         createRoomConfigFlow.getAndUpdate { config ->
+             config.copy(topic = topic.takeIf { it.isNotEmpty() })
+diff --git a/features/createroom/impl/src/test/kotlin/io/element/android/features/createroom/impl/ConfigureRoomPresenterTest.kt b/features/createroom/impl/src/test/kotlin/io/element/android/features/createroom/impl/ConfigureRoomPresenterTest.kt
+index ebd3cdcdc2..2298ffb247 100644
+--- a/features/createroom/impl/src/test/kotlin/io/element/android/features/createroom/impl/ConfigureRoomPresenterTest.kt
++++ b/features/createroom/impl/src/test/kotlin/io/element/android/features/createroom/impl/ConfigureRoomPresenterTest.kt
+@@ -217,6 +217,28 @@ class ConfigureRoomPresenterTest : RobolectricTest() {
+         }
+     }
+ 
++    @Test
++    fun `present - FreeChat - a channel is created as one`() = runTest {
++        val matrixClient = createMatrixClient()
++        var params: CreateRoomParameters? = null
++        matrixClient.createRoomResult = {
++            params = it
++            Result.success(RoomId("!channel:domain"))
++        }
++        val presenter = createConfigureRoomPresenter(matrixClient = matrixClient)
++        presenter.test {
++            val initialState = initialState()
++            assertThat(initialState.config.isChannel).isFalse()
++            initialState.eventSink(ConfigureRoomEvent.ChannelChanged(true))
++            val channelState = awaitItem()
++            assertThat(channelState.config.isChannel).isTrue()
++            channelState.eventSink(ConfigureRoomEvent.CreateRoom)
++            assertThat(awaitItem().createRoomAction).isInstanceOf(AsyncAction.Loading::class.java)
++            assertThat(awaitItem().createRoomAction).isInstanceOf(AsyncAction.Success::class.java)
++        }
++        assertThat(params?.isChannel).isTrue()
++    }
++
+     @Test
+     fun `present - when creating a room in a space if the room doesn't receive the power levels value it can't be added to the space`() = runTest {
+         val addChildToSpaceResult = lambdaRecorder<RoomId, RoomId, Result<Unit>> { _, _ -> Result.success(Unit) }
+diff --git a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/createroom/CreateRoomParameters.kt b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/createroom/CreateRoomParameters.kt
+index 1f23d32df6..eea28a2eea 100644
+--- a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/createroom/CreateRoomParameters.kt
++++ b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/createroom/CreateRoomParameters.kt
+@@ -27,4 +27,6 @@ data class CreateRoomParameters(
+     val historyVisibilityOverride: RoomHistoryVisibility? = null,
+     val roomAliasName: Optional<String> = Optional.empty(),
+     val isSpace: Boolean = false,
++    /** FreeChat: a channel, where only moderators and admins post; everyone can react. */
++    val isChannel: Boolean = false,
+ )
+diff --git a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt
+index 7229268688..e6c6cad98d 100644
+--- a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt
++++ b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt
+@@ -463,6 +463,7 @@ class RustMatrixClient(
+         runCatchingExceptions {
+             val hasPublicAccess = createRoomParams.preset == RoomPreset.PUBLIC_CHAT || createRoomParams.joinRuleOverride == JoinRule.Public
+             val powerLevels = defaultRoomCreationPowerLevels(isSpace = createRoomParams.isSpace, isPublic = hasPublicAccess)
++                .let { if (createRoomParams.isChannel && !createRoomParams.isSpace) it.asChannel() else it } // FreeChat
+ 
+             val rustParams = RustCreateRoomParameters(
+                 name = createRoomParams.name,
+@@ -1064,6 +1065,12 @@ class RustMatrixClient(
+     }
+ }
+ 
++// FreeChat: in a channel only moderators and admins post; members can still react.
++private fun PowerLevels.asChannel() = copy(
++    eventsDefault = RoomMember.Role.Moderator.powerLevel.toInt(),
++    events = events + ("m.reaction" to 0),
++)
++
+ private fun defaultRoomCreationPowerLevels(isPublic: Boolean, isSpace: Boolean) = PowerLevels(
+     usersDefault = null,
+     // Only admins should be able to send events in general
+diff --git a/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml b/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml
+index 2ddf44039b..042c8cb820 100644
+--- a/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml
++++ b/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml
+@@ -83,4 +83,6 @@
+     <string name="freechat_emergency_pin_description">被人逼著解鎖時，輸入這個 PIN：FreeChat 會登出所有帳號，清除這支手機上的資料，看起來就像剛安裝一樣。只在用 PIN 解鎖時有效，所以可以考慮關閉指紋解鎖。</string>
+     <string name="freechat_emergency_pin_label">緊急 PIN（%1$d 位）</string>
+     <string name="freechat_emergency_pin_invalid">要 %1$d 位數字，而且和你的 PIN 不同</string>
++    <string name="freechat_channel_title">頻道</string>
++    <string name="freechat_channel_description">只有版主和管理員能發言，其他人只能看和回應表情。</string>
+ </resources>
+diff --git a/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml b/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml
+index 38754b211b..4d9600e1f6 100644
+--- a/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml
++++ b/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml
+@@ -83,4 +83,6 @@
+     <string name="freechat_emergency_pin_description">被人逼着解锁时，输入这个 PIN：FreeChat 会退出所有账号，清空这台手机上的数据，看起来就像刚安装一样。只在用 PIN 解锁时有效，所以可以考虑关闭指纹解锁。</string>
+     <string name="freechat_emergency_pin_label">应急 PIN（%1$d 位）</string>
+     <string name="freechat_emergency_pin_invalid">要 %1$d 位数字，并且和你的 PIN 不同</string>
++    <string name="freechat_channel_title">频道</string>
++    <string name="freechat_channel_description">只有版主和管理员能发言，其他人只能看和回应表情。</string>
+ </resources>
+diff --git a/libraries/ui-strings/src/main/res/values/freechat_strings.xml b/libraries/ui-strings/src/main/res/values/freechat_strings.xml
+index cd6e1f5828..66edd9459b 100644
+--- a/libraries/ui-strings/src/main/res/values/freechat_strings.xml
++++ b/libraries/ui-strings/src/main/res/values/freechat_strings.xml
+@@ -89,4 +89,6 @@
+     <string name="freechat_emergency_pin_description">If someone makes you unlock the app, enter this PIN instead: FreeChat signs out of every account and erases its data on this phone, as if newly installed. It only helps when the app is unlocked with the PIN, so consider turning off fingerprint unlock.</string>
+     <string name="freechat_emergency_pin_label">Emergency PIN (%1$d digits)</string>
+     <string name="freechat_emergency_pin_invalid">Use %1$d digits, different from your PIN</string>
++    <string name="freechat_channel_title">Channel</string>
++    <string name="freechat_channel_description">Only moderators and admins can post; everyone else can read and react.</string>
+ </resources>

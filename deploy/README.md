@@ -1,5 +1,7 @@
 # Installing FreeChat
 
+New to servers? Follow the [step-by-step guide](BEGINNERS.md) instead: it explains every step and every term.
+
 ## What you need
 
 1. A Linux server (VPS). **1 CPU core and 1 GB of memory are enough.** Supported systems:
@@ -94,6 +96,22 @@ The database goes into a LUKS-encrypted volume (8 GB by default; write `--encryp
 | `freechat uninstall` | Stop the services (data is kept) |
 
 **Running the installer again** regenerates the configuration and keeps the data and secrets. Use it to repair the configuration or change the domain.
+
+## Managing the server from the app
+
+The first account is the server admin and is in the **admin room** ("your-domain Admin Room"), where the server answers commands sent as messages, from any FreeChat app or the web. Useful ones:
+
+| Command | What it does |
+|---|---|
+| `!admin token issue --once --max-age 7d` | Make an invite code for one account within 7 days (like `freechat invite`) |
+| `!admin token list` / `!admin token revoke <code>` | List / revoke invite codes |
+| `!admin users list-users` | List the accounts |
+| `!admin users reset-password @name:your-domain` | Give an account a new password |
+| `!admin users deactivate @name:your-domain` | Close an account and remove it from its rooms |
+| `!admin users make-user-admin @name:your-domain` | Make an account an admin as well |
+| `!admin -h` | Every command |
+
+The admin room is not end-to-end encrypted, since the server reads it; its messages are deleted like others once the retention runs out.
 
 ## Android push notifications
 

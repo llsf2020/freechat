@@ -1,0 +1,155 @@
+From cd7c7653058b85840952123c8ee74236a46c6606 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Tue, 03 Nov 2026 00:00:00 +0000
+Subject: [PATCH 14/14] FreeChat: create channels
+
+The create room dialog offers "Channel": its power levels let only
+moderators and admins post, while everyone can still react.
+---
+ .../views/dialogs/CreateRoomDialog.tsx          | 17 +++++++++++++++++
+ apps/web/src/createRoom.test.ts                 | 13 +++++++++++++
+ apps/web/src/createRoom.ts                      | 12 ++++++++++++
+ apps/web/src/freechat/i18n.ts                   |  6 ++++++
+ 4 files changed, 48 insertions(+)
+
+diff --git a/apps/web/src/components/views/dialogs/CreateRoomDialog.tsx b/apps/web/src/components/views/dialogs/CreateRoomDialog.tsx
+index e76519f0a5..7591cef57b 100644
+--- a/apps/web/src/components/views/dialogs/CreateRoomDialog.tsx
++++ b/apps/web/src/components/views/dialogs/CreateRoomDialog.tsx
+@@ -23,6 +23,7 @@ import withValidation, { type IFieldState, type IValidationResult } from "../ele
+ import { _t } from "../../../languageHandler";
+ import { MatrixClientPeg } from "../../../MatrixClientPeg";
+ import { checkUserIsAllowedToChangeEncryption, type IOpts } from "../../../createRoom";
++import { ft } from "../../../freechat/i18n";
+ import Field from "../elements/Field";
+ import RoomAliasField from "../elements/RoomAliasField";
+ import DialogButtons from "../elements/DialogButtons";
+@@ -64,6 +65,8 @@ interface IState {
+      * See MSC4362. Available if feature_msc4362_encrypted_state_events is enabled.
+      */
+     isStateEncrypted: boolean;
++    /** FreeChat: only moderators and admins post. */
++    isChannel?: boolean;
+     /**
+      * The room name.
+      */
+@@ -140,6 +143,7 @@ export default class CreateRoomDialog extends React.Component<IProps, IState> {
+         const createOpts: IOpts["createOpts"] = (opts.createOpts = {});
+         opts.roomType = this.props.type;
+         opts.name = this.state.name;
++        opts.channel = !!this.state.isChannel; // FreeChat
+ 
+         if (this.state.joinRule === JoinRule.Public) {
+             createOpts.visibility = Visibility.Public;
+@@ -242,6 +246,10 @@ export default class CreateRoomDialog extends React.Component<IProps, IState> {
+         this.setState({ joinRule });
+     };
+ 
++    private onChannelChange: ChangeEventHandler<HTMLInputElement> = (evt): void => {
++        this.setState({ isChannel: evt.target.checked });
++    };
++
+     private onEncryptedChange: ChangeEventHandler<HTMLInputElement> = (evt): void => {
+         this.setState({ isEncrypted: evt.target.checked });
+     };
+@@ -479,6 +487,15 @@ export default class CreateRoomDialog extends React.Component<IProps, IState> {
+                         {visibilitySection}
+                         {e2eeSection}
+                         {e2eeStateSection}
++                        {this.props.type === undefined && (
++                            <SettingsToggleInput
++                                name="freechat-channel-toggle"
++                                label={ft("channel_label")}
++                                onChange={this.onChannelChange}
++                                checked={!!this.state.isChannel}
++                                helpMessage={ft("channel_description")}
++                            />
++                        )}
+                         {aliasField}
+                         {this.advancedSettingsEnabled && (
+                             <details onToggle={this.onDetailsToggled} className="mx_CreateRoomDialog_details">
+diff --git a/apps/web/src/createRoom.test.ts b/apps/web/src/createRoom.test.ts
+index 4c8d9f153a..5ee58735f8 100644
+--- a/apps/web/src/createRoom.test.ts
++++ b/apps/web/src/createRoom.test.ts
+@@ -77,6 +77,19 @@ describe("createRoom", () => {
+         SdkConfig.reset();
+     });
+ 
++    it("FreeChat: creates a channel, where only moderators post and everyone can react", async () => {
++        await createRoom(client, { createOpts: { preset: Preset.PrivateChat }, channel: true });
++
++        expect(client.createRoom).toHaveBeenCalledWith(
++            expect.objectContaining({
++                power_level_content_override: {
++                    events_default: 50,
++                    events: { ...POWER_LEVELS_WITH_CALL_MEMBER, "m.reaction": 0 },
++                },
++            }),
++        );
++    });
++
+     it("creates a private room", async () => {
+         await createRoom(client, { createOpts: { preset: Preset.PrivateChat } });
+ 
+diff --git a/apps/web/src/createRoom.ts b/apps/web/src/createRoom.ts
+index d83db68304..3135f2f08b 100644
+--- a/apps/web/src/createRoom.ts
++++ b/apps/web/src/createRoom.ts
+@@ -82,6 +82,8 @@ export interface IOpts {
+     // contextually only makes sense if parentSpace is specified, if true then will be added to parentSpace as suggested
+     suggested?: boolean;
+     joinRule?: JoinRule;
++    /** FreeChat: only moderators and admins post; everyone can still react. */
++    channel?: boolean;
+ }
+ 
+ /**
+@@ -205,6 +207,16 @@ export default async function createRoom(client: MatrixClient, opts: IOpts): Pro
+         };
+     }
+ 
++    // FreeChat: in a channel only moderators and admins post; everyone can still react.
++    if (opts.channel) {
++        const override = createOpts.power_level_content_override ?? {};
++        createOpts.power_level_content_override = {
++            ...override,
++            events_default: 50,
++            events: { ...DEFAULT_EVENTS_POWER_LEVEL, ...override.events, [EventType.Reaction]: 0 },
++        };
++    }
++
+     // By default, view the room after creating it
+     if (opts.andView === undefined) {
+         opts.andView = true;
+diff --git a/apps/web/src/freechat/i18n.ts b/apps/web/src/freechat/i18n.ts
+index 8e1f8d4b55..eedbccf849 100644
+--- a/apps/web/src/freechat/i18n.ts
++++ b/apps/web/src/freechat/i18n.ts
+@@ -80,6 +80,8 @@ const en = {
+     strict_confirm_body:
+         "You will be signed out now. Make sure you have your recovery key: without it, you cannot read earlier encrypted messages after signing in again.",
+     strict_confirm_button: "Sign out and turn on",
++    channel_label: "Channel",
++    channel_description: "Only moderators and admins can post; everyone else can read and react.",
+ };
+ 
+ type Key = keyof typeof en;
+@@ -146,6 +148,8 @@ const zhHans: Record<Key, string> = {
+     strict_confirm_title: "开启严格模式？",
+     strict_confirm_body: "现在会退出登录。请确认你保存好了恢复密钥：没有它，重新登录后就看不到以前的加密消息。",
+     strict_confirm_button: "退出并开启",
++    channel_label: "频道",
++    channel_description: "只有版主和管理员能发言，其他人只能看和回应表情。",
+ };
+ 
+ const zhHant: Record<Key, string> = {
+@@ -210,6 +214,8 @@ const zhHant: Record<Key, string> = {
+     strict_confirm_title: "開啟嚴格模式？",
+     strict_confirm_body: "現在會登出。請確認你儲存好了復原金鑰：沒有它，重新登入後就看不到以前的加密訊息。",
+     strict_confirm_button: "登出並開啟",
++    channel_label: "頻道",
++    channel_description: "只有版主和管理員能發言，其他人只能看和回應表情。",
+ };
+ 
+ function table(): Record<Key, string> {
