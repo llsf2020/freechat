@@ -1,0 +1,409 @@
+From 06c20d44e3e646401bffb43ca3f5fda73488b2af Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Tue, 03 Nov 2026 00:00:00 +0000
+Subject: [PATCH 21/21] FreeChat: tell rooms with auto-delete about screenshots
+
+On Android 14 and later, a screenshot of a room with auto-delete sends
+an emote ("* Alice took a screenshot") that every client shows and that
+expires like the other messages; at most one every 30 seconds per room.
+Rooms that block screenshots do not need it.
+
+The screenshot rules of a room now also apply to its threads: the
+room's own screenshot blocking was missing there.
+---
+ .../features/messages/impl/MessagesNode.kt    | 15 +---
+ .../impl/threads/ThreadedMessagesNode.kt      |  6 ++
+ .../timeline/freechat/ScreenshotAlerts.kt     | 87 +++++++++++++++++++
+ .../timeline/freechat/ScreenshotAlertsTest.kt | 68 +++++++++++++++
+ .../matrixui/src/main/AndroidManifest.xml     | 10 +++
+ .../matrix/ui/freechat/ScreenCaptureEffect.kt | 39 +++++++++
+ .../matrix/ui/freechat/SecureWindow.kt        |  2 +-
+ .../res/values-zh-rTW/freechat_strings.xml    |  1 +
+ .../main/res/values-zh/freechat_strings.xml   |  1 +
+ .../src/main/res/values/freechat_strings.xml  |  2 +
+ 10 files changed, 219 insertions(+), 12 deletions(-)
+ create mode 100644 features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/ScreenshotAlerts.kt
+ create mode 100644 features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/ScreenshotAlertsTest.kt
+ create mode 100644 libraries/matrixui/src/main/AndroidManifest.xml
+ create mode 100644 libraries/matrixui/src/main/kotlin/io/element/android/libraries/matrix/ui/freechat/ScreenCaptureEffect.kt
+
+diff --git a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/MessagesNode.kt b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/MessagesNode.kt
+index d9f28a4834..9bd1be7159 100644
+--- a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/MessagesNode.kt
++++ b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/MessagesNode.kt
+@@ -15,10 +15,8 @@ import androidx.activity.compose.LocalActivity
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.CompositionLocalProvider
+ import androidx.compose.runtime.LaunchedEffect
+-import androidx.compose.runtime.collectAsState
+ import androidx.compose.runtime.getValue
+ import androidx.compose.runtime.mutableStateOf
+-import androidx.compose.runtime.remember
+ import androidx.compose.runtime.saveable.rememberSaveable
+ import androidx.compose.runtime.setValue
+ import androidx.compose.ui.Modifier
+@@ -44,6 +42,8 @@ import io.element.android.features.messages.impl.timeline.components.customreact
+ import io.element.android.features.messages.impl.timeline.di.LocalTimelineItemPresenterFactories
+ import io.element.android.features.messages.impl.timeline.di.TimelineItemPresenterFactories
+ import io.element.android.features.messages.impl.timeline.model.TimelineItem
++import io.element.android.features.messages.impl.timeline.freechat.RoomScreenshotRules
++import io.element.android.features.messages.impl.timeline.freechat.ScreenshotAlerts
+ import io.element.android.features.roommembermoderation.api.ModerationAction
+ import io.element.android.features.roommembermoderation.api.RoomMemberModerationEvent
+ import io.element.android.features.roommembermoderation.api.RoomMemberModerationRenderer
+@@ -65,7 +65,6 @@ import io.element.android.libraries.matrix.api.core.RoomId
+ import io.element.android.libraries.matrix.api.core.ThreadId
+ import io.element.android.libraries.matrix.api.core.UserId
+ import io.element.android.libraries.matrix.api.core.toRoomIdOrAlias
+-import io.element.android.libraries.matrix.api.freechat.FreeChatApi
+ import io.element.android.libraries.matrix.api.permalink.PermalinkData
+ import io.element.android.libraries.matrix.api.permalink.PermalinkParser
+ import io.element.android.libraries.matrix.api.room.JoinedRoom
+@@ -74,7 +73,6 @@ import io.element.android.libraries.matrix.api.timeline.Timeline
+ import io.element.android.libraries.matrix.api.timeline.TimelineProvider
+ import io.element.android.libraries.matrix.api.timeline.item.TimelineItemDebugInfo
+ import io.element.android.libraries.matrix.ui.freechat.ScreenshotPolicy
+-import io.element.android.libraries.matrix.ui.freechat.SecureWindowEffect
+ import io.element.android.libraries.matrix.ui.media.contentvalidation.EventContentValidationCache
+ import io.element.android.libraries.matrix.ui.media.contentvalidation.LocalEventContentValidationState
+ import io.element.android.libraries.matrix.ui.model.getBestName
+@@ -88,7 +86,6 @@ import io.element.android.services.analytics.api.finishLongRunningTransaction
+ import kotlinx.collections.immutable.ImmutableList
+ import kotlinx.collections.immutable.toImmutableList
+ import kotlinx.coroutines.CoroutineScope
+-import kotlinx.coroutines.flow.map
+ import kotlinx.coroutines.launch
+ 
+ @ContributesNode(RoomScope::class)
+@@ -113,6 +110,7 @@ class MessagesNode(
+     private val emojiPickerRenderer: EmojiPickerRenderer,
+     private val dispatchers: CoroutineDispatchers,
+     private val screenshotPolicy: ScreenshotPolicy, // FreeChat
++    private val screenshotAlerts: ScreenshotAlerts, // FreeChat
+ ) : Node(buildContext, plugins = plugins), MessagesNavigator {
+     data class Inputs(
+         val focusedEventId: EventId?,
+@@ -280,12 +278,7 @@ class MessagesNode(
+         val activity = requireNotNull(LocalActivity.current)
+         val isDark = ElementTheme.isLightTheme.not()
+         val canUseOverlay = !isTalkbackActive() && !hasExternalKeyboard()
+-        // FreeChat: block screenshots when the room asks for it (the account-wide choice is applied app-wide).
+-        val roomBlocksScreenshots by remember {
+-            room.stateEventContentFlow(FreeChatApi.PRIVACY_STATE_TYPE).map(FreeChatApi::blockScreenshotsFromContent)
+-        }.collectAsState(initial = false)
+-        val alwaysBlockScreenshots by screenshotPolicy.alwaysBlockScreenshots.collectAsState()
+-        SecureWindowEffect(roomBlocksScreenshots || alwaysBlockScreenshots)
++        RoomScreenshotRules(room, screenshotPolicy, screenshotAlerts) // FreeChat
+         CompositionLocalProvider(
+             LocalTimelineItemPresenterFactories provides timelineItemPresenterFactories,
+             LocalEventContentValidationState provides eventContentValidationCache,
+diff --git a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/threads/ThreadedMessagesNode.kt b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/threads/ThreadedMessagesNode.kt
+index 851438ae5c..0a6e0ffb65 100644
+--- a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/threads/ThreadedMessagesNode.kt
++++ b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/threads/ThreadedMessagesNode.kt
+@@ -45,6 +45,8 @@ import io.element.android.features.messages.impl.timeline.components.customreact
+ import io.element.android.features.messages.impl.timeline.di.LocalTimelineItemPresenterFactories
+ import io.element.android.features.messages.impl.timeline.di.TimelineItemPresenterFactories
+ import io.element.android.features.messages.impl.timeline.model.TimelineItem
++import io.element.android.features.messages.impl.timeline.freechat.RoomScreenshotRules
++import io.element.android.features.messages.impl.timeline.freechat.ScreenshotAlerts
+ import io.element.android.features.roommembermoderation.api.ModerationAction
+ import io.element.android.features.roommembermoderation.api.RoomMemberModerationEvent
+ import io.element.android.features.roommembermoderation.api.RoomMemberModerationRenderer
+@@ -75,6 +77,7 @@ import io.element.android.libraries.matrix.api.timeline.item.TimelineItemDebugIn
+ import io.element.android.libraries.matrix.ui.model.getBestName
+ import io.element.android.libraries.ui.utils.a11y.hasExternalKeyboard
+ import io.element.android.libraries.ui.utils.a11y.isTalkbackActive
++import io.element.android.libraries.matrix.ui.freechat.ScreenshotPolicy
+ import io.element.android.services.analytics.api.AnalyticsService
+ import io.element.android.services.appnavstate.api.AppNavigationStateService
+ import kotlinx.collections.immutable.ImmutableList
+@@ -98,6 +101,8 @@ class ThreadedMessagesNode(
+     private val roomMemberModerationRenderer: RoomMemberModerationRenderer,
+     private val emojiPickerRenderer: EmojiPickerRenderer,
+     private val dispatchers: CoroutineDispatchers,
++    private val screenshotPolicy: ScreenshotPolicy, // FreeChat
++    private val screenshotAlerts: ScreenshotAlerts, // FreeChat
+ ) : Node(buildContext, plugins = plugins), MessagesNavigator {
+     data class Inputs(
+         val threadRootEventId: ThreadId,
+@@ -272,6 +277,7 @@ class ThreadedMessagesNode(
+         val activity = requireNotNull(LocalActivity.current)
+         val isDark = ElementTheme.isLightTheme.not()
+         val canUseOverlay = !isTalkbackActive() && !hasExternalKeyboard()
++        RoomScreenshotRules(room, screenshotPolicy, screenshotAlerts) // FreeChat
+         CompositionLocalProvider(
+             LocalTimelineItemPresenterFactories provides timelineItemPresenterFactories,
+         ) {
+diff --git a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/ScreenshotAlerts.kt b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/ScreenshotAlerts.kt
+new file mode 100644
+index 0000000000..989534ab01
+--- /dev/null
++++ b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/ScreenshotAlerts.kt
+@@ -0,0 +1,87 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.features.messages.impl.timeline.freechat
++
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.collectAsState
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.remember
++import dev.zacsweers.metro.Inject
++import dev.zacsweers.metro.SingleIn
++import io.element.android.libraries.di.SessionScope
++import io.element.android.libraries.di.annotations.SessionCoroutineScope
++import io.element.android.libraries.matrix.api.core.RoomId
++import io.element.android.libraries.matrix.api.freechat.Disappearing
++import io.element.android.libraries.matrix.api.freechat.FreeChatApi
++import io.element.android.libraries.matrix.api.room.JoinedRoom
++import io.element.android.libraries.matrix.api.timeline.MsgType
++import io.element.android.libraries.matrix.ui.freechat.ScreenCaptureEffect
++import io.element.android.libraries.matrix.ui.freechat.ScreenshotPolicy
++import io.element.android.libraries.matrix.ui.freechat.SecureWindowEffect
++import io.element.android.libraries.ui.strings.CommonStrings
++import io.element.android.services.toolbox.api.strings.StringProvider
++import io.element.android.services.toolbox.api.systemclock.SystemClock
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.flow.map
++import kotlinx.coroutines.launch
++import timber.log.Timber
++import java.util.concurrent.ConcurrentHashMap
++
++/**
++ * FreeChat: tells a room with auto-delete that the user took a screenshot, as an emote ("* Alice took a screenshot")
++ * that every client shows and that expires like the other messages. At most one every [MIN_INTERVAL_MS] per room, so
++ * a burst of screenshots does not flood it. Sent from the session's scope, so leaving the room does not cancel it.
++ */
++@Inject
++@SingleIn(SessionScope::class)
++class ScreenshotAlerts(
++    private val stringProvider: StringProvider,
++    private val systemClock: SystemClock,
++    @SessionCoroutineScope private val sessionCoroutineScope: CoroutineScope,
++) {
++    private val lastSent = ConcurrentHashMap<RoomId, Long>()
++
++    fun onScreenshot(room: JoinedRoom) {
++        val now = systemClock.epochMillis()
++        val previous = lastSent[room.roomId]
++        if (previous != null && now - previous < MIN_INTERVAL_MS) return
++        lastSent[room.roomId] = now
++        sessionCoroutineScope.launch {
++            room.liveTimeline.sendMessage(
++                body = stringProvider.getString(CommonStrings.freechat_screenshot_alert),
++                htmlBody = null,
++                intentionalMentions = emptyList(),
++                msgType = MsgType.MSG_TYPE_EMOTE,
++                asPlainText = true,
++            ).onFailure { Timber.w(it, "Could not tell the room about a screenshot") }
++        }
++    }
++
++    companion object {
++        const val MIN_INTERVAL_MS = 30_000L
++    }
++}
++
++/**
++ * FreeChat: the screenshot rules of a room's screens (its timeline and its threads). Blocks screenshots when the room
++ * asks for it (the account-wide choice is applied app-wide), and otherwise, in a room with auto-delete, tells the
++ * others when one is taken.
++ */
++@Composable
++fun RoomScreenshotRules(room: JoinedRoom, screenshotPolicy: ScreenshotPolicy, screenshotAlerts: ScreenshotAlerts) {
++    val roomBlocksScreenshots by remember {
++        room.stateEventContentFlow(FreeChatApi.PRIVACY_STATE_TYPE).map(FreeChatApi::blockScreenshotsFromContent)
++    }.collectAsState(initial = false)
++    val alwaysBlockScreenshots by screenshotPolicy.alwaysBlockScreenshots.collectAsState()
++    val blocked = roomBlocksScreenshots || alwaysBlockScreenshots
++    SecureWindowEffect(blocked)
++    val roomAutoDeletes by remember {
++        room.stateEventContentFlow(Disappearing.STATE_TYPE).map { Disappearing.ttlFromContent(it) > 0 }
++    }.collectAsState(initial = false)
++    ScreenCaptureEffect(enabled = roomAutoDeletes && !blocked) { screenshotAlerts.onScreenshot(room) }
++}
+diff --git a/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/ScreenshotAlertsTest.kt b/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/ScreenshotAlertsTest.kt
+new file mode 100644
+index 0000000000..76ddd39834
+--- /dev/null
++++ b/features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/ScreenshotAlertsTest.kt
+@@ -0,0 +1,68 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.features.messages.impl.timeline.freechat
++
++import com.google.common.truth.Truth.assertThat
++import io.element.android.libraries.matrix.api.core.RoomId
++import io.element.android.libraries.matrix.api.timeline.MsgType
++import io.element.android.libraries.matrix.test.room.FakeBaseRoom
++import io.element.android.libraries.matrix.test.room.FakeJoinedRoom
++import io.element.android.libraries.matrix.test.timeline.FakeTimeline
++import io.element.android.services.toolbox.test.strings.FakeStringProvider
++import io.element.android.services.toolbox.test.systemclock.FakeSystemClock
++import kotlinx.coroutines.test.TestScope
++import kotlinx.coroutines.test.advanceUntilIdle
++import org.junit.Test
++
++class ScreenshotAlertsTest {
++    private val sent = mutableListOf<Pair<String, MsgType>>()
++    private val clock = FakeSystemClock(epochMillisResult = 1_000_000)
++    private val scope = TestScope()
++    private val alerts = ScreenshotAlerts(FakeStringProvider("took a screenshot"), clock, scope)
++
++    private fun room(id: String) = FakeJoinedRoom(
++        baseRoom = FakeBaseRoom(roomId = RoomId(id)),
++        liveTimeline = FakeTimeline().apply {
++            sendMessageLambda = { body, _, _, msgType, asPlainText ->
++                assertThat(asPlainText).isTrue()
++                sent.add(body to msgType)
++                Result.success(Unit)
++            }
++        },
++    )
++
++    @Test
++    fun `a screenshot is told to the room as an emote`() {
++        alerts.onScreenshot(room("!a:example.org"))
++        scope.advanceUntilIdle()
++        assertThat(sent).containsExactly("took a screenshot" to MsgType.MSG_TYPE_EMOTE)
++    }
++
++    @Test
++    fun `a burst of screenshots in one room is told once`() {
++        val room = room("!a:example.org")
++        alerts.onScreenshot(room)
++        clock.epochMillisResult += ScreenshotAlerts.MIN_INTERVAL_MS - 1
++        alerts.onScreenshot(room)
++        scope.advanceUntilIdle()
++        assertThat(sent).hasSize(1)
++
++        clock.epochMillisResult += 1
++        alerts.onScreenshot(room)
++        scope.advanceUntilIdle()
++        assertThat(sent).hasSize(2)
++    }
++
++    @Test
++    fun `rooms are limited separately`() {
++        alerts.onScreenshot(room("!a:example.org"))
++        alerts.onScreenshot(room("!b:example.org"))
++        scope.advanceUntilIdle()
++        assertThat(sent).hasSize(2)
++    }
++}
+diff --git a/libraries/matrixui/src/main/AndroidManifest.xml b/libraries/matrixui/src/main/AndroidManifest.xml
+new file mode 100644
+index 0000000000..5371c508d4
+--- /dev/null
++++ b/libraries/matrixui/src/main/AndroidManifest.xml
+@@ -0,0 +1,10 @@
++<?xml version="1.0" encoding="utf-8"?><!--
++  ~ Copyright 2026 FreeChat contributors
++  ~
++  ~ SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++  ~ Please see LICENSE files in the repository root for full details.
++  -->
++<manifest xmlns:android="http://schemas.android.com/apk/res/android">
++    <!-- FreeChat: tells rooms with auto-delete when someone takes a screenshot (Android 14 and later). -->
++    <uses-permission android:name="android.permission.DETECT_SCREEN_CAPTURE" />
++</manifest>
+diff --git a/libraries/matrixui/src/main/kotlin/io/element/android/libraries/matrix/ui/freechat/ScreenCaptureEffect.kt b/libraries/matrixui/src/main/kotlin/io/element/android/libraries/matrix/ui/freechat/ScreenCaptureEffect.kt
+new file mode 100644
+index 0000000000..e26224b567
+--- /dev/null
++++ b/libraries/matrixui/src/main/kotlin/io/element/android/libraries/matrix/ui/freechat/ScreenCaptureEffect.kt
+@@ -0,0 +1,39 @@
++/*
++ * Copyright 2026 FreeChat contributors
++ *
++ * SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++ * Please see LICENSE files in the repository root for full details.
++ */
++
++package io.element.android.libraries.matrix.ui.freechat
++
++import android.app.Activity
++import android.os.Build
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.DisposableEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.rememberUpdatedState
++import androidx.compose.ui.platform.LocalContext
++import io.element.android.libraries.core.extensions.runCatchingExceptions
++import timber.log.Timber
++
++/**
++ * FreeChat: calls [onScreenshot] when the user takes a screenshot while [enabled] and in composition. Only Android 14
++ * and later tell apps about screenshots; earlier versions never call it.
++ */
++@Composable
++fun ScreenCaptureEffect(enabled: Boolean, onScreenshot: () -> Unit) {
++    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
++    val activity = LocalContext.current.findActivity() ?: return
++    val currentOnScreenshot by rememberUpdatedState(onScreenshot)
++    DisposableEffect(activity, enabled) {
++        if (!enabled) return@DisposableEffect onDispose {}
++        val callback = Activity.ScreenCaptureCallback { currentOnScreenshot() }
++        val registered = runCatchingExceptions { activity.registerScreenCaptureCallback(activity.mainExecutor, callback) }
++            .onFailure { Timber.w(it, "Could not watch for screenshots") }
++            .isSuccess
++        onDispose {
++            if (registered) activity.unregisterScreenCaptureCallback(callback)
++        }
++    }
++}
+diff --git a/libraries/matrixui/src/main/kotlin/io/element/android/libraries/matrix/ui/freechat/SecureWindow.kt b/libraries/matrixui/src/main/kotlin/io/element/android/libraries/matrix/ui/freechat/SecureWindow.kt
+index b45ea0b285..a64286fabe 100644
+--- a/libraries/matrixui/src/main/kotlin/io/element/android/libraries/matrix/ui/freechat/SecureWindow.kt
++++ b/libraries/matrixui/src/main/kotlin/io/element/android/libraries/matrix/ui/freechat/SecureWindow.kt
+@@ -34,7 +34,7 @@ fun SecureWindowEffect(enabled: Boolean) {
+     }
+ }
+ 
+-private tailrec fun Context.findActivity(): Activity? = when (this) {
++internal tailrec fun Context.findActivity(): Activity? = when (this) {
+     is Activity -> this
+     is ContextWrapper -> baseContext.findActivity()
+     else -> null
+diff --git a/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml b/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml
+index 0e9c5172ae..04bb197ffd 100644
+--- a/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml
++++ b/libraries/ui-strings/src/main/res/values-zh-rTW/freechat_strings.xml
+@@ -75,4 +75,5 @@
+     <string name="freechat_push_built_in">內建連線（即時，通知列常駐一則提示）</string>
+     <string name="freechat_push_built_in_channel">新訊息連線</string>
+     <string name="freechat_push_built_in_notification">正在等待新訊息</string>
++    <string name="freechat_screenshot_alert">截了圖</string>
+ </resources>
+diff --git a/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml b/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml
+index e10a837d36..694a91d03e 100644
+--- a/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml
++++ b/libraries/ui-strings/src/main/res/values-zh/freechat_strings.xml
+@@ -75,4 +75,5 @@
+     <string name="freechat_push_built_in">内置连接（实时，通知栏常驻一条提示）</string>
+     <string name="freechat_push_built_in_channel">新消息连接</string>
+     <string name="freechat_push_built_in_notification">正在等待新消息</string>
++    <string name="freechat_screenshot_alert">截了屏</string>
+ </resources>
+diff --git a/libraries/ui-strings/src/main/res/values/freechat_strings.xml b/libraries/ui-strings/src/main/res/values/freechat_strings.xml
+index f3227a9956..9e3f7fe0ef 100644
+--- a/libraries/ui-strings/src/main/res/values/freechat_strings.xml
++++ b/libraries/ui-strings/src/main/res/values/freechat_strings.xml
+@@ -80,4 +80,6 @@
+     <string name="freechat_push_built_in">Built-in connection (instant, shows a permanent notification)</string>
+     <string name="freechat_push_built_in_channel">Connection for new messages</string>
+     <string name="freechat_push_built_in_notification">Waiting for new messages</string>
++    <!-- Sent as an emote in rooms with auto-delete: "* Alice took a screenshot" -->
++    <string name="freechat_screenshot_alert">took a screenshot</string>
+ </resources>

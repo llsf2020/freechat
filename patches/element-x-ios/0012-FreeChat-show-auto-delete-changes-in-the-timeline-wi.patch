@@ -1,7 +1,7 @@
 From 86b644d6471010b01c11004b82fd9b1aa81eccad Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 00:00:00 +0000
-Subject: [PATCH 12/12] FreeChat: show auto-delete changes in the timeline,
+Subject: [PATCH 12/13] FreeChat: show auto-delete changes in the timeline,
  with the duration
 
 Custom state events were filtered out of the timeline. Changes of
