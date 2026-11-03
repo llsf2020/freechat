@@ -1,0 +1,289 @@
+From 58fd8f75035958701d4d38878c5aba93085e2ef5 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Tue, 03 Nov 2026 00:00:00 +0000
+Subject: [PATCH 14/14] FreeChat: emergency PIN for the app lock on iOS
+
+In the app lock settings the user can set an emergency PIN of four
+digits, different from the PIN, kept in the keychain on this device
+only. Entered to unlock, it signs out and erases this device's data at
+once, like a forgotten PIN but without a prompt, and does not count as
+a wrong PIN. It goes when the app lock is turned off, and a new PIN
+equal to it removes it.
+---
+ .../FreeChat/FreeChatEmergencyPIN.swift       | 102 ++++++++++++++++++
+ .../Sources/FreeChat/FreeChatStrings.swift    |  23 ++++
+ .../AppLockScreenViewModel.swift              |   5 +
+ ...ppLockSetupSettingsScreenCoordinator.swift |   7 +-
+ .../View/AppLockSetupSettingsScreen.swift     |   6 ++
+ .../Services/AppLock/AppLockService.swift     |  12 +++
+ 6 files changed, 154 insertions(+), 1 deletion(-)
+ create mode 100644 ElementX/Sources/FreeChat/FreeChatEmergencyPIN.swift
+
+diff --git a/ElementX/Sources/FreeChat/FreeChatEmergencyPIN.swift b/ElementX/Sources/FreeChat/FreeChatEmergencyPIN.swift
+new file mode 100644
+index 000000000..390495260
+--- /dev/null
++++ b/ElementX/Sources/FreeChat/FreeChatEmergencyPIN.swift
+@@ -0,0 +1,102 @@
++//
++// Copyright 2026 FreeChat contributors
++//
++// SPDX-License-Identifier: AGPL-3.0-only OR GPL-3.0-only
++// Please see LICENSE files in the repository root for full details.
++//
++
++import Compound
++import Security
++import SwiftUI
++
++/// The emergency PIN of the app lock. Entered instead of the PIN, it signs out and erases this device at once, for
++/// when someone forces the user to unlock the app. Kept in the keychain like the PIN, on this device only.
++nonisolated enum FreeChatEmergencyPIN {
++    private static let service = "io.freechat.emergency-pin"
++    private static let account = "emergency-pin"
++
++    static var isSet: Bool { read() != nil }
++
++    static func matches(_ pinCode: String) -> Bool {
++        guard let stored = read() else { return false }
++        return stored == pinCode
++    }
++
++    /// Four digits, like the PIN; `isPIN` tells whether it is the PIN itself, which is refused.
++    static func set(_ pinCode: String, isPIN: (String) -> Bool) -> Bool {
++        guard pinCode.count == 4, pinCode.allSatisfy(\.isASCIINumber), !isPIN(pinCode) else { return false }
++        remove()
++        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
++                                    kSecAttrService as String: service,
++                                    kSecAttrAccount as String: account,
++                                    kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
++                                    kSecValueData as String: Data(pinCode.utf8)]
++        return SecItemAdd(query as CFDictionary, nil) == errSecSuccess
++    }
++
++    static func remove() {
++        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
++                                    kSecAttrService as String: service,
++                                    kSecAttrAccount as String: account]
++        SecItemDelete(query as CFDictionary)
++    }
++
++    private static func read() -> String? {
++        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
++                                    kSecAttrService as String: service,
++                                    kSecAttrAccount as String: account,
++                                    kSecReturnData as String: true,
++                                    kSecMatchLimit as String: kSecMatchLimitOne]
++        var result: CFTypeRef?
++        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess, let data = result as? Data else { return nil }
++        return String(data: data, encoding: .utf8)
++    }
++}
++
++/// The emergency PIN rows of the app lock settings.
++struct FreeChatEmergencyPINSection: View {
++    /// Whether a code is the app lock's PIN, which the emergency PIN must differ from.
++    let isPIN: (String) -> Bool
++
++    @State private var isSet = FreeChatEmergencyPIN.isSet
++    @State private var isEditing = false
++    @State private var showsInvalid = false
++    @State private var code = ""
++
++    var body: some View {
++        Section {
++            ListRow(label: .plain(title: FreeChatStrings.string(isSet ? .emergencyPINChange : .emergencyPINSet)),
++                    kind: .button {
++                        code = ""
++                        isEditing = true
++                    })
++            if isSet {
++                ListRow(label: .plain(title: FreeChatStrings.string(.emergencyPINRemove), role: .destructive),
++                        kind: .button {
++                            FreeChatEmergencyPIN.remove()
++                            isSet = false
++                        })
++            }
++        } footer: {
++            Text(FreeChatStrings.string(.emergencyPINFooter))
++                .compoundListSectionFooter()
++        }
++        .alert(FreeChatStrings.string(.emergencyPINTitle), isPresented: $isEditing) {
++            // Plain state, never saved: the code is gone once the alert closes.
++            SecureField(FreeChatStrings.string(.emergencyPINPlaceholder), text: $code)
++                .keyboardType(.numberPad)
++            Button(FreeChatStrings.string(.save)) {
++                if FreeChatEmergencyPIN.set(code, isPIN: isPIN) {
++                    isSet = true
++                } else {
++                    showsInvalid = true
++                }
++                code = ""
++            }
++            Button(FreeChatStrings.string(.cancel), role: .cancel) { code = "" }
++        }
++        .alert(FreeChatStrings.string(.emergencyPINInvalid), isPresented: $showsInvalid) {
++            Button(FreeChatStrings.string(.cancel), role: .cancel) { }
++        }
++    }
++}
+diff --git a/ElementX/Sources/FreeChat/FreeChatStrings.swift b/ElementX/Sources/FreeChat/FreeChatStrings.swift
+index 20b15b6ed..8c5c53c6f 100644
+--- a/ElementX/Sources/FreeChat/FreeChatStrings.swift
++++ b/ElementX/Sources/FreeChat/FreeChatStrings.swift
+@@ -18,6 +18,8 @@ nonisolated enum FreeChatStrings {
+         case strictSection, strictTitle, strictFooter, strictOn, strictOffPending, strictIdle
+         case strictConfirmTitle, strictConfirmMessage, strictConfirmButton, strictTurnOff
+         case screenshotTaken, screenshotTakenMessage, screenHidden, screenshotAlert
++        case emergencyPINTitle, emergencyPINSet, emergencyPINChange, emergencyPINRemove, emergencyPINFooter
++        case emergencyPINPlaceholder, emergencyPINInvalid
+         case autoDeleteChanged, autoDeleteChangedByYou, autoDeleteSet, autoDeleteSetByYou
+         case autoDeleteTurnedOff, autoDeleteTurnedOffByYou
+     }
+@@ -135,6 +137,13 @@ nonisolated enum FreeChatStrings {
+         .screenshotTakenMessage: "This room asks members not to take screenshots.",
+         .screenHidden: "Hidden while the screen is being recorded",
+         .screenshotAlert: "took a screenshot",
++        .emergencyPINTitle: "Emergency PIN",
++        .emergencyPINSet: "Set an emergency PIN",
++        .emergencyPINChange: "Change the emergency PIN",
++        .emergencyPINRemove: "Remove the emergency PIN",
++        .emergencyPINFooter: "If someone makes you unlock the app, enter this PIN instead: FreeChat signs out of every account and erases its data on this phone, as if newly installed. It only helps when the app is unlocked with the PIN, so consider turning off Face ID or Touch ID unlock.",
++        .emergencyPINPlaceholder: "4 digits",
++        .emergencyPINInvalid: "Use 4 digits, different from your PIN",
+         .autoDeleteChanged: "{name} changed the auto-delete setting.",
+         .autoDeleteChangedByYou: "You changed the auto-delete setting.",
+         .autoDeleteSet: "{name} set messages to auto-delete after {duration}.",
+@@ -184,6 +193,13 @@ nonisolated enum FreeChatStrings {
+         .screenshotTakenMessage: "这个房间要求成员不要截屏。",
+         .screenHidden: "正在录屏，内容已隐藏",
+         .screenshotAlert: "截了屏",
++        .emergencyPINTitle: "应急 PIN",
++        .emergencyPINSet: "设置应急 PIN",
++        .emergencyPINChange: "修改应急 PIN",
++        .emergencyPINRemove: "删除应急 PIN",
++        .emergencyPINFooter: "被人逼着解锁时，输入这个 PIN：FreeChat 会退出所有账号，清空这台手机上的数据，看起来就像刚安装一样。只在用 PIN 解锁时有效，所以可以考虑关闭面容 ID 或触控 ID 解锁。",
++        .emergencyPINPlaceholder: "4 位数字",
++        .emergencyPINInvalid: "要 4 位数字，并且和你的 PIN 不同",
+         .autoDeleteChanged: "{name} 修改了自动删除设置。",
+         .autoDeleteChangedByYou: "你修改了自动删除设置。",
+         .autoDeleteSet: "{name} 将自动删除设为 {duration}。",
+@@ -233,6 +249,13 @@ nonisolated enum FreeChatStrings {
+         .screenshotTakenMessage: "這個房間要求成員不要截圖。",
+         .screenHidden: "正在錄影，內容已隱藏",
+         .screenshotAlert: "截了圖",
++        .emergencyPINTitle: "緊急 PIN",
++        .emergencyPINSet: "設定緊急 PIN",
++        .emergencyPINChange: "修改緊急 PIN",
++        .emergencyPINRemove: "刪除緊急 PIN",
++        .emergencyPINFooter: "被人逼著解鎖時，輸入這個 PIN：FreeChat 會登出所有帳號，清除這支手機上的資料，看起來就像剛安裝一樣。只在用 PIN 解鎖時有效，所以可以考慮關閉 Face ID 或 Touch ID 解鎖。",
++        .emergencyPINPlaceholder: "4 位數字",
++        .emergencyPINInvalid: "要 4 位數字，而且和你的 PIN 不同",
+         .autoDeleteChanged: "{name} 修改了自動刪除設定。",
+         .autoDeleteChangedByYou: "你修改了自動刪除設定。",
+         .autoDeleteSet: "{name} 將自動刪除設為 {duration}。",
+diff --git a/ElementX/Sources/Screens/AppLock/AppLockScreen/AppLockScreenViewModel.swift b/ElementX/Sources/Screens/AppLock/AppLockScreen/AppLockScreenViewModel.swift
+index 15b04cbc8..6c5241e76 100644
+--- a/ElementX/Sources/Screens/AppLock/AppLockScreen/AppLockScreenViewModel.swift
++++ b/ElementX/Sources/Screens/AppLock/AppLockScreen/AppLockScreenViewModel.swift
+@@ -59,6 +59,11 @@ class AppLockScreenViewModel: AppLockScreenViewModelType, AppLockScreenViewModel
+     // MARK: - Private
+     
+     private func submit(_ pinCode: String) {
++        // FreeChat: the emergency PIN signs out and erases this device at once, without a prompt.
++        if FreeChatEmergencyPIN.matches(pinCode) {
++            forceLogout()
++            return
++        }
+         guard appLockService.unlock(with: pinCode) else {
+             handleInvalidPIN()
+             return
+diff --git a/ElementX/Sources/Screens/AppLock/AppLockSetupSettingsScreen/AppLockSetupSettingsScreenCoordinator.swift b/ElementX/Sources/Screens/AppLock/AppLockSetupSettingsScreen/AppLockSetupSettingsScreenCoordinator.swift
+index a124c190f..b993e5830 100644
+--- a/ElementX/Sources/Screens/AppLock/AppLockSetupSettingsScreen/AppLockSetupSettingsScreenCoordinator.swift
++++ b/ElementX/Sources/Screens/AppLock/AppLockSetupSettingsScreen/AppLockSetupSettingsScreenCoordinator.swift
+@@ -20,6 +20,7 @@ enum AppLockSetupSettingsScreenCoordinatorAction {
+ 
+ final class AppLockSetupSettingsScreenCoordinator: CoordinatorProtocol {
+     private var viewModel: AppLockSetupSettingsScreenViewModelProtocol
++    private let appLockService: AppLockServiceProtocol // FreeChat
+     private let actionsSubject: PassthroughSubject<AppLockSetupSettingsScreenCoordinatorAction, Never> = .init()
+     private var cancellables = Set<AnyCancellable>()
+     
+@@ -29,6 +30,7 @@ final class AppLockSetupSettingsScreenCoordinator: CoordinatorProtocol {
+     
+     init(parameters: AppLockSetupSettingsScreenCoordinatorParameters) {
+         viewModel = AppLockSetupSettingsScreenViewModel(appLockService: parameters.appLockService)
++        appLockService = parameters.appLockService
+     }
+     
+     func start() {
+@@ -47,6 +49,9 @@ final class AppLockSetupSettingsScreenCoordinator: CoordinatorProtocol {
+     }
+     
+     func toPresentable() -> AnyView {
+-        AnyView(AppLockSetupSettingsScreen(context: viewModel.context))
++        // FreeChat: the emergency PIN needs the real service, to compare it with the PIN.
++        let service = appLockService as? AppLockService
++        return AnyView(AppLockSetupSettingsScreen(context: viewModel.context,
++                                                  freechatIsPINCode: service.map { service in { service.freechatIsPINCode($0) } }))
+     }
+ }
+diff --git a/ElementX/Sources/Screens/AppLock/AppLockSetupSettingsScreen/View/AppLockSetupSettingsScreen.swift b/ElementX/Sources/Screens/AppLock/AppLockSetupSettingsScreen/View/AppLockSetupSettingsScreen.swift
+index 16cf9fc88..1e36d2f9a 100644
+--- a/ElementX/Sources/Screens/AppLock/AppLockSetupSettingsScreen/View/AppLockSetupSettingsScreen.swift
++++ b/ElementX/Sources/Screens/AppLock/AppLockSetupSettingsScreen/View/AppLockSetupSettingsScreen.swift
+@@ -11,6 +11,8 @@ import SwiftUI
+ 
+ struct AppLockSetupSettingsScreen: View {
+     @ObservedObject var context: AppLockSetupSettingsScreenViewModel.Context
++    /// FreeChat: whether a code is the PIN; with it, the emergency PIN can be set.
++    var freechatIsPINCode: ((String) -> Bool)?
+     
+     var body: some View {
+         Form {
+@@ -35,6 +37,10 @@ struct AppLockSetupSettingsScreen: View {
+                         }
+                 }
+             }
++            
++            if let freechatIsPINCode {
++                FreeChatEmergencyPINSection(isPIN: freechatIsPINCode)
++            }
+         }
+         .compoundList()
+         .navigationTitle(L10n.commonScreenLock)
+diff --git a/ElementX/Sources/Services/AppLock/AppLockService.swift b/ElementX/Sources/Services/AppLock/AppLockService.swift
+index 8b5c91b61..26a0c24e0 100644
+--- a/ElementX/Sources/Services/AppLock/AppLockService.swift
++++ b/ElementX/Sources/Services/AppLock/AppLockService.swift
+@@ -78,6 +78,8 @@ class AppLockService: AppLockServiceProtocol {
+         
+         do {
+             try keychainController.setPINCode(pinCode)
++            // FreeChat: a new PIN equal to the emergency PIN would erase the device at every unlock.
++            if FreeChatEmergencyPIN.matches(pinCode) { FreeChatEmergencyPIN.remove() }
+             isEnabledSubject.send(true)
+             return .success(())
+         } catch {
+@@ -111,6 +113,7 @@ class AppLockService: AppLockServiceProtocol {
+     
+     func disable() {
+         keychainController.removePINCode()
++        FreeChatEmergencyPIN.remove() // FreeChat
+         keychainController.removePINCodeBiometricState()
+         appSettings.appLockNumberOfPINAttempts = 0
+         isEnabledSubject.send(false)
+@@ -229,3 +232,12 @@ class AppLockService: AppLockServiceProtocol {
+         appSettings.appLockNumberOfPINAttempts = 0
+     }
+ }
++
++// MARK: FreeChat
++
++extension AppLockService {
++    /// Whether a code is the PIN, which the emergency PIN must differ from. In this file to reach the keychain.
++    func freechatIsPINCode(_ pinCode: String) -> Bool {
++        pinCode == keychainController.pinCode()
++    }
++}

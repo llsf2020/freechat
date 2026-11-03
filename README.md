@@ -13,6 +13,7 @@ A self-hosted, Telegram-like messenger with chat, voice and video (including gro
 - **Server-wide retention cap**: no message stays on the server longer than this (set at install time, 7 days by default).
 - **Private rooms**: joining takes a password or a request an admin approves.
 - **Minimal metadata**: the server records no IP addresses or device names and keeps no logs by default. Pushes carry only an event ID, never content or sender. Android push runs through your own server (its ntfy, with or without the ntfy app), never Google.
+- **Emergency PIN**: unlocking the app with it instead of the PIN signs out and erases the device at once, for when someone forces you to unlock it (Android, iOS).
 - **Strict mode**: the login session and keys live in memory only, and the device signs itself out when the app or page is closed.
 - **Screenshot blocking**: Android can block screenshots and screen recording; iOS hides protected rooms while the screen is recorded.
 - **Screenshot alerts**: in rooms with auto-delete, and on iOS also in rooms that block screenshots, a screenshot posts "* Alice took a screenshot" for everyone (Android 14 and later, iOS).
