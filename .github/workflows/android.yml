@@ -150,7 +150,9 @@ jobs:
         run: |
           dev/build-android.sh \
             :appnav:testDebugUnitTest \
+            :features:createroom:impl:testDebugUnitTest \
             :features:joinroom:impl:testDebugUnitTest \
+            :features:lockscreen:impl:testDebugUnitTest \
             :features:messages:impl:testDebugUnitTest \
             :features:preferences:impl:testDebugUnitTest \
             :features:roomdetails:impl:testDebugUnitTest \
