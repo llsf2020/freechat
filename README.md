@@ -20,6 +20,20 @@ A self-hosted, Telegram-like messenger with chat, voice and video (including gro
 - **Screenshot alerts**: in rooms with auto-delete, and on iOS also in rooms that block screenshots, a screenshot posts "* Alice took a screenshot" for everyone (Android 14 and later, iOS).
 - **One-script install**: a 1-core, 1 GB VPS is enough. HTTPS certificates are set up automatically, and the database can optionally live on an encrypted volume.
 
+## What the server can and cannot see
+
+Messages are end-to-end encrypted on the devices, so whoever runs the server, or gets hold of it, **cannot read**:
+- what messages, files, images and voice messages say
+- what is said in calls
+
+The server still **has to know** some things to deliver messages. This is how the Matrix protocol works, and FreeChat only shortens how long it is kept:
+- the accounts, their display names and avatars
+- which rooms exist, their names, topics and avatars, and who is in each one
+- who sent a message to which room and when, which message a reply or reaction points to, read receipts and "typing…" notices
+- the connection's IP address while someone is connected (never written down)
+
+FreeChat keeps none of this longer than needed: messages, and with them who sent what when, are gone from the database after the retention time (7 days by default); no IP addresses, device names or logs are stored. Messengers such as Signal or SimpleX hide even who talks to whom; Matrix cannot. So run the server yourself, or use one run by someone you trust: whoever controls the server could change its software to record more from then on.
+
 ## Components
 
 | Layer | Component | Modified |
