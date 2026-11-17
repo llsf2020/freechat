@@ -1,0 +1,179 @@
+# Checks what FreeChat ships against the OSV vulnerability database (osv.dev, which includes the GitHub,
+# RustSec and npm advisories), and lists upstream components that have a newer release:
+#   source:   each patched component, checked out the way the builds do it (docker/checkout.sh), through its
+#             lockfiles: Tuwunel and the Rust SDK (Cargo.lock), Element Web (pnpm-lock.yaml) and Element X iOS
+#             (Package.resolved). Element X Android has no lockfile, only a Gradle version catalog, so its JVM
+#             libraries are not checked here; its Rust SDK is covered by matrix-rust-sdk.
+#   images:   the images deploy/install.sh runs: freechat-server and freechat-web (latest on ghcr.io) and the
+#             pinned LiveKit, lk-jwt-service and ntfy images
+#   upstream: scripts/upstream.sh status (information only, never fails)
+# A scan job fails when it finds a known vulnerability, so GitHub emails about it. The findings are in the run
+# summary and in the osv-* artifacts (JSON). Element Web's lockfile also covers build and test tools
+# (storybook, vite, ...) that never reach the browser, so check whether a finding is in the shipped app.
+# Runs every day, after changes to what is scanned, and by hand: gh workflow run security.yml
+name: security
+
+on:
+  schedule:
+    - cron: "23 4 * * *"
+  push:
+    branches: [main]
+    paths:
+      - upstream.conf
+      - patches/tuwunel/**
+      - patches/matrix-rust-sdk/**
+      - patches/element-web/**
+      - patches/element-x-ios/**
+      - docker/checkout.sh
+      - deploy/install.sh
+      - .github/workflows/security.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  OSV_SCANNER_VERSION: 2.7.0
+  # sha256 of osv-scanner_linux_amd64, from the release's osv-scanner_SHA256SUMS
+  OSV_SCANNER_SHA256: 160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [tuwunel, matrix-rust-sdk, element-web, element-x-ios]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install osv-scanner
+        run: |
+          curl -fsSL -o osv-scanner "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SCANNER_SHA256}  osv-scanner" | sha256sum -c -
+          chmod +x osv-scanner
+          sudo mv osv-scanner /usr/local/bin/
+
+      - name: Check out ${{ matrix.component }} with the FreeChat patches
+        run: docker/checkout.sh "${{ matrix.component }}" "forks/${{ matrix.component }}"
+
+      - name: Scan
+        env:
+          NAME: ${{ matrix.component }}
+        run: |
+          dir="forks/$NAME"
+          case "$NAME" in
+            tuwunel|matrix-rust-sdk) set -- -L "$dir/Cargo.lock" ;;
+            element-web) set -- -L "$dir/pnpm-lock.yaml" ;;
+            # The app's packages; compound-ios/Inspector is a design tool that is not shipped.
+            element-x-ios) set -- -L "$dir/Package.resolved" \
+              -L "$dir/ElementX.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved" ;;
+          esac
+          status=0
+          osv-scanner scan source --format json "$@" > "osv-$NAME.json" || status=$?
+          {
+            echo "## $NAME ($(awk -v n="$NAME" '$1 == n && $0 !~ /^#/ { print $3 }' upstream.conf))"
+            osv-scanner scan source --format markdown "$@" || true
+          } >> "$GITHUB_STEP_SUMMARY"
+          # 0: nothing found, 1: vulnerabilities found, anything else: the scan itself failed
+          case "$status" in
+            0) echo "$NAME: no known vulnerabilities" ;;
+            1) echo "::error::$NAME: known vulnerabilities, see the run summary"; exit 1 ;;
+            *) echo "::error::$NAME: osv-scanner failed (exit $status)"; exit "$status" ;;
+          esac
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: osv-${{ matrix.component }}
+          path: osv-${{ matrix.component }}.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+  images:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install osv-scanner
+        run: |
+          curl -fsSL -o osv-scanner "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SCANNER_SHA256}  osv-scanner" | sha256sum -c -
+          chmod +x osv-scanner
+          sudo mv osv-scanner /usr/local/bin/
+
+      # The FreeChat images of a private fork are private too.
+      - name: Log in to ghcr.io
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+
+      - name: Scan
+        run: |
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          images="ghcr.io/$owner/freechat-server:latest ghcr.io/$owner/freechat-web:latest"
+          for var in LIVEKIT_IMAGE JWT_IMAGE NTFY_IMAGE; do
+            ref="$(sed -n "s/^$var=//p" deploy/install.sh | head -n 1)"
+            [ -n "$ref" ] || { echo "::error::$var not found in deploy/install.sh"; exit 1; }
+            images="$images $ref"
+          done
+          failed=""
+          for image in $images; do
+            file="osv-image-$(printf '%s' "${image%%[@:]*}" | tr '/' '-').json"
+            if ! docker pull --quiet "$image"; then
+              echo "::error::could not pull $image"; failed="$failed $image"; continue
+            fi
+            status=0
+            osv-scanner scan image --format json "$image" > "$file" || status=$?
+            {
+              echo "## ${image%%@*}"
+              osv-scanner scan image --format markdown "$image" || true
+            } >> "$GITHUB_STEP_SUMMARY"
+            case "$status" in
+              0|128) ;;   # 128: no packages the scanner knows in the image
+              1) echo "::error::$image: known vulnerabilities, see the run summary"; failed="$failed $image" ;;
+              *) echo "::error::$image: osv-scanner failed (exit $status)"; failed="$failed $image" ;;
+            esac
+          done
+          if [ -n "$failed" ]; then echo "failed:$failed"; exit 1; fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: osv-images
+          path: osv-image-*.json
+          retention-days: 30
+          if-no-files-found: ignore
+
+  upstream:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Newer upstream releases
+        run: |
+          scripts/upstream.sh status | tee status.txt
+          {
+            echo "## Upstream releases"
+            echo '```'
+            cat status.txt
+            echo '```'
+            echo "Sync a modified component with \`scripts/upstream.sh sync <name> <tag>\`."
+          } >> "$GITHUB_STEP_SUMMARY"
