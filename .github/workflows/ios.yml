@@ -23,7 +23,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ios
+  group: ios-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
