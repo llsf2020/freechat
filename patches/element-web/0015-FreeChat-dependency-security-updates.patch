@@ -1,7 +1,7 @@
 From f95c84422b924dc5c7fd81b8a46bf1fef423b604 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Wed, 18 Nov 2026 00:00:00 +0000
-Subject: [PATCH 15/15] FreeChat: dependency security updates
+Subject: [PATCH 15/16] FreeChat: dependency security updates
 
 DOMPurify 3.4.18 (GHSA-cg2g-xh64-v4q7, GHSA-mrv2-3pqr-j5jr,
 GHSA-c6gr-qvv4-5v3f), which posthog-js pulls in. The lockfile was

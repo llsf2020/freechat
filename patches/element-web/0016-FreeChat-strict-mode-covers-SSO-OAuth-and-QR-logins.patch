@@ -1,0 +1,185 @@
+From cf5b11f266731fcf8d93f78c195d4c6817ed88fb Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 00:00:00 +0000
+Subject: [PATCH 16/16] FreeChat: strict mode covers SSO, OAuth and QR logins
+
+Those logins stored the credentials and a pickle key, then started the
+session from storage, so a strict session left an access token on disk
+until the page was closed (or until the next start, if the sign-out on
+close never ran). In strict mode they now hold the credentials in memory
+and restoreSessionFromStorage starts the session from them. Refreshed
+tokens are not written to storage either.
+---
+ apps/web/src/Lifecycle.ts                | 20 +++++++++++++++
+ apps/web/src/freechat/strictMode.test.ts | 32 ++++++++++++++++++++++++
+ apps/web/src/freechat/strictMode.ts      | 21 ++++++++++++++++
+ apps/web/src/utils/createMatrixClient.ts |  5 +++-
+ 4 files changed, 77 insertions(+), 1 deletion(-)
+
+diff --git a/apps/web/src/Lifecycle.ts b/apps/web/src/Lifecycle.ts
+index 19a8037d5d..66814452df 100644
+--- a/apps/web/src/Lifecycle.ts
++++ b/apps/web/src/Lifecycle.ts
+@@ -75,7 +75,9 @@ import {
+     beginSession,
+     endSession,
+     getStrictMode,
++    holdCredentials,
+     keepStrictModeChoice,
++    takeHeldCredentials,
+     watchStrictSession,
+ } from "./freechat/strictMode";
+ 
+@@ -489,6 +491,12 @@ async function loadOrCreatePickleKey(credentials: IMatrixClientCreds): Promise<s
+  */
+ async function onSuccessfulDelegatedAuthLogin(credentials: IMatrixClientCreds): Promise<void> {
+     await clearStorage();
++    // FreeChat strict mode: the session lives in memory only, so neither the credentials nor a
++    // pickle key are stored; restoreSessionFromStorage starts the session from the held credentials.
++    if (getStrictMode().enabled) {
++        holdCredentials(credentials);
++        return;
++    }
+     // SSO does not go through setLoggedIn so we need to load/create the pickle key here too
+     credentials.pickleKey = await loadOrCreatePickleKey(credentials);
+     await persistCredentials(credentials);
+@@ -716,6 +724,18 @@ async function processStoredToken(
+ export async function restoreSessionFromStorage(opts?: { ignoreGuest?: boolean }): Promise<boolean> {
+     const ignoreGuest = opts?.ignoreGuest;
+ 
++    // FreeChat strict mode: an SSO, OAuth or QR login held its credentials in memory instead of storing them.
++    const held = takeHeldCredentials();
++    if (held) {
++        if (ignoreGuest && held.guest) {
++            logger.log("Ignoring held guest account: " + held.userId);
++            return false;
++        }
++        logger.log(`Starting strict session for ${held.userId}`);
++        await doSetLoggedIn({ ...held, freshLogin: true }, false, true);
++        return true;
++    }
++
+     if (!localStorage) {
+         return false;
+     }
+diff --git a/apps/web/src/freechat/strictMode.test.ts b/apps/web/src/freechat/strictMode.test.ts
+index 30702753d6..cce187321c 100644
+--- a/apps/web/src/freechat/strictMode.test.ts
++++ b/apps/web/src/freechat/strictMode.test.ts
+@@ -15,10 +15,12 @@ import {
+     beginSession,
+     endSession,
+     getStrictMode,
++    holdCredentials,
+     isStrictSession,
+     keepStrictModeChoice,
+     setStrictMode,
+     strictDeviceId,
++    takeHeldCredentials,
+     watchStrictSession,
+ } from "./strictMode";
+ 
+@@ -136,4 +138,34 @@ describe("strict mode", () => {
+         vi.advanceTimersByTime(60 * 60_000);
+         expect(logout).not.toHaveBeenCalled();
+     });
++
++    it("hands held login credentials over once", () => {
++        const creds = {
++            userId: "@a:chat.example",
++            deviceId: "FCS5_X",
++            accessToken: "t",
++            homeserverUrl: "https://chat.example",
++        };
++        holdCredentials(creds);
++        creds.accessToken = "changed afterwards";
++        expect(takeHeldCredentials()).toEqual({ ...creds, accessToken: "t" });
++        expect(takeHeldCredentials()).toBeUndefined();
++    });
++
++    it("forgets held credentials on sign-out", () => {
++        holdCredentials({ userId: "@a:chat.example", accessToken: "t", homeserverUrl: "https://chat.example" });
++        endSession();
++        expect(takeHeldCredentials()).toBeUndefined();
++    });
++
++    it("keeps held credentials out of localStorage and sessionStorage", () => {
++        holdCredentials({
++            userId: "@a:chat.example",
++            accessToken: "secret-token",
++            homeserverUrl: "https://chat.example",
++        });
++        const stored = JSON.stringify({ ...localStorage }) + JSON.stringify({ ...sessionStorage });
++        expect(stored).not.toContain("secret-token");
++        takeHeldCredentials();
++    });
+ });
+diff --git a/apps/web/src/freechat/strictMode.ts b/apps/web/src/freechat/strictMode.ts
+index 08b3a10529..c949f3798f 100644
+--- a/apps/web/src/freechat/strictMode.ts
++++ b/apps/web/src/freechat/strictMode.ts
+@@ -23,6 +23,8 @@ Please see LICENSE files in the repository root for full details.
+ import { type MatrixClient } from "matrix-js-sdk/src/matrix";
+ import { logger } from "matrix-js-sdk/src/logger";
+ 
++import { type IMatrixClientCreds } from "../utils/createMatrixClient";
++
+ const STORAGE_KEY = "freechat_strict_mode";
+ 
+ export const IDLE_PRESETS_MINUTES = [1, 5, 15, 30, 60];
+@@ -86,6 +88,7 @@ export function endSession(): void {
+     stopWatching?.();
+     stopWatching = undefined;
+     strictSession = false;
++    heldCredentials = undefined;
+ }
+ 
+ /** Keeps the strict mode choice across a wipe of localStorage. Returns the function that puts it back. */
+@@ -103,6 +106,24 @@ export function isStrictSession(): boolean {
+     return strictSession;
+ }
+ 
++let heldCredentials: IMatrixClientCreds | undefined;
++
++/**
++ * Holds the credentials of an SSO, OAuth or QR login in memory. Those logins normally store the
++ * credentials and then start the session from storage; in strict mode nothing is stored, and the
++ * session starts from these instead (see `takeHeldCredentials`).
++ */
++export function holdCredentials(credentials: IMatrixClientCreds): void {
++    heldCredentials = { ...credentials };
++}
++
++/** Returns the held credentials once, then forgets them. */
++export function takeHeldCredentials(): IMatrixClientCreds | undefined {
++    const credentials = heldCredentials;
++    heldCredentials = undefined;
++    return credentials;
++}
++
+ /** Device preferences (language, theme) that say nothing about the user and survive a wipe. */
+ const KEPT_KEYS = [STORAGE_KEY, "mx_local_settings"];
+ 
+diff --git a/apps/web/src/utils/createMatrixClient.ts b/apps/web/src/utils/createMatrixClient.ts
+index 5d79384567..495ea50840 100644
+--- a/apps/web/src/utils/createMatrixClient.ts
++++ b/apps/web/src/utils/createMatrixClient.ts
+@@ -20,6 +20,7 @@ import { VerificationMethod } from "matrix-js-sdk/src/types";
+ import { logger } from "matrix-js-sdk/src/logger";
+ 
+ import { purgePersistedMessages } from "../freechat/localPrivacy";
++import { getStrictMode } from "../freechat/strictMode";
+ import SettingsStore from "../settings/SettingsStore";
+ import { crossSigningCallbacks } from "../SecurityManager";
+ import IdentityAuthClient from "../IdentityAuthClient";
+@@ -119,7 +120,9 @@ export function createClientWithCreds(creds: IMatrixClientCreds, oauthClientId?:
+         idBaseUrl: creds.identityServerUrl,
+         accessToken: creds.accessToken,
+         refreshToken: creds.refreshToken,
+-        onTokenRefresh: persistTokens.bind(null, creds.pickleKey),
++        // FreeChat strict mode: refreshed tokens stay in memory, never in storage. The session has not
++        // begun yet when the client is created, so this reads the choice that beginSession() will fix.
++        onTokenRefresh: getStrictMode().enabled ? undefined : persistTokens.bind(null, creds.pickleKey),
+         oauthClientId,
+         userId: creds.userId,
+         deviceId: creds.deviceId,
