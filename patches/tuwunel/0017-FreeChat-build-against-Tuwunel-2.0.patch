@@ -1,15 +1,17 @@
-From 048ca85c04c232495fd0d0ee176cdc99e7981e48 Mon Sep 17 00:00:00 2001
+From b9b1c89b1607548e73d0b5a23372d6cbff595b16 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Wed, 18 Nov 2026 00:00:00 +0000
-Subject: [PATCH 17/17] FreeChat: build against Tuwunel 2.0 crates
+Subject: [PATCH 17/17] FreeChat: build against Tuwunel 2.0
 
-Event, StateKey and the PDU types moved from tuwunel_core::matrix to the tuwunel_matrix crate.
+Event, StateKey and the PDU types moved from tuwunel_core::matrix to the tuwunel_matrix crate; append_pdu now rebinds pdu_json after read_replaced, so the expiry annotation needs it mutable.
 ---
  src/api/client/freechat.rs                    |  3 ++-
  src/service/rooms/disappearing/event_media.rs |  3 ++-
  src/service/rooms/disappearing/mod.rs         | 12 ++----------
  src/service/rooms/disappearing/read_burn.rs   | 10 ++--------
- 4 files changed, 8 insertions(+), 20 deletions(-)
+ src/service/rooms/search/mod.rs               |  2 +-
+ src/service/rooms/timeline/append.rs          |  2 +-
+ 6 files changed, 10 insertions(+), 22 deletions(-)
 
 diff --git a/src/api/client/freechat.rs b/src/api/client/freechat.rs
 index 4f2e68c62..7f132878c 100644
@@ -86,3 +88,29 @@ index d2e8528df..82ffd1ed1 100644
  
  use super::STATE_TYPE;
  
+diff --git a/src/service/rooms/search/mod.rs b/src/service/rooms/search/mod.rs
+index b22d06e98..a129bfb79 100644
+--- a/src/service/rooms/search/mod.rs
++++ b/src/service/rooms/search/mod.rs
+@@ -11,7 +11,7 @@
+ 		stream::{TryIgnore, WidebandExt},
+ 	},
+ };
+-use tuwunel_database::{Map, Txn, keyval::Val};
++use tuwunel_database::{Map, keyval::Val};
+ use tuwunel_matrix::{
+ 	PduCount,
+ 	event::{Event, Matches},
+diff --git a/src/service/rooms/timeline/append.rs b/src/service/rooms/timeline/append.rs
+index 0ff2b3784..90269b485 100644
+--- a/src/service/rooms/timeline/append.rs
++++ b/src/service/rooms/timeline/append.rs
+@@ -183,7 +183,7 @@ pub async fn append_pdu<'a, Leafs>(
+ 		.await
+ 		.map_err(|_| err!(Database("Room does not exist")))?;
+ 
+-	let (pdu_json, replaced_join) = self.read_replaced(pdu, pdu_json).await?;
++	let (mut pdu_json, replaced_join) = self.read_replaced(pdu, pdu_json).await?;
+ 
+ 	// FreeChat: tag disappearing messages with their expiry for clients.
+ 	self.services
