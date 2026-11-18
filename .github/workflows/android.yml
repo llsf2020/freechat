@@ -146,9 +146,12 @@ jobs:
           name: rust-sdk-android
           path: forks/element-x-android/libraries/rustsdk
 
+      # At most two Gradle workers: each unit test fork takes up to 2 GB (maxHeapSize) on top of Gradle's 7 GB and
+      # the Kotlin daemon's 2 GB. With four workers a cold build (no Gradle cache, e.g. after an upstream sync)
+      # outgrew the runner's 16 GB and the runner lost contact.
       - name: Unit tests and debug APK
         run: |
-          dev/build-android.sh \
+          dev/build-android.sh --max-workers=2 \
             :appnav:testDebugUnitTest \
             :features:createroom:impl:testDebugUnitTest \
             :features:joinroom:impl:testDebugUnitTest \
