@@ -32,9 +32,9 @@ set -eu
 FREECHAT_OWNER="${FREECHAT_OWNER:-llsf2020}"
 DIR=/opt/freechat
 # Pinned to the multi-arch index digest so a moved tag cannot change what runs.
-LIVEKIT_IMAGE=livekit/livekit-server:v1.13.10@sha256:89ca9ce0791e18d6e03bf6e2c49ceb27e1c754eae8bd50c989386c1a5963791a
-JWT_IMAGE=ghcr.io/element-hq/lk-jwt-service:0.9.0@sha256:d210fd778ba38b7e42e6fc64e8a24a7d66ccc3b938fb20d73bd713224af2dfea
-NTFY_IMAGE=binwiederhier/ntfy:v2.28.0@sha256:6ef4b819f722fccdc036af611c4774cfdc2de821ab74fdd48bbf4c9d6f8973da
+LIVEKIT_IMAGE=livekit/livekit-server:v1.13.11@sha256:25cd902de7cacbd5f1f779f6a6ac1eae20ba8f56b0935934ce6b0ab80d1e3d20
+JWT_IMAGE=ghcr.io/element-hq/lk-jwt-service:0.10.0@sha256:b821befeb148929825f1a9059253d9faa0764991f45c07a91db5ad21a81c2dde
+NTFY_IMAGE=binwiederhier/ntfy:v2.38.1@sha256:038da2be5e668fee6d36a62884eea48975e1b71c29a56964e5298c1b9165a573
 RTC_TCP_PORT=7881
 RTC_UDP_START=50100
 RTC_UDP_END=50200

@@ -1,7 +1,7 @@
-From d30701cf6b619950a9f163b4aa7abb87922fa96f Mon Sep 17 00:00:00 2001
+From d57b2f8b73dc8ec15b0bffd8abafa37ac26e3100 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 07/14] FreeChat: strict mode and memory-only logs
+Subject: [PATCH 07/13] FreeChat: strict mode and memory-only logs
 
 Strict mode (per device, opt-in): the session and crypto store stay in memory,
 closing the page signs out on the server and wipes localStorage, and hiding the
@@ -23,10 +23,10 @@ page for the chosen time signs out. Rageshake logs are no longer persisted.
  create mode 100644 apps/web/src/freechat/strictMode.ts
 
 diff --git a/apps/web/src/Lifecycle.ts b/apps/web/src/Lifecycle.ts
-index 5dadfb097d..81ad43876c 100644
+index b143619317..19a8037d5d 100644
 --- a/apps/web/src/Lifecycle.ts
 +++ b/apps/web/src/Lifecycle.ts
-@@ -70,6 +70,13 @@ import { CallStatusListener } from "./CallStatusListener.ts";
+@@ -71,6 +71,13 @@ import { CallStatusListener } from "./CallStatusListener.ts";
  import { CallStore } from "./stores/CallStore.ts";
  import { ModuleApi } from "./modules/Api.ts";
  import { draftStorage } from "./freechat/localPrivacy";
@@ -40,17 +40,17 @@ index 5dadfb097d..81ad43876c 100644
  
  const HOMESERVER_URL_KEY = "mx_hs_url";
  const ID_SERVER_URL_KEY = "mx_is_url";
-@@ -180,6 +187,9 @@ export async function loadSession(opts: ILoadSessionOpts = {}): Promise<boolean>
-         const guestIsUrl = opts.guestIsUrl;
-         const defaultDeviceDisplayName = opts.defaultDeviceDisplayName;
+@@ -175,6 +182,9 @@ function getGuestHsUrl(opts: ILoadSessionOpts): string | undefined {
+ async function tryLoadSession(opts: ILoadSessionOpts): Promise<boolean> {
+     const guestHsUrl = getGuestHsUrl(opts);
  
-+        // FreeChat strict mode: nothing is restored; wipe whatever the last session left behind.
-+        if (getStrictMode().enabled) await clearStorage();
++    // FreeChat strict mode: nothing is restored; wipe whatever the last session left behind.
++    if (getStrictMode().enabled) await clearStorage();
 +
-         const success = await restoreSessionFromStorage({
-             ignoreGuest: Boolean(opts.ignoreGuest),
-         });
-@@ -781,7 +791,8 @@ async function handleLoadSessionFailure(e: unknown, loadSessionOpts?: ILoadSessi
+     if (await restoreSessionFromStorage({ ignoreGuest: Boolean(opts.ignoreGuest) })) {
+         return true;
+     }
+@@ -806,7 +816,8 @@ async function handleLoadSessionFailure(e: unknown, loadSessionOpts?: ILoadSessi
  export async function setLoggedIn(credentials: IMatrixClientCreds): Promise<MatrixClient> {
      credentials.freshLogin = true;
      stopMatrixClient();
@@ -60,7 +60,7 @@ index 5dadfb097d..81ad43876c 100644
      return doSetLoggedIn(credentials, true, true);
  }
  
-@@ -896,7 +907,11 @@ async function doSetLoggedIn(
+@@ -924,7 +935,11 @@ async function doSetLoggedIn(
          PosthogAnalytics.instance.startListeningToSettingsChanges(client);
      }
  
@@ -73,7 +73,7 @@ index 5dadfb097d..81ad43876c 100644
          try {
              await persistCredentials(credentials);
              // make sure we don't think that it's a fresh login any more
-@@ -933,6 +948,8 @@ async function doSetLoggedIn(
+@@ -961,6 +976,8 @@ async function doSetLoggedIn(
          clientPegOpts.rustCryptoStoreKey?.fill(0);
      }
  
@@ -82,15 +82,15 @@ index 5dadfb097d..81ad43876c 100644
      // Run the migrations after the MatrixClientPeg has been assigned
      SettingsStore.runMigrations(isFreshLogin);
  
-@@ -1133,6 +1150,7 @@ export async function onLoggedOut(): Promise<void> {
+@@ -1161,6 +1178,7 @@ export async function onLoggedOut(): Promise<void> {
      // that React components unmount first. This avoids React soft crashes
      // that can occur when components try to use a null client.
      dis.fire(Action.OnLoggedOut, true);
 +    endSession();
      stopMatrixClient();
-     await clearStorage({ deleteEverything: true });
-     clearUploadedMediaCache();
-@@ -1167,7 +1185,9 @@ export async function clearStorage(opts?: { deleteEverything?: boolean }): Promi
+     loggedOutStorageCleared = clearLoggedOutStorage();
+     await loggedOutStorageCleared;
+@@ -1220,7 +1238,9 @@ export async function clearStorage(opts?: { deleteEverything?: boolean }): Promi
          const pendingInvites = ThreepidInviteStore.instance.getWireInvites();
          const registrationTime = window.localStorage.getItem("mx_registration_time");
  
@@ -101,10 +101,10 @@ index 5dadfb097d..81ad43876c 100644
          try {
              await StorageAccess.idbClear("account");
 diff --git a/apps/web/src/MatrixClientPeg.test.ts b/apps/web/src/MatrixClientPeg.test.ts
-index 6898908cc5..3b72c94adf 100644
+index 27c3626b58..d1d0259ced 100644
 --- a/apps/web/src/MatrixClientPeg.test.ts
 +++ b/apps/web/src/MatrixClientPeg.test.ts
-@@ -88,7 +88,7 @@ describe("MatrixClientPeg", () => {
+@@ -90,7 +90,7 @@ describe("MatrixClientPeg", () => {
  
              const cryptoStoreKey = new Uint8Array([1, 2, 3, 4]);
              await testPeg.start({ rustCryptoStoreKey: cryptoStoreKey });
@@ -113,7 +113,7 @@ index 6898908cc5..3b72c94adf 100644
          });
  
          it("should try to start dehydration if dehydration is enabled", async () => {
-@@ -108,7 +108,7 @@ describe("MatrixClientPeg", () => {
+@@ -110,7 +110,7 @@ describe("MatrixClientPeg", () => {
  
              const cryptoStoreKey = new Uint8Array([1, 2, 3, 4]);
              await testPeg.start({ rustCryptoStoreKey: cryptoStoreKey });
@@ -123,24 +123,28 @@ index 6898908cc5..3b72c94adf 100644
          });
  
 diff --git a/apps/web/src/MatrixClientPeg.ts b/apps/web/src/MatrixClientPeg.ts
-index 2d1a41ab87..05bf453440 100644
+index 86a2668301..764b3a8411 100644
 --- a/apps/web/src/MatrixClientPeg.ts
 +++ b/apps/web/src/MatrixClientPeg.ts
-@@ -29,6 +29,7 @@ import { setDeviceIsolationMode } from "./settings/controllers/DeviceIsolationMo
- import { initialiseDehydrationIfEnabled } from "./utils/device/dehydration";
+@@ -30,6 +30,7 @@ import { initialiseDehydrationIfEnabled } from "./utils/device/dehydration";
+ import { LegacyCryptoStoreError } from "./utils/LegacyCryptoStoreError.ts";
  import { installMediaHint } from "./freechat/mediaHint";
  import { installExpiry } from "./freechat/expiry";
 +import { isStrictSession } from "./freechat/strictMode";
  
  export interface MatrixClientPegAssignOpts {
      /**
-@@ -311,11 +312,14 @@ class MatrixClientPegClass implements IMatrixClientPeg {
+@@ -312,7 +313,7 @@ class MatrixClientPegClass implements IMatrixClientPeg {
              throw new Error("createClient must be called first");
          }
  
 -        if (!opts.rustCryptoStoreKey && !opts.rustCryptoStorePassword) {
 +        if (!opts.rustCryptoStoreKey && !opts.rustCryptoStorePassword && !isStrictSession()) {
              logger.error("Warning! Not using an encryption key for rust crypto store.");
+         }
+ 
+@@ -322,7 +323,10 @@ class MatrixClientPegClass implements IMatrixClientPeg {
+             throw new LegacyCryptoStoreError();
          }
  
 +        // FreeChat strict mode: keys live in memory only.
@@ -150,7 +154,7 @@ index 2d1a41ab87..05bf453440 100644
              storageKey: opts.rustCryptoStoreKey,
              storagePassword: opts.rustCryptoStorePassword,
              caCertsPem: opts.x509?.userVerificationCaCertsPem,
-@@ -323,7 +327,7 @@ class MatrixClientPegClass implements IMatrixClientPeg {
+@@ -330,7 +334,7 @@ class MatrixClientPegClass implements IMatrixClientPeg {
              x509Validity: opts.x509?.validity,
          });
  

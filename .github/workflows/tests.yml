@@ -26,9 +26,9 @@ concurrency:
 
 env:
   CARGO_INCREMENTAL: "0"
-  NTFY_VERSION: 2.28.0
-  # sha256 of ntfy_2.28.0_linux_amd64.tar.gz, from the release's checksums.txt
-  NTFY_SHA256: 881a1530e30e01f1dec202c7f41e1664e57edfb7844e73e21e345159ac3ea9b7
+  NTFY_VERSION: 2.38.1
+  # sha256 of ntfy_2.38.1_linux_amd64.tar.gz, from the release's checksums.txt
+  NTFY_SHA256: 9727d45e5da86c3f338f0f329044485bddde76f3fbbbc3f9e695c14776f09c32
 
 jobs:
   server:

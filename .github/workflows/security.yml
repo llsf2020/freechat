@@ -144,7 +144,9 @@ jobs:
               osv-scanner scan image --format markdown "$image" || true
             } >> "$GITHUB_STEP_SUMMARY"
             case "$status" in
-              0|128) ;;   # 128: no packages the scanner knows in the image
+              0) ;;
+              # 128: the scanner found no packages it knows, so nothing was checked (e.g. a stripped Go binary)
+              128) echo "::warning::$image: osv-scanner found no packages to check" ;;
               1) echo "::error::$image: known vulnerabilities, see the run summary"; failed="$failed $image" ;;
               *) echo "::error::$image: osv-scanner failed (exit $status)"; failed="$failed $image" ;;
             esac

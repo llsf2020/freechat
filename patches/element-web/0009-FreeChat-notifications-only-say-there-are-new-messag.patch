@@ -1,7 +1,7 @@
-From 04e8b398a54743986f43c4bc28dd806e1919240a Mon Sep 17 00:00:00 2001
+From 457919da7989a683fb774fe275e8cca9d533b608 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 09/14] FreeChat: notifications only say there are new messages
+Subject: [PATCH 09/13] FreeChat: notifications only say there are new messages
 
 Showing the message in notifications is now off by default, and while it is
 off the notification names neither the sender nor the room either.
@@ -13,7 +13,7 @@ off the notification names neither the sender nor the room either.
  4 files changed, 28 insertions(+), 1 deletion(-)
 
 diff --git a/apps/web/src/Notifier.test.ts b/apps/web/src/Notifier.test.ts
-index 39866dd7fe..2fc55cd2cf 100644
+index 4422a2ea48..fadc0737ef 100644
 --- a/apps/web/src/Notifier.test.ts
 +++ b/apps/web/src/Notifier.test.ts
 @@ -48,6 +48,7 @@ import { mkThread } from "test-utils/threads";
@@ -100,10 +100,10 @@ index 143c04b670..8e1f8d4b55 100644
      strict_legend: "本機什麼都不留",
      strict_description:
 diff --git a/apps/web/src/settings/Settings.tsx b/apps/web/src/settings/Settings.tsx
-index 8e0135e9c9..ebfd740940 100644
+index 876c00b9dc..0298b3c58e 100644
 --- a/apps/web/src/settings/Settings.tsx
 +++ b/apps/web/src/settings/Settings.tsx
-@@ -1206,7 +1206,8 @@ export const SETTINGS: Settings = {
+@@ -1211,7 +1211,8 @@ export const SETTINGS: Settings = {
      },
      "notificationBodyEnabled": {
          supportedLevels: LEVELS_DEVICE_ONLY_SETTINGS,

@@ -1,7 +1,7 @@
-From 5904a12b24e5692322924a0926bb69add54b2294 Mon Sep 17 00:00:00 2001
+From cf503ba446d55bf3bcab4026ce9199dd8c45846b Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 12/16] FreeChat: delete the media clients report for
+Subject: [PATCH 12/17] FreeChat: delete the media clients report for
  disappearing messages
 
 Element X encrypts attachments in matrix-rust-sdk and cannot list their MXCs in
@@ -11,7 +11,7 @@ markers and only media the sender uploaded. The media is deleted when the
 message expires; an hourly sweep covers messages removed some other way.
 ---
  src/api/client/freechat.rs                    |  26 ++++
- src/api/router.rs                             |   4 +
+ src/api/client/routes.rs                      |   4 +
  src/database/maps.rs                          |   5 +
  src/service/rooms/disappearing/event_media.rs | 130 ++++++++++++++++++
  src/service/rooms/disappearing/mod.rs         |  19 ++-
@@ -55,11 +55,11 @@ index 31a784277..4823f7943 100644
  /// Resolves an access token to an active local user, like the router's auth.
  async fn authenticate(services: &crate::State, token: &str) -> Result<OwnedUserId> {
  	let Ok((user_id, _device_id, expires_at)) = services.users.find_from_token(token).await
-diff --git a/src/api/router.rs b/src/api/router.rs
-index f8190fad1..589babcfa 100644
---- a/src/api/router.rs
-+++ b/src/api/router.rs
-@@ -335,6 +335,10 @@ fn register_client_room_routes(router: Router<State>) -> Router<State> {
+diff --git a/src/api/client/routes.rs b/src/api/client/routes.rs
+index 5e10b673a..393d5e862 100644
+--- a/src/api/client/routes.rs
++++ b/src/api/client/routes.rs
+@@ -164,6 +164,10 @@ fn register_client_room_routes(router: Router<State>) -> Router<State> {
  			"/_matrix/client/unstable/com.freechat/rooms/{room_id}/existing_events",
  			post(client::freechat::existing_events_route),
  		)
@@ -71,10 +71,10 @@ index f8190fad1..589babcfa 100644
  		.ruma_route(&client::report_room_route)
  		.ruma_route(&client::report_user_route)
 diff --git a/src/database/maps.rs b/src/database/maps.rs
-index 58560a023..d041675f6 100644
+index 70b99f5a0..45e11bb54 100644
 --- a/src/database/maps.rs
 +++ b/src/database/maps.rs
-@@ -184,6 +184,11 @@ pub(crate) fn descriptor(name: &str) -> &'static Descriptor {
+@@ -200,6 +200,11 @@ pub(crate) fn descriptor(name: &str) -> &'static Descriptor {
  		key_size_hint: Some(64),
  		..descriptor::SEQUENTIAL_SMALL
  	},

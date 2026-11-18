@@ -1,4 +1,4 @@
-From d16d3129c4b39a2186ac1bd69bdd33384a9b41c1 Mon Sep 17 00:00:00 2001
+From b8ddbbc75efd9e803c9329763ec3db389c7cbca1 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
 Subject: [PATCH 01/15] FreeChat: disappearing messages vanish locally;
@@ -355,10 +355,10 @@ index 000000000..e815deefa
 +    }
 +}
 diff --git a/ElementX/Sources/Services/Client/ClientFactory.swift b/ElementX/Sources/Services/Client/ClientFactory.swift
-index 14e283647..11323de8b 100644
+index 524fc7469..5956155d9 100644
 --- a/ElementX/Sources/Services/Client/ClientFactory.swift
 +++ b/ElementX/Sources/Services/Client/ClientFactory.swift
-@@ -29,8 +29,7 @@ nonisolated struct ClientFactory: ClientFactoryProtocol {
+@@ -35,8 +35,7 @@ nonisolated struct ClientFactory: ClientFactoryProtocol {
              .enableAutomaticBackPagination(enableAutomaticBackPagination: true)
              .sqliteStore(config: .init(dataPath: sessionDirectories.dataPath, cachePath: sessionDirectories.cachePath)
                  .highEntropyPassphrase(passphrase: passphrase, base64Variant: .padded))
@@ -368,7 +368,7 @@ index 14e283647..11323de8b 100644
              .serverNameOrHomeserverUrl(serverNameOrUrl: serverNameOrBaseURL)
          
          return try await build(builder, for: .authentication, appHooks: appHooks)
-@@ -60,6 +59,9 @@ nonisolated struct ClientFactory: ClientFactoryProtocol {
+@@ -66,6 +65,9 @@ nonisolated struct ClientFactory: ClientFactoryProtocol {
                         appHooks: AppHooks) async throws -> ClientProtocol {
          let homeserverURL = credentials.restorationToken.session.homeserverUrl
          
@@ -378,7 +378,7 @@ index 14e283647..11323de8b 100644
          let builder = makeBaseBuilder(httpProxy: URL(string: homeserverURL)?.globalProxy,
                                        discoverSlidingSync: false,
                                        sessionDelegate: clientSessionDelegate,
-@@ -70,8 +72,6 @@ nonisolated struct ClientFactory: ClientFactoryProtocol {
+@@ -76,8 +78,6 @@ nonisolated struct ClientFactory: ClientFactoryProtocol {
              .sqliteStore(config: .init(dataPath: credentials.restorationToken.sessionDirectories.dataPath,
                                         cachePath: credentials.restorationToken.sessionDirectories.cachePath)
                      .highEntropyPassphrase(passphrase: credentials.restorationToken.passphrase, base64Variant: .padded))
@@ -388,10 +388,10 @@ index 14e283647..11323de8b 100644
          
          return try await build(builder, for: .restoration(credentials.restorationToken.session, .all), appHooks: appHooks)
 diff --git a/ElementX/Sources/Services/Client/ClientProxy.swift b/ElementX/Sources/Services/Client/ClientProxy.swift
-index e71fd1c67..28b60c994 100644
+index 97781a2cb..a8a703760 100644
 --- a/ElementX/Sources/Services/Client/ClientProxy.swift
 +++ b/ElementX/Sources/Services/Client/ClientProxy.swift
-@@ -314,6 +314,8 @@ class ClientProxy: ClientProxyProtocol {
+@@ -254,6 +254,8 @@ class ClientProxy: ClientProxyProtocol {
          }
          
          liveLocationOwnInfoUpdatesListenerTaskHandle = createLiveLocationOwnInfoUpdatesObserver()
@@ -400,7 +400,7 @@ index e71fd1c67..28b60c994 100644
      }
      
      var userID: String {
-@@ -338,6 +340,35 @@ class ClientProxy: ClientProxyProtocol {
+@@ -278,6 +280,35 @@ class ClientProxy: ClientProxyProtocol {
          client.homeserver()
      }
      
@@ -437,7 +437,7 @@ index e71fd1c67..28b60c994 100644
          client.canDeactivateAccount()
      }
 diff --git a/ElementX/Sources/Services/Client/ClientProxyProtocol.swift b/ElementX/Sources/Services/Client/ClientProxyProtocol.swift
-index e79792da5..90b1ec665 100644
+index eaf81fa0a..b4e7e8fed 100644
 --- a/ElementX/Sources/Services/Client/ClientProxyProtocol.swift
 +++ b/ElementX/Sources/Services/Client/ClientProxyProtocol.swift
 @@ -125,6 +125,16 @@ protocol ClientProxyProtocol: AnyObject {
@@ -458,10 +458,10 @@ index e79792da5..90b1ec665 100644
      
      var userIDServerName: String? { get }
 diff --git a/ElementX/Sources/Services/Room/JoinedRoomProxy.swift b/ElementX/Sources/Services/Room/JoinedRoomProxy.swift
-index ccbd72b22..ceb2961f8 100644
+index 755e4b54b..9fe2d4a64 100644
 --- a/ElementX/Sources/Services/Room/JoinedRoomProxy.swift
 +++ b/ElementX/Sources/Services/Room/JoinedRoomProxy.swift
-@@ -436,6 +436,28 @@ class JoinedRoomProxy: JoinedRoomProxyProtocol {
+@@ -437,6 +437,28 @@ class JoinedRoomProxy: JoinedRoomProxyProtocol {
          }
      }
      
@@ -509,10 +509,10 @@ index 6b0f3c18f..a3e19964e 100644
      
      func withdrawVerificationAndResend(userIDs: [String], sendHandle: SendHandleProxy) async -> Result<Void, RoomProxyError>
 diff --git a/ElementX/Sources/Services/Timeline/TimelineController/TimelineController.swift b/ElementX/Sources/Services/Timeline/TimelineController/TimelineController.swift
-index 24c9201af..41511836e 100644
+index d1500e317..997ac35b7 100644
 --- a/ElementX/Sources/Services/Timeline/TimelineController/TimelineController.swift
 +++ b/ElementX/Sources/Services/Timeline/TimelineController/TimelineController.swift
-@@ -493,6 +493,10 @@ class TimelineController: TimelineControllerProtocol {
+@@ -498,6 +498,10 @@ class TimelineController: TimelineControllerProtocol {
      /// The controller is switching the `activeTimelineItemProvider`.
      private var isSwitchingTimelines = false
      
@@ -523,7 +523,7 @@ index 24c9201af..41511836e 100644
      /// Configures the controller to listen to `activeTimeline` for events.
      /// - Parameter clearExistingItems: Whether or not to clear any existing items before loading the timeline's contents.
      private func configureActiveTimelineItemProvider() {
-@@ -518,6 +522,39 @@ class TimelineController: TimelineControllerProtocol {
+@@ -523,6 +527,39 @@ class TimelineController: TimelineControllerProtocol {
                  await self?.updateTimelineItems(itemProxies: items, paginationState: paginationState)
              }
          }.asCancellable()
@@ -563,7 +563,7 @@ index 24c9201af..41511836e 100644
      }
      
      private func updateTimelineItems(itemProxies: [TimelineItemProxy], paginationState: TimelinePaginationState) async {
-@@ -594,6 +631,9 @@ class TimelineController: TimelineControllerProtocol {
+@@ -599,6 +636,9 @@ class TimelineController: TimelineControllerProtocol {
                                                 activeTimeline: TimelineProxyProtocol) -> RoomTimelineItemProtocol? {
          switch itemProxy {
          case .event(let eventTimelineItem):

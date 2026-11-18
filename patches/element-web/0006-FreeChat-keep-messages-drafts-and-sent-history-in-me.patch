@@ -1,14 +1,14 @@
-From b49a3ea1e38a0850061536d1ac632634d0b590e1 Mon Sep 17 00:00:00 2001
+From 6fdf26de41c3488b1048deb0ed58cdb610d45140 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 06/14] FreeChat: keep messages, drafts and sent history in
+Subject: [PATCH 06/13] FreeChat: keep messages, drafts and sent history in
  memory only
 
 The sync store is a MemoryStore; the legacy IndexedDB sync store and stored
 drafts are deleted at startup. Desktop no longer builds a Seshat search index.
 ---
  apps/web/src/DraftCleaner.ts                  |  8 +--
- apps/web/src/Lifecycle.ts                     |  2 +
+ apps/web/src/Lifecycle.ts                     |  3 +
  apps/web/src/SendHistoryManager.ts            |  5 +-
  .../components/structures/MatrixChat.test.tsx | 25 +++----
  .../components/structures/MessagePanel.tsx    |  3 +-
@@ -23,7 +23,7 @@ drafts are deleted at startup. Desktop no longer builds a Seshat search index.
  apps/web/src/freechat/localPrivacy.ts         | 67 +++++++++++++++++++
  apps/web/src/utils/createMatrixClient.ts      | 14 ++--
  .../src/vector/platform/ElectronPlatform.tsx  |  5 +-
- 16 files changed, 171 insertions(+), 117 deletions(-)
+ 16 files changed, 172 insertions(+), 117 deletions(-)
  create mode 100644 apps/web/src/freechat/localPrivacy.test.ts
  create mode 100644 apps/web/src/freechat/localPrivacy.ts
 
@@ -61,10 +61,10 @@ index 6adae6b8f4..bdf14a9f26 100644
      }
  }
 diff --git a/apps/web/src/Lifecycle.ts b/apps/web/src/Lifecycle.ts
-index 68d9d17415..5dadfb097d 100644
+index 529e0491fb..b143619317 100644
 --- a/apps/web/src/Lifecycle.ts
 +++ b/apps/web/src/Lifecycle.ts
-@@ -69,6 +69,7 @@ import { clearUploadedMediaCache } from "./utils/UploadedMediaCache";
+@@ -70,6 +70,7 @@ import { clearUploadedMediaCache } from "./utils/UploadedMediaCache";
  import { CallStatusListener } from "./CallStatusListener.ts";
  import { CallStore } from "./stores/CallStore.ts";
  import { ModuleApi } from "./modules/Api.ts";
@@ -72,14 +72,15 @@ index 68d9d17415..5dadfb097d 100644
  
  const HOMESERVER_URL_KEY = "mx_hs_url";
  const ID_SERVER_URL_KEY = "mx_is_url";
-@@ -1191,6 +1192,7 @@ export async function clearStorage(opts?: { deleteEverything?: boolean }): Promi
+@@ -1243,6 +1244,8 @@ export async function clearStorage(opts?: { deleteEverything?: boolean }): Promi
+         }
      }
  
-     window.sessionStorage?.clear();
 +    draftStorage.clear();
- 
++
      // create a temporary client to clear out the persistent stores.
      const cli = createMatrixClient({
+         // we'll never make any requests, so can pass a bogus HS URL
 diff --git a/apps/web/src/SendHistoryManager.ts b/apps/web/src/SendHistoryManager.ts
 index 149dbe42d2..dc6a32a8a5 100644
 --- a/apps/web/src/SendHistoryManager.ts
@@ -111,10 +112,10 @@ index 149dbe42d2..dc6a32a8a5 100644
  
      public getItem(offset: number): IHistoryItem {
 diff --git a/apps/web/src/components/structures/MatrixChat.test.tsx b/apps/web/src/components/structures/MatrixChat.test.tsx
-index bc4fe59e70..6fe71c8009 100644
+index 8dac0654fc..f60a6d6c14 100644
 --- a/apps/web/src/components/structures/MatrixChat.test.tsx
 +++ b/apps/web/src/components/structures/MatrixChat.test.tsx
-@@ -80,6 +80,7 @@ import UserSettingsDialog from "../../components/views/dialogs/UserSettingsDialo
+@@ -81,6 +81,7 @@ import UserSettingsDialog from "../../components/views/dialogs/UserSettingsDialo
  import { SDKContextClass } from "../../contexts/SDKContextClass";
  import { type QrLoginCredentials } from "../../components/views/auth/LoginWithQR.tsx";
  import { storeAuthContext } from "../../utils/oauth/persistOAuthSettings.ts";
@@ -122,7 +123,7 @@ index bc4fe59e70..6fe71c8009 100644
  
  // Stub out ThemeWatcher as the necessary bits for themes are done in element-web's index.html and thus are lacking here,
  // plus JSDOM's implementation of CSSStyleDeclaration has a bunch of differences to real browsers which cause issues.
-@@ -817,41 +818,41 @@ describe("<MatrixChat />", () => {
+@@ -831,41 +832,41 @@ describe("<MatrixChat />", () => {
              const room = new Room(roomId, mockClient, userId);
              const timestamp = 2345678901234;
              beforeEach(() => {
@@ -177,18 +178,18 @@ index bc4fe59e70..6fe71c8009 100644
          });
  
 diff --git a/apps/web/src/components/structures/MessagePanel.tsx b/apps/web/src/components/structures/MessagePanel.tsx
-index 95fce40f4c..0f0d6925fc 100644
+index 6bb828e383..9ba28114f5 100644
 --- a/apps/web/src/components/structures/MessagePanel.tsx
 +++ b/apps/web/src/components/structures/MessagePanel.tsx
-@@ -45,6 +45,7 @@ import { getEventDisplayInfo } from "../../utils/EventRenderingUtils";
- import { type IReadReceiptPosition } from "../views/rooms/ReadReceiptMarker";
- import { haveRendererForEvent } from "../../events/EventTileFactory";
+@@ -39,6 +39,7 @@ import { haveRendererForEvent } from "../../events/EventTileFactory";
+ import { ModuleApi } from "../../modules/Api";
+ import type { MessageRenderInfo } from "../../modules/customComponentApi";
  import { editorRoomKey } from "../../Editing";
 +import { draftStorage } from "../../freechat/localPrivacy";
  import { hasThreadSummary } from "../../utils/EventUtils";
  import { type BaseGrouper } from "./grouper/BaseGrouper";
  import { MainGrouper } from "./grouper/MainGrouper";
-@@ -596,7 +597,7 @@ export default class MessagePanel extends React.Component<IProps, IState> {
+@@ -586,7 +587,7 @@ export default class MessagePanel extends React.Component<IProps, IState> {
          }
  
          try {
@@ -256,7 +257,7 @@ index a98654d4e8..858ed02568 100644
  
      private isContentModified(newContent: RoomMessageEventContent): boolean {
 diff --git a/apps/web/src/components/views/rooms/MessageComposer.test.tsx b/apps/web/src/components/views/rooms/MessageComposer.test.tsx
-index abfe476d4e..7d8fe2de90 100644
+index b203b52d35..eba4337609 100644
 --- a/apps/web/src/components/views/rooms/MessageComposer.test.tsx
 +++ b/apps/web/src/components/views/rooms/MessageComposer.test.tsx
 @@ -42,6 +42,7 @@ import { TimelineRenderingType, type RoomContextType } from "../../../contexts/R
@@ -267,7 +268,7 @@ index abfe476d4e..7d8fe2de90 100644
  
  const openStickerPicker = async (): Promise<void> => {
      await userEvent.click(screen.getByLabelText("More options"));
-@@ -110,13 +111,13 @@ describe("MessageComposer", () => {
+@@ -112,13 +113,13 @@ describe("MessageComposer", () => {
          await flushPromises();
  
          // assert there is state persisted
@@ -323,7 +324,7 @@ index 44fe239ea5..b493b94871 100644
  
      private get voiceRecording(): VoiceMessageRecording | undefined {
 diff --git a/apps/web/src/components/views/rooms/SendMessageComposer.test.tsx b/apps/web/src/components/views/rooms/SendMessageComposer.test.tsx
-index 663bcd9b10..a37d783a88 100644
+index aade509fbd..323de24672 100644
 --- a/apps/web/src/components/views/rooms/SendMessageComposer.test.tsx
 +++ b/apps/web/src/components/views/rooms/SendMessageComposer.test.tsx
 @@ -33,6 +33,7 @@ import { MessageComposerUrlPreviewViewModel } from "../../../viewmodels/composer
@@ -343,7 +344,7 @@ index 663bcd9b10..a37d783a88 100644
              // Note: unlike Jest, Vitest's mockReset() on a spy restores call-through to the
              // original implementation rather than stubbing it out, so re-apply a no-op
              // implementation to avoid a stray real dispatch crashing the test worker later.
-@@ -237,11 +238,11 @@ describe("<SendMessageComposer/>", () => {
+@@ -238,11 +239,11 @@ describe("<SendMessageComposer/>", () => {
              const key = "mx_cider_state_myfakeroom";
  
              expect(container.textContent).toBe("Test Text");
@@ -357,7 +358,7 @@ index 663bcd9b10..a37d783a88 100644
                  parts: [{ type: "plain", text: "Test Text" }],
                  replyEventId: mockEvent.getId(),
              });
-@@ -257,7 +258,7 @@ describe("<SendMessageComposer/>", () => {
+@@ -258,7 +259,7 @@ describe("<SendMessageComposer/>", () => {
  
              // now try with localStorage wiped out
              unmount();
@@ -366,7 +367,7 @@ index 663bcd9b10..a37d783a88 100644
              ({ container } = getComponent(props));
              expect(container.textContent).toBe("");
          });
-@@ -275,7 +276,7 @@ describe("<SendMessageComposer/>", () => {
+@@ -276,7 +277,7 @@ describe("<SendMessageComposer/>", () => {
  
              // the replacement composer should persist the draft again when it unmounts
              unmount();
@@ -375,7 +376,7 @@ index 663bcd9b10..a37d783a88 100644
                  parts: [{ type: "plain", text: "Notes from call" }],
              });
          });
-@@ -288,11 +289,11 @@ describe("<SendMessageComposer/>", () => {
+@@ -289,11 +290,11 @@ describe("<SendMessageComposer/>", () => {
              const key = "mx_cider_state_myfakeroom";
  
              expect(container.textContent).toBe("Hello World");
@@ -389,7 +390,7 @@ index 663bcd9b10..a37d783a88 100644
                  parts: [{ type: "plain", text: "Hello World" }],
              });
          });
-@@ -314,7 +315,7 @@ describe("<SendMessageComposer/>", () => {
+@@ -315,7 +316,7 @@ describe("<SendMessageComposer/>", () => {
              });
  
              expect(container.textContent).toBe("");
@@ -659,18 +660,18 @@ index 0000000000..d86093a801
 +    }
 +}
 diff --git a/apps/web/src/utils/createMatrixClient.ts b/apps/web/src/utils/createMatrixClient.ts
-index 8c29633c96..14841788b2 100644
+index c5bb567b1e..074daed7ad 100644
 --- a/apps/web/src/utils/createMatrixClient.ts
 +++ b/apps/web/src/utils/createMatrixClient.ts
-@@ -13,7 +13,6 @@ import {
-     MemoryCryptoStore,
+@@ -11,7 +11,6 @@ import {
+     createClient,
+     type ICreateClientOpts,
      MemoryStore,
-     IndexedDBCryptoStore,
 -    IndexedDBStore,
-     LocalStorageCryptoStore,
      RoomNameType,
      type RoomNameState,
-@@ -23,7 +22,7 @@ import {
+     EventTimelineSet,
+@@ -20,7 +19,7 @@ import {
  import { VerificationMethod } from "matrix-js-sdk/src/types";
  import { logger } from "matrix-js-sdk/src/logger";
  
@@ -679,7 +680,7 @@ index 8c29633c96..14841788b2 100644
  import SettingsStore from "../settings/SettingsStore";
  import { crossSigningCallbacks } from "../SecurityManager";
  import IdentityAuthClient from "../IdentityAuthClient";
-@@ -180,14 +179,9 @@ export function createMatrixClient(opts: ICreateClientOpts): MatrixClient {
+@@ -176,14 +175,9 @@ export function createMatrixClient(opts: ICreateClientOpts): MatrixClient {
          useAuthorizationHeader: true,
      };
  
@@ -698,7 +699,7 @@ index 8c29633c96..14841788b2 100644
      }
  
 diff --git a/apps/web/src/vector/platform/ElectronPlatform.tsx b/apps/web/src/vector/platform/ElectronPlatform.tsx
-index bb9c8d2bdf..a880f22d6c 100644
+index 01a50f015f..542911cb21 100644
 --- a/apps/web/src/vector/platform/ElectronPlatform.tsx
 +++ b/apps/web/src/vector/platform/ElectronPlatform.tsx
 @@ -40,7 +40,6 @@ import { UPDATE_EVENT } from "../../stores/AsyncStore";
@@ -717,7 +718,7 @@ index bb9c8d2bdf..a880f22d6c 100644
      public readonly initialised: Promise<void>;
      private readonly electron: Electron;
      private protocol!: string;
-@@ -418,7 +416,8 @@ export default class ElectronPlatform extends BasePlatform {
+@@ -428,7 +426,8 @@ export default class ElectronPlatform extends BasePlatform {
      }
  
      public getEventIndexingManager(): BaseEventIndexManager | null {

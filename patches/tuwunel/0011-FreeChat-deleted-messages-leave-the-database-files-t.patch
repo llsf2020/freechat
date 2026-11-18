@@ -1,7 +1,7 @@
-From 100f4699e54cd765a29e53a4880cf402e2e872f8 Mon Sep 17 00:00:00 2001
+From cc97b4b6e230829e82eef3291b560b43b88d0bd8 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 11/16] FreeChat: deleted messages leave the database files too
+Subject: [PATCH 11/17] FreeChat: deleted messages leave the database files too
 
 No WAL archive; after messages are purged, all memtables are flushed and the
 event maps compacted all the way down, at most daily. There is no server-side
@@ -11,15 +11,15 @@ deleted messages in RocksDB's metadata.
  src/database/engine/db_opts.rs          |  5 +-
  src/service/rooms/disappearing/mod.rs   |  6 ++
  src/service/rooms/disappearing/scrub.rs | 94 +++++++++++++++++++++++++
- src/service/rooms/search/mod.rs         | 24 +++----
- 4 files changed, 116 insertions(+), 13 deletions(-)
+ src/service/rooms/search/mod.rs         | 22 +++---
+ 4 files changed, 115 insertions(+), 12 deletions(-)
  create mode 100644 src/service/rooms/disappearing/scrub.rs
 
 diff --git a/src/database/engine/db_opts.rs b/src/database/engine/db_opts.rs
-index fd07755e4..22ab69d1c 100644
+index 37e6b4106..60dc68cf3 100644
 --- a/src/database/engine/db_opts.rs
 +++ b/src/database/engine/db_opts.rs
-@@ -56,7 +56,10 @@ pub(crate) fn db_options(config: &Config, env: &Env, row_cache: &Cache) -> Resul
+@@ -57,7 +57,10 @@ pub(crate) fn db_options(config: &Config, env: &Env, row_cache: &Cache) -> Resul
  
  	// Files
  	opts.set_table_cache_num_shard_bits(7);
@@ -30,7 +30,7 @@ index fd07755e4..22ab69d1c 100644
 +	opts.set_wal_ttl_seconds(0);
  	opts.set_max_total_wal_size(1024 * 1024 * 512);
  	opts.set_writable_file_max_buffer_size(1024 * 1024 * 2);
- 	if !config.rocksdb_allow_fallocate {
+ 	if !config.rocksdb.allow_fallocate {
 diff --git a/src/service/rooms/disappearing/mod.rs b/src/service/rooms/disappearing/mod.rs
 index 3792bbf16..d1f6b6e2f 100644
 --- a/src/service/rooms/disappearing/mod.rs
@@ -184,19 +184,10 @@ index 000000000..4972d9c20
 +	info!("Scrubbed deleted messages from the database files");
 +}
 diff --git a/src/service/rooms/search/mod.rs b/src/service/rooms/search/mod.rs
-index 40a3119a0..17e3bcd1b 100644
+index f4fcd2acd..78bdfce78 100644
 --- a/src/service/rooms/search/mod.rs
 +++ b/src/service/rooms/search/mod.rs
-@@ -13,7 +13,7 @@
- 		stream::{TryIgnore, WidebandExt},
- 	},
- };
--use tuwunel_database::{Map, Txn, keyval::Val};
-+use tuwunel_database::{Map, keyval::Val};
- 
- use crate::rooms::{
- 	short::ShortRoomId,
-@@ -56,20 +56,18 @@ fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
+@@ -58,20 +58,18 @@ fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
  	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
  }
  
@@ -225,7 +216,7 @@ index 40a3119a0..17e3bcd1b 100644
  #[implement(Service)]
  pub fn deindex_pdu(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId, message_body: &str) {
  	let batch = tokenize(message_body).map(|word| {
-@@ -81,7 +79,9 @@ pub fn deindex_pdu(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId, message_b
+@@ -83,7 +81,9 @@ pub fn deindex_pdu(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId, message_b
  	});
  
  	for token in batch {

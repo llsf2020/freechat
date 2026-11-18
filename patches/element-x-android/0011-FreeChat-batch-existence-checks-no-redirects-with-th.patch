@@ -1,4 +1,4 @@
-From 3a3d036626edffd4a67030518cfb5265d5e09371 Mon Sep 17 00:00:00 2001
+From 8015d31aaade2f2af8fae8effe3fc2c17981b898 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
 Subject: [PATCH 11/23] FreeChat: batch existence checks, no redirects with the
@@ -136,10 +136,10 @@ index 4322db7036..6253070329 100644
      fun `describe - presets then largest whole unit`() {
          assertThat(Disappearing.describe(0)).isEqualTo(Disappearing.Duration.Off)
 diff --git a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt
-index f723f4601e..e172a437a9 100644
+index 6d9049c282..38ee05482c 100644
 --- a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt
 +++ b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt
-@@ -965,6 +965,8 @@ class RustMatrixClient(
+@@ -996,6 +996,8 @@ class RustMatrixClient(
                  connection.connectTimeout = 15_000
                  connection.readTimeout = 30_000
                  connection.useCaches = false

@@ -1,7 +1,7 @@
-From 1f2fb7080fc40b8f87a502874c3c8313a8e67ada Mon Sep 17 00:00:00 2001
+From 8c882a15812b188b32c3920396b971e1116dc99e Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 03/16] FreeChat: admin-only room TTL and personal
+Subject: [PATCH 03/17] FreeChat: admin-only room TTL and personal
  burn-after-read
 
 - Only power level 100 (or v12 creators) may set com.freechat.disappearing;
@@ -21,19 +21,19 @@ Subject: [PATCH 03/16] FreeChat: admin-only room TTL and personal
  create mode 100644 src/service/rooms/disappearing/read_burn.rs
 
 diff --git a/src/api/client/state.rs b/src/api/client/state.rs
-index 697747845..1cc422ad7 100644
+index 1ec57cc53..ed60ecf0c 100644
 --- a/src/api/client/state.rs
 +++ b/src/api/client/state.rs
 @@ -30,7 +30,7 @@
- 	result::NotFound,
- 	utils::{BoolExt, stream::TryBroadbandExt},
+ 	Event,
+ 	pdu::{PduBuilder, PduEvent},
  };
--use tuwunel_service::Services;
-+use tuwunel_service::{Services, rooms::disappearing};
+-use tuwunel_service::{Services, profile::check_member_content};
++use tuwunel_service::{Services, profile::check_member_content, rooms::disappearing};
  
- use crate::{Ruma, RumaResponse, client::with_membership};
+ use crate::{Ruma, RumaResponse, with_membership};
  
-@@ -301,6 +301,12 @@ async fn allowed_to_send_state_event(
+@@ -384,6 +384,12 @@ pub(crate) async fn allowed_to_send_state_event(
  			validate_canonical_alias(services, room_id, json).await,
  		| StateEventType::RoomMember =>
  			validate_member(services, sender, room_id, state_key, json, suspended).await,
@@ -47,10 +47,10 @@ index 697747845..1cc422ad7 100644
  	}
  }
 diff --git a/src/database/maps.rs b/src/database/maps.rs
-index 8a27adf3e..1c64d3bc4 100644
+index 0ffbba62c..40c06ea16 100644
 --- a/src/database/maps.rs
 +++ b/src/database/maps.rs
-@@ -184,6 +184,19 @@ pub(crate) fn descriptor(name: &str) -> &'static Descriptor {
+@@ -200,6 +200,19 @@ pub(crate) fn descriptor(name: &str) -> &'static Descriptor {
  		key_size_hint: Some(64),
  		..descriptor::SEQUENTIAL_SMALL
  	},
@@ -419,7 +419,7 @@ index 000000000..01e0a4e9d
 +		.map(PduId::from)
 +}
 diff --git a/src/service/rooms/read_receipt/mod.rs b/src/service/rooms/read_receipt/mod.rs
-index 19ebb43a8..f439151f0 100644
+index 3b5bd1388..96d887997 100644
 --- a/src/service/rooms/read_receipt/mod.rs
 +++ b/src/service/rooms/read_receipt/mod.rs
 @@ -107,6 +107,12 @@ pub async fn readreceipt_update(
@@ -435,7 +435,7 @@ index 19ebb43a8..f439151f0 100644
  		self.services
  			.sending
  			.send_edu_room_appservices(room_id, |buf| {
-@@ -386,7 +392,18 @@ pub fn readreceipts_since_fallible<'a>(
+@@ -396,7 +402,18 @@ pub fn readreceipts_since_fallible<'a>(
  	/// position at or behind the stored one writes nothing.
  	#[tracing::instrument(skip(self), level = "debug", name = "set_private")]
  	pub async fn private_read_set(&self, private_read: PrivateRead<'_>) -> bool {

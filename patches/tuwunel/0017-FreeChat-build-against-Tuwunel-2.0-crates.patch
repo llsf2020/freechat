@@ -1,0 +1,88 @@
+From 048ca85c04c232495fd0d0ee176cdc99e7981e48 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 00:00:00 +0000
+Subject: [PATCH 17/17] FreeChat: build against Tuwunel 2.0 crates
+
+Event, StateKey and the PDU types moved from tuwunel_core::matrix to the tuwunel_matrix crate.
+---
+ src/api/client/freechat.rs                    |  3 ++-
+ src/service/rooms/disappearing/event_media.rs |  3 ++-
+ src/service/rooms/disappearing/mod.rs         | 12 ++----------
+ src/service/rooms/disappearing/read_burn.rs   | 10 ++--------
+ 4 files changed, 8 insertions(+), 20 deletions(-)
+
+diff --git a/src/api/client/freechat.rs b/src/api/client/freechat.rs
+index 4f2e68c62..7f132878c 100644
+--- a/src/api/client/freechat.rs
++++ b/src/api/client/freechat.rs
+@@ -21,7 +21,8 @@
+ use ruma::{OwnedEventId, OwnedRoomId, OwnedUserId};
+ use serde::Deserialize;
+ use serde_json::json;
+-use tuwunel_core::{Err, Result, matrix::pdu::PduId};
++use tuwunel_core::{Err, Result};
++use tuwunel_matrix::pdu::PduId;
+ use tuwunel_service::registration_tokens::{TokenExpires, TokenInfo};
+ 
+ /// `GET /_matrix/client/unstable/com.freechat/rooms/{roomId}/join_password`
+diff --git a/src/service/rooms/disappearing/event_media.rs b/src/service/rooms/disappearing/event_media.rs
+index 99ba328a8..436159f33 100644
+--- a/src/service/rooms/disappearing/event_media.rs
++++ b/src/service/rooms/disappearing/event_media.rs
+@@ -13,8 +13,9 @@
+ 
+ use futures::StreamExt;
+ use ruma::{EventId, Mxc, OwnedEventId, OwnedUserId, RoomId, UserId};
+-use tuwunel_core::{Err, Result, debug_info, implement, matrix::event::Event};
++use tuwunel_core::{Err, Result, debug_info, implement};
+ use tuwunel_database::Interfix;
++use tuwunel_matrix::event::Event;
+ 
+ use super::{EXPIRES_AT_KEY, READ_TTL_KEY};
+ 
+diff --git a/src/service/rooms/disappearing/mod.rs b/src/service/rooms/disappearing/mod.rs
+index 0065ae5dc..8fce67668 100644
+--- a/src/service/rooms/disappearing/mod.rs
++++ b/src/service/rooms/disappearing/mod.rs
+@@ -46,17 +46,9 @@
+ 	int,
+ };
+ use serde::Deserialize;
+-use tuwunel_core::{
+-	Err, Result, debug, debug_info, implement,
+-	matrix::{
+-		StateKey,
+-		event::Event,
+-		pdu::{PduCount, PduEvent},
+-	},
+-	utils::{ReadyExt, time::now},
+-	warn,
+-};
++use tuwunel_core::{Err, Result, debug, debug_info, implement, utils::{ReadyExt, time::now}, warn};
+ use tuwunel_database::Map;
++use tuwunel_matrix::{StateKey, event::Event, pdu::{PduCount, PduEvent}};
+ 
+ /// State event type that configures a room's disappearing-message TTL.
+ pub const STATE_TYPE: &str = "com.freechat.disappearing";
+diff --git a/src/service/rooms/disappearing/read_burn.rs b/src/service/rooms/disappearing/read_burn.rs
+index d2e8528df..82ffd1ed1 100644
+--- a/src/service/rooms/disappearing/read_burn.rs
++++ b/src/service/rooms/disappearing/read_burn.rs
+@@ -19,15 +19,9 @@
+ };
+ use serde::Deserialize;
+ use serde_json::Value as JsonValue;
+-use tuwunel_core::{
+-	debug, implement,
+-	matrix::{
+-		event::Event,
+-		pdu::{PduCount, PduEvent, PduId, RawPduId},
+-	},
+-	utils::{ReadyExt, time::now},
+-};
++use tuwunel_core::{debug, implement, utils::{ReadyExt, time::now}};
+ use tuwunel_database::{Deserialized, Interfix};
++use tuwunel_matrix::{event::Event, pdu::{PduCount, PduEvent, PduId, RawPduId}};
+ 
+ use super::STATE_TYPE;
+ 

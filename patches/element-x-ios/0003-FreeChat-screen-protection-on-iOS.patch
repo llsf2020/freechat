@@ -1,4 +1,4 @@
-From ad59fd2e124dc8590a6f4ebf20c0447fa29673f1 Mon Sep 17 00:00:00 2001
+From 0b81124b322909d872bbadc5880ac181cea28810 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
 Subject: [PATCH 03/15] FreeChat: screen protection on iOS
@@ -145,10 +145,10 @@ index 000000000..3a745a506
 +    }
 +}
 diff --git a/ElementX/Sources/Screens/RoomScreen/RoomScreenCoordinator.swift b/ElementX/Sources/Screens/RoomScreen/RoomScreenCoordinator.swift
-index 86e9960b2..879a25afb 100644
+index addc18dfd..0bd3f317b 100644
 --- a/ElementX/Sources/Screens/RoomScreen/RoomScreenCoordinator.swift
 +++ b/ElementX/Sources/Screens/RoomScreen/RoomScreenCoordinator.swift
-@@ -57,6 +57,7 @@ final class RoomScreenCoordinator: CoordinatorProtocol {
+@@ -55,6 +55,7 @@ final class RoomScreenCoordinator: CoordinatorProtocol {
      private var composerViewModel: ComposerToolbarViewModelProtocol
      private let userSettings: UserSettings
      
@@ -156,7 +156,7 @@ index 86e9960b2..879a25afb 100644
      private var cancellables = Set<AnyCancellable>()
      
      private let actionsSubject: PassthroughSubject<RoomScreenCoordinatorAction, Never> = .init()
-@@ -65,6 +66,7 @@ final class RoomScreenCoordinator: CoordinatorProtocol {
+@@ -63,6 +64,7 @@ final class RoomScreenCoordinator: CoordinatorProtocol {
      }
      
      init(parameters: RoomScreenCoordinatorParameters) {
@@ -164,7 +164,7 @@ index 86e9960b2..879a25afb 100644
          userSettings = parameters.userSession.userSettings
          
          var selectedPinnedEventID: String?
-@@ -247,7 +249,8 @@ final class RoomScreenCoordinator: CoordinatorProtocol {
+@@ -240,7 +242,8 @@ final class RoomScreenCoordinator: CoordinatorProtocol {
          
          return AnyView(RoomScreen(context: roomViewModel.context,
                                    timelineContext: timelineViewModel.context,

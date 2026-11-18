@@ -1,4 +1,4 @@
-From 86b644d6471010b01c11004b82fd9b1aa81eccad Mon Sep 17 00:00:00 2001
+From 0922e707538b04aeb2cbdc822fe33d5d19d541b4 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 00:00:00 +0000
 Subject: [PATCH 12/15] FreeChat: show auto-delete changes in the timeline,
@@ -112,7 +112,7 @@ index aa55889db..3b9c06656 100644
      ]
  }
 diff --git a/ElementX/Sources/Services/Timeline/TimelineItems/RoomTimelineItemFactory.swift b/ElementX/Sources/Services/Timeline/TimelineItems/RoomTimelineItemFactory.swift
-index 6cc60ce46..a9a84b0dd 100644
+index 54f23027f..e67a27928 100644
 --- a/ElementX/Sources/Services/Timeline/TimelineItems/RoomTimelineItemFactory.swift
 +++ b/ElementX/Sources/Services/Timeline/TimelineItems/RoomTimelineItemFactory.swift
 @@ -916,6 +916,13 @@ nonisolated struct RoomTimelineItemFactory: RoomTimelineItemFactoryProtocol {

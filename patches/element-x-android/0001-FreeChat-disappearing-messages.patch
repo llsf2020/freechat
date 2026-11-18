@@ -1,4 +1,4 @@
-From 1d22663094c7e17ebb1f0c18fe591a0f1d70e540 Mon Sep 17 00:00:00 2001
+From a5fd12d8744dcae6b38aa1269ae3c4716c3e2203 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
 Subject: [PATCH 01/23] FreeChat: disappearing messages
@@ -13,7 +13,7 @@ Subject: [PATCH 01/23] FreeChat: disappearing messages
 - English, Simplified and Traditional Chinese strings in a separate
   freechat_strings.xml
 ---
- .../impl/timeline/TimelinePresenter.kt        |  10 +-
+ .../impl/timeline/TimelinePresenter.kt        |  11 +-
  .../timeline/freechat/HideExpiredMessages.kt  |  42 +++++++
  .../freechat/HideExpiredMessagesTest.kt       |  50 ++++++++
  .../roomdetails/impl/RoomDetailsNode.kt       |   9 ++
@@ -30,7 +30,7 @@ Subject: [PATCH 01/23] FreeChat: disappearing messages
  .../res/values-zh-rTW/freechat_strings.xml    |  31 +++++
  .../main/res/values-zh/freechat_strings.xml   |  31 +++++
  .../src/main/res/values/freechat_strings.xml  |  36 ++++++
- 17 files changed, 718 insertions(+), 1 deletion(-)
+ 17 files changed, 719 insertions(+), 1 deletion(-)
  create mode 100644 features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideExpiredMessages.kt
  create mode 100644 features/messages/impl/src/test/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideExpiredMessagesTest.kt
  create mode 100644 features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/freechat/DisappearingMessagesPresenter.kt
@@ -44,10 +44,10 @@ Subject: [PATCH 01/23] FreeChat: disappearing messages
  create mode 100644 libraries/ui-strings/src/main/res/values/freechat_strings.xml
 
 diff --git a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenter.kt b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenter.kt
-index 1888864311..8c9eab9d5b 100644
+index 263c56709b..389ea0b8ed 100644
 --- a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenter.kt
 +++ b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/TimelinePresenter.kt
-@@ -31,6 +31,7 @@ import io.element.android.features.messages.impl.crypto.sendfailure.resolve.Reso
+@@ -33,6 +33,7 @@ import io.element.android.features.messages.impl.crypto.sendfailure.resolve.Reso
  import io.element.android.features.messages.impl.timeline.components.MessageShieldData
  import io.element.android.features.messages.impl.timeline.factories.TimelineItemsFactory
  import io.element.android.features.messages.impl.timeline.factories.TimelineItemsFactoryConfig
@@ -55,7 +55,7 @@ index 1888864311..8c9eab9d5b 100644
  import io.element.android.features.messages.impl.timeline.model.NewEventState
  import io.element.android.features.messages.impl.timeline.model.TimelineItem
  import io.element.android.features.messages.impl.timeline.model.virtual.TimelineItemReadMarkerModel
-@@ -56,6 +57,7 @@ import io.element.android.libraries.featureflag.api.FeatureFlags
+@@ -58,6 +59,7 @@ import io.element.android.libraries.featureflag.api.FeatureFlags
  import io.element.android.libraries.matrix.api.core.EventId
  import io.element.android.libraries.matrix.api.core.UniqueId
  import io.element.android.libraries.matrix.api.core.asEventId
@@ -63,7 +63,14 @@ index 1888864311..8c9eab9d5b 100644
  import io.element.android.libraries.matrix.api.room.JoinedRoom
  import io.element.android.libraries.matrix.api.room.powerlevels.permissionsAsState
  import io.element.android.libraries.matrix.api.room.roomMembers
-@@ -85,6 +87,7 @@ import kotlinx.coroutines.flow.flowOn
+@@ -80,12 +82,14 @@ import kotlinx.collections.immutable.toImmutableList
+ import kotlinx.collections.immutable.toImmutableSet
+ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.delay
++import kotlinx.coroutines.flow.combine
+ import kotlinx.coroutines.flow.filter
+ import kotlinx.coroutines.flow.first
+ import kotlinx.coroutines.flow.flowOn
  import kotlinx.coroutines.flow.launchIn
  import kotlinx.coroutines.flow.map
  import kotlinx.coroutines.flow.onEach
@@ -71,7 +78,7 @@ index 1888864311..8c9eab9d5b 100644
  import kotlinx.coroutines.launch
  import kotlinx.coroutines.withContext
  import timber.log.Timber
-@@ -370,7 +373,12 @@ class TimelinePresenter(
+@@ -384,7 +388,12 @@ class TimelinePresenter(
          }
  
          LaunchedEffect(Unit) {
@@ -82,9 +89,9 @@ index 1888864311..8c9eab9d5b 100644
 +                room.stateEventContentFlow(Disappearing.STATE_TYPE).map(Disappearing::ttlFromContent).onStart { emit(0L) },
 +                ::hideExpiredMessages,
 +            )
-                 .onEach { newTimelineItems ->
-                     timelineItemIndexer.process(newTimelineItems)
-                     timelineItems = newTimelineItems.toImmutableList()
+                 .map { newTimelineItems ->
+                     newTimelineItems.toImmutableList() to timelineItemIndexer.process(newTimelineItems)
+                 }
 diff --git a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideExpiredMessages.kt b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/timeline/freechat/HideExpiredMessages.kt
 new file mode 100644
 index 0000000000..b323f69196
@@ -190,27 +197,27 @@ index 0000000000..ae1b584cc1
 +    }
 +}
 diff --git a/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/RoomDetailsNode.kt b/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/RoomDetailsNode.kt
-index dd1c10ae82..e04613429d 100644
+index 7f22c7e111..e759f5f08f 100644
 --- a/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/RoomDetailsNode.kt
 +++ b/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/RoomDetailsNode.kt
-@@ -25,6 +25,8 @@ import im.vector.app.features.analytics.plan.MobileScreen
+@@ -24,6 +24,8 @@ import dev.zacsweers.metro.AssistedInject
+ import im.vector.app.features.analytics.plan.MobileScreen
  import io.element.android.annotations.ContributesNode
  import io.element.android.features.leaveroom.api.LeaveRoomRenderer
- import io.element.android.features.roomdetails.api.RoomDetailsExtension
 +import io.element.android.features.roomdetails.impl.freechat.DisappearingMessagesItem
 +import io.element.android.features.roomdetails.impl.freechat.DisappearingMessagesPresenter
  import io.element.android.libraries.androidutils.system.startSharePlainTextIntent
  import io.element.android.libraries.architecture.appyx.launchMolecule
  import io.element.android.libraries.architecture.callback
-@@ -48,6 +50,7 @@ class RoomDetailsNode(
+@@ -46,6 +48,7 @@ class RoomDetailsNode(
+     private val room: BaseRoom,
      private val analyticsService: AnalyticsService,
      private val leaveRoomRenderer: LeaveRoomRenderer,
-     private val roomDetailsExtension: RoomDetailsExtension,
 +    disappearingMessagesPresenter: DisappearingMessagesPresenter, // FreeChat
  ) : Node(buildContext, plugins = plugins), RoomDetailsNavigator {
      interface Callback : Plugin {
          fun navigateBack()
-@@ -95,6 +98,7 @@ class RoomDetailsNode(
+@@ -93,6 +96,7 @@ class RoomDetailsNode(
      }
  
      private val stateFlow = launchMolecule { presenter.present() }
@@ -218,7 +225,7 @@ index dd1c10ae82..e04613429d 100644
  
      fun onNewOwnersSelected() {
          stateFlow.value.eventSink(RoomDetailsEvent.LeaveRoom(needsConfirmation = false))
-@@ -140,6 +144,11 @@ class RoomDetailsNode(
+@@ -137,6 +141,11 @@ class RoomDetailsNode(
              onSecurityAndPrivacyClick = callback::navigateToSecurityAndPrivacy,
              onProfileClick = callback::navigateToRoomMemberDetails,
              onReportRoomClick = callback::navigateToReportRoom,
@@ -231,18 +238,18 @@ index dd1c10ae82..e04613429d 100644
                  leaveRoomRenderer.Render(
                      state = state.leaveRoomState,
 diff --git a/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/RoomDetailsView.kt b/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/RoomDetailsView.kt
-index 626977007e..48309d5a3b 100644
+index 9a720ba044..99c687ec57 100644
 --- a/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/RoomDetailsView.kt
 +++ b/features/roomdetails/impl/src/main/kotlin/io/element/android/features/roomdetails/impl/RoomDetailsView.kt
-@@ -123,6 +123,7 @@ fun RoomDetailsView(
+@@ -122,6 +122,7 @@ fun RoomDetailsView(
+     onProfileClick: (UserId) -> Unit,
      onReportRoomClick: () -> Unit,
      modifier: Modifier = Modifier,
-     additionalSections: @Composable ColumnScope.() -> Unit = {},
 +    disappearingMessagesView: @Composable () -> Unit = {}, // FreeChat
      leaveRoomView: @Composable () -> Unit,
  ) {
      val snackbarHostState = rememberSnackbarHostState(snackbarMessage = state.snackbarMessage)
-@@ -311,6 +312,7 @@ fun RoomDetailsView(
+@@ -308,6 +309,7 @@ fun RoomDetailsView(
                          onClick = onSecurityAndPrivacyClick
                      )
                  }
@@ -807,7 +814,7 @@ index 0000000000..855b7daa2b
 +    }
 +}
 diff --git a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/room/JoinedRustRoom.kt b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/room/JoinedRustRoom.kt
-index 3be63f4f97..099f92d904 100644
+index 01cefa24f9..34fb51859c 100644
 --- a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/room/JoinedRustRoom.kt
 +++ b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/room/JoinedRustRoom.kt
 @@ -78,6 +78,8 @@ import org.matrix.rustcomponents.sdk.KnockRequestsListener

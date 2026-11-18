@@ -1,4 +1,4 @@
-From 48bda7fa2154417ba49d8ed5c9bf4ddb6b5ef00d Mon Sep 17 00:00:00 2001
+From bc05f7d2a2f88bd1851af063d9fe0fb6774e72a3 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Sat, 24 Oct 2026 00:00:00 +0000
 Subject: [PATCH 20/23] FreeChat: new messages without a push app
@@ -60,10 +60,10 @@ checks, which have no pusher.
  create mode 100644 libraries/pushproviders/unifiedpush/src/test/kotlin/io/element/android/libraries/pushproviders/unifiedpush/freechat/NtfyStreamTest.kt
 
 diff --git a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/MatrixClient.kt b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/MatrixClient.kt
-index 3b8172a4e8..8d02065911 100644
+index 6ab15d565d..5641fe6f06 100644
 --- a/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/MatrixClient.kt
 +++ b/libraries/matrix/api/src/main/kotlin/io/element/android/libraries/matrix/api/MatrixClient.kt
-@@ -526,6 +526,13 @@ interface MatrixClient : ClientUrlContentFetcher {
+@@ -520,6 +520,13 @@ interface MatrixClient : ClientUrlContentFetcher {
      suspend fun freechatRequest(method: String, path: String, jsonBody: String?): Result<String> =
          Result.failure(UnsupportedOperationException("freechatRequest"))
  
@@ -78,10 +78,10 @@ index 3b8172a4e8..8d02065911 100644
       * FreeChat: erases events from this device only, without telling the server (disappearing messages the server
       * has already deleted). In the Rust SDK's event cache, in memory and on disk, each event and its edits and
 diff --git a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt
-index 451fdc4d3b..7229268688 100644
+index 95061df732..42710b23cf 100644
 --- a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt
 +++ b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClient.kt
-@@ -963,9 +963,13 @@ class RustMatrixClient(
+@@ -994,9 +994,13 @@ class RustMatrixClient(
      }
  
      // FreeChat: homeserver extensions. Plain HttpURLConnection keeps the module free of new dependencies.
@@ -98,19 +98,19 @@ index 451fdc4d3b..7229268688 100644
              try {
                  connection.requestMethod = method
 diff --git a/libraries/matrix/test/src/main/kotlin/io/element/android/libraries/matrix/test/FakeMatrixClient.kt b/libraries/matrix/test/src/main/kotlin/io/element/android/libraries/matrix/test/FakeMatrixClient.kt
-index b864daefcc..9aed99cc42 100644
+index 7f5611d610..bd68b3c105 100644
 --- a/libraries/matrix/test/src/main/kotlin/io/element/android/libraries/matrix/test/FakeMatrixClient.kt
 +++ b/libraries/matrix/test/src/main/kotlin/io/element/android/libraries/matrix/test/FakeMatrixClient.kt
-@@ -140,6 +140,8 @@ class FakeMatrixClient(
+@@ -138,6 +138,8 @@ class FakeMatrixClient(
      private val enableAutomaticCallStatusLambda: (Boolean) -> Unit = { },
      override val contentScanner: ContentScanner? = null,
      private val isShuttingDownResult: () -> Boolean = { false },
 +    // FreeChat
 +    private val clientApiRequestLambda: (String, String, String?) -> Result<String> = { _, _, _ -> lambdaError() },
  ) : MatrixClient {
+     override val totalUnreadCountFlow = MutableStateFlow(0L)
      var setDisplayNameCalled: Boolean = false
-         private set
-@@ -466,6 +468,10 @@ class FakeMatrixClient(
+@@ -468,6 +470,10 @@ class FakeMatrixClient(
          return resetWellKnownConfigLambda()
      }
  

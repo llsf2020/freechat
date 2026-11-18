@@ -1,4 +1,4 @@
-From 61a757a9539f00380145c2fdfbc8f3e9db6c7bbc Mon Sep 17 00:00:00 2001
+From 36db7155974cd94ed633ff0d285d1da595d1584e Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 00:00:00 +0000
 Subject: [PATCH 16/23] FreeChat: sync from scratch at every start
@@ -11,10 +11,10 @@ event cache is dropped at start.
  1 file changed, 4 insertions(+), 1 deletion(-)
 
 diff --git a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClientFactory.kt b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClientFactory.kt
-index ece2120cb1..b2b06cb179 100644
+index 39eba1f625..5e953d4c92 100644
 --- a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClientFactory.kt
 +++ b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClientFactory.kt
-@@ -131,8 +131,11 @@ class RustMatrixClientFactory(
+@@ -132,8 +132,11 @@ class RustMatrixClientFactory(
  
          client.setUtdDelegate(UtdTracker(analyticsService))
  

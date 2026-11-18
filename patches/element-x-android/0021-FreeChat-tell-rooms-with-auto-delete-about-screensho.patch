@@ -1,4 +1,4 @@
-From 06c20d44e3e646401bffb43ca3f5fda73488b2af Mon Sep 17 00:00:00 2001
+From 085cdf04e5875914d9bd790d884b5560fb7a70a3 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Tue, 03 Nov 2026 00:00:00 +0000
 Subject: [PATCH 21/23] FreeChat: tell rooms with auto-delete about screenshots
@@ -28,7 +28,7 @@ room's own screenshot blocking was missing there.
  create mode 100644 libraries/matrixui/src/main/kotlin/io/element/android/libraries/matrix/ui/freechat/ScreenCaptureEffect.kt
 
 diff --git a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/MessagesNode.kt b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/MessagesNode.kt
-index d9f28a4834..9bd1be7159 100644
+index 8c6e315608..fa395e030a 100644
 --- a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/MessagesNode.kt
 +++ b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/MessagesNode.kt
 @@ -15,10 +15,8 @@ import androidx.activity.compose.LocalActivity
@@ -42,7 +42,7 @@ index d9f28a4834..9bd1be7159 100644
  import androidx.compose.runtime.saveable.rememberSaveable
  import androidx.compose.runtime.setValue
  import androidx.compose.ui.Modifier
-@@ -44,6 +42,8 @@ import io.element.android.features.messages.impl.timeline.components.customreact
+@@ -45,6 +43,8 @@ import io.element.android.features.messages.impl.timeline.components.customreact
  import io.element.android.features.messages.impl.timeline.di.LocalTimelineItemPresenterFactories
  import io.element.android.features.messages.impl.timeline.di.TimelineItemPresenterFactories
  import io.element.android.features.messages.impl.timeline.model.TimelineItem
@@ -59,15 +59,15 @@ index d9f28a4834..9bd1be7159 100644
  import io.element.android.libraries.matrix.api.permalink.PermalinkData
  import io.element.android.libraries.matrix.api.permalink.PermalinkParser
  import io.element.android.libraries.matrix.api.room.JoinedRoom
-@@ -74,7 +73,6 @@ import io.element.android.libraries.matrix.api.timeline.Timeline
- import io.element.android.libraries.matrix.api.timeline.TimelineProvider
+@@ -73,7 +72,6 @@ import io.element.android.libraries.matrix.api.room.alias.matches
+ import io.element.android.libraries.matrix.api.timeline.Timeline
  import io.element.android.libraries.matrix.api.timeline.item.TimelineItemDebugInfo
  import io.element.android.libraries.matrix.ui.freechat.ScreenshotPolicy
 -import io.element.android.libraries.matrix.ui.freechat.SecureWindowEffect
  import io.element.android.libraries.matrix.ui.media.contentvalidation.EventContentValidationCache
  import io.element.android.libraries.matrix.ui.media.contentvalidation.LocalEventContentValidationState
  import io.element.android.libraries.matrix.ui.model.getBestName
-@@ -88,7 +86,6 @@ import io.element.android.services.analytics.api.finishLongRunningTransaction
+@@ -86,7 +84,6 @@ import io.element.android.services.analytics.api.finishLongRunningTransaction
  import kotlinx.collections.immutable.ImmutableList
  import kotlinx.collections.immutable.toImmutableList
  import kotlinx.coroutines.CoroutineScope
@@ -75,15 +75,15 @@ index d9f28a4834..9bd1be7159 100644
  import kotlinx.coroutines.launch
  
  @ContributesNode(RoomScope::class)
-@@ -113,6 +110,7 @@ class MessagesNode(
+@@ -111,6 +108,7 @@ class MessagesNode(
      private val emojiPickerRenderer: EmojiPickerRenderer,
-     private val dispatchers: CoroutineDispatchers,
+     private val timelineController: TimelineController,
      private val screenshotPolicy: ScreenshotPolicy, // FreeChat
 +    private val screenshotAlerts: ScreenshotAlerts, // FreeChat
- ) : Node(buildContext, plugins = plugins), MessagesNavigator {
+ ) : Node(buildContext, plugins = plugins), MessagesNavigator, TimelineSelectionOwner {
      data class Inputs(
          val focusedEventId: EventId?,
-@@ -280,12 +278,7 @@ class MessagesNode(
+@@ -277,12 +275,7 @@ class MessagesNode(
          val activity = requireNotNull(LocalActivity.current)
          val isDark = ElementTheme.isLightTheme.not()
          val canUseOverlay = !isTalkbackActive() && !hasExternalKeyboard()
@@ -98,10 +98,10 @@ index d9f28a4834..9bd1be7159 100644
              LocalTimelineItemPresenterFactories provides timelineItemPresenterFactories,
              LocalEventContentValidationState provides eventContentValidationCache,
 diff --git a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/threads/ThreadedMessagesNode.kt b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/threads/ThreadedMessagesNode.kt
-index 851438ae5c..0a6e0ffb65 100644
+index 7e3f4fa13f..db045c466f 100644
 --- a/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/threads/ThreadedMessagesNode.kt
 +++ b/features/messages/impl/src/main/kotlin/io/element/android/features/messages/impl/threads/ThreadedMessagesNode.kt
-@@ -45,6 +45,8 @@ import io.element.android.features.messages.impl.timeline.components.customreact
+@@ -46,6 +46,8 @@ import io.element.android.features.messages.impl.timeline.components.customreact
  import io.element.android.features.messages.impl.timeline.di.LocalTimelineItemPresenterFactories
  import io.element.android.features.messages.impl.timeline.di.TimelineItemPresenterFactories
  import io.element.android.features.messages.impl.timeline.model.TimelineItem
@@ -124,10 +124,10 @@ index 851438ae5c..0a6e0ffb65 100644
      private val dispatchers: CoroutineDispatchers,
 +    private val screenshotPolicy: ScreenshotPolicy, // FreeChat
 +    private val screenshotAlerts: ScreenshotAlerts, // FreeChat
- ) : Node(buildContext, plugins = plugins), MessagesNavigator {
+ ) : Node(buildContext, plugins = plugins), MessagesNavigator, TimelineSelectionOwner {
      data class Inputs(
          val threadRootEventId: ThreadId,
-@@ -272,6 +277,7 @@ class ThreadedMessagesNode(
+@@ -286,6 +291,7 @@ class ThreadedMessagesNode(
          val activity = requireNotNull(LocalActivity.current)
          val isDark = ElementTheme.isLightTheme.not()
          val canUseOverlay = !isTalkbackActive() && !hasExternalKeyboard()

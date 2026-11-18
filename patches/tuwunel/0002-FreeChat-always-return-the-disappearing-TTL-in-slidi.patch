@@ -1,30 +1,31 @@
-From 43ed505deb9011d5acc995f2f7a3da3b885e330b Mon Sep 17 00:00:00 2001
+From 10d43173a11880cbcd754231fc3ed092d3615d86 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 02/16] FreeChat: always return the disappearing TTL in sliding
+Subject: [PATCH 02/17] FreeChat: always return the disappearing TTL in sliding
  sync
 
 matrix-rust-sdk clients (Element X) only store state their sync asked
 for and cannot request custom state types, so the server adds
 com.freechat.disappearing to every room's required_state.
 ---
- src/api/client/sync/v5/rooms.rs       |  5 ++++-
+ src/api/client/sync/v5/rooms.rs       |  6 ++++--
  src/service/rooms/disappearing/mod.rs | 12 +++++++++++-
- 2 files changed, 15 insertions(+), 2 deletions(-)
+ 2 files changed, 15 insertions(+), 3 deletions(-)
 
 diff --git a/src/api/client/sync/v5/rooms.rs b/src/api/client/sync/v5/rooms.rs
-index fc79dfaa1..e535b0c2d 100644
+index 49f438ffe..a8e42be5b 100644
 --- a/src/api/client/sync/v5/rooms.rs
 +++ b/src/api/client/sync/v5/rooms.rs
-@@ -42,6 +42,7 @@
+@@ -51,7 +51,7 @@
  };
  use tuwunel_service::{
  	Services,
-+	rooms::disappearing,
- 	sync::{RequiredState, Room, RoomConfig},
+-	rooms::short::ShortStateHash,
++	rooms::{disappearing, short::ShortStateHash},
+ 	sync::{RequiredState, Room, RoomConfig, UnreadState},
  };
  
-@@ -302,7 +303,9 @@ pub(super) fn merged_room_details(
+@@ -366,7 +366,9 @@ pub(super) fn merged_room_details(
  		.filter_map(|list_id| conn.lists.get(list_id))
  		.map(|list| &list.room_details)
  		.chain(conn.subscriptions.get(room_id))

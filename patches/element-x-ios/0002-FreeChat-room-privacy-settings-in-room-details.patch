@@ -1,4 +1,4 @@
-From 3c586f0105ccb1a8b6c0270375693ea57ff23df6 Mon Sep 17 00:00:00 2001
+From a48cda4e082c8bdf70ffc87dd3019c22467aa39a Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
 Subject: [PATCH 02/15] FreeChat: room privacy settings in room details
@@ -429,10 +429,10 @@ index 000000000..aa55889db
 +    ]
 +}
 diff --git a/ElementX/Sources/Screens/RoomDetailsScreen/RoomDetailsScreenCoordinator.swift b/ElementX/Sources/Screens/RoomDetailsScreen/RoomDetailsScreenCoordinator.swift
-index 8006c3d06..2e5c8c9cc 100644
+index 3819817a3..1043f08dc 100644
 --- a/ElementX/Sources/Screens/RoomDetailsScreen/RoomDetailsScreenCoordinator.swift
 +++ b/ElementX/Sources/Screens/RoomDetailsScreen/RoomDetailsScreenCoordinator.swift
-@@ -40,6 +40,7 @@ enum RoomDetailsScreenCoordinatorAction {
+@@ -39,6 +39,7 @@ enum RoomDetailsScreenCoordinatorAction {
  final class RoomDetailsScreenCoordinator: CoordinatorProtocol {
      private var viewModel: RoomDetailsScreenViewModelProtocol
      private let isSpace: Bool
@@ -440,7 +440,7 @@ index 8006c3d06..2e5c8c9cc 100644
      
      private let actionsSubject: PassthroughSubject<RoomDetailsScreenCoordinatorAction, Never> = .init()
      private var cancellables = Set<AnyCancellable>()
-@@ -50,6 +51,7 @@ final class RoomDetailsScreenCoordinator: CoordinatorProtocol {
+@@ -49,6 +50,7 @@ final class RoomDetailsScreenCoordinator: CoordinatorProtocol {
      
      init(parameters: RoomDetailsScreenCoordinatorParameters) {
          isSpace = parameters.roomProxy.infoPublisher.value.isSpace
@@ -448,7 +448,7 @@ index 8006c3d06..2e5c8c9cc 100644
          viewModel = RoomDetailsScreenViewModel(roomProxy: parameters.roomProxy,
                                                 userSession: parameters.userSession,
                                                 analyticsService: parameters.analyticsService,
-@@ -111,7 +113,7 @@ final class RoomDetailsScreenCoordinator: CoordinatorProtocol {
+@@ -108,7 +110,7 @@ final class RoomDetailsScreenCoordinator: CoordinatorProtocol {
          if isSpace {
              AnyView(SpaceSettingsScreen(context: viewModel.context))
          } else {
@@ -458,10 +458,10 @@ index 8006c3d06..2e5c8c9cc 100644
      }
  }
 diff --git a/ElementX/Sources/Screens/RoomDetailsScreen/View/RoomDetailsScreen.swift b/ElementX/Sources/Screens/RoomDetailsScreen/View/RoomDetailsScreen.swift
-index 7e3a78218..486a0859d 100644
+index def7d898e..6f6c5b5d2 100644
 --- a/ElementX/Sources/Screens/RoomDetailsScreen/View/RoomDetailsScreen.swift
 +++ b/ElementX/Sources/Screens/RoomDetailsScreen/View/RoomDetailsScreen.swift
-@@ -11,6 +11,7 @@ import SwiftUI
+@@ -12,6 +12,7 @@ import SwiftUI
  
  struct RoomDetailsScreen: View {
      @Bindable var context: RoomDetailsScreenViewModel.Context
@@ -469,7 +469,7 @@ index 7e3a78218..486a0859d 100644
      
      @State private var isTopicExpanded = false
      
-@@ -35,6 +36,10 @@ struct RoomDetailsScreen: View {
+@@ -36,6 +37,10 @@ struct RoomDetailsScreen: View {
              
              securitySection
              

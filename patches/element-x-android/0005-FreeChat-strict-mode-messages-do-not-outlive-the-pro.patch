@@ -1,4 +1,4 @@
-From 5eec680783b4b151becbb94bba799be781149887 Mon Sep 17 00:00:00 2001
+From 6ebe9028b05063c61b4a3af54410f768bd12e0f9 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
 Subject: [PATCH 05/23] FreeChat: strict mode; messages do not outlive the
@@ -597,7 +597,7 @@ index 0000000000..ffe5854f52
 +    suspend fun set(settings: StrictModeSettings)
 +}
 diff --git a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClientFactory.kt b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClientFactory.kt
-index b4fd42762f..ece2120cb1 100644
+index e86e51cc64..39eba1f625 100644
 --- a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClientFactory.kt
 +++ b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/RustMatrixClientFactory.kt
 @@ -91,6 +91,8 @@ class RustMatrixClientFactory(
@@ -609,7 +609,7 @@ index b4fd42762f..ece2120cb1 100644
          // Use a dedicated delegate for this client, so that an auth error only affects this session
          val sessionDelegate = createSessionDelegate()
          val client = getBaseClientBuilder(
-@@ -225,6 +227,19 @@ class RustMatrixClientFactory(
+@@ -229,6 +231,19 @@ class RustMatrixClientFactory(
      }
  }
  
@@ -630,7 +630,7 @@ index b4fd42762f..ece2120cb1 100644
   * Directory holding the local message search index, under the session's file directory.
   * Not the cache directory: the index is not disposable, and a cache wipe should not destroy it.
 diff --git a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationService.kt b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationService.kt
-index c3644eb959..77d7471547 100644
+index b06f0b5163..dc685787f3 100644
 --- a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationService.kt
 +++ b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationService.kt
 @@ -31,6 +31,9 @@ import io.element.android.libraries.matrix.api.auth.qrlogin.MatrixQrCodeLoginDat

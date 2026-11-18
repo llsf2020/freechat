@@ -1,4 +1,4 @@
-From 279aec8e02855a3a30d3f788bc50951f8a4ea76f Mon Sep 17 00:00:00 2001
+From 2d1915b1e8d2624076f69e39033e70ecd72a1c4d Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 00:00:00 +0000
 Subject: [PATCH 2/3] FreeChat: erase events locally
@@ -16,10 +16,10 @@ disappearing messages the server has already deleted.
  4 files changed, 197 insertions(+), 1 deletion(-)
 
 diff --git a/bindings/matrix-sdk-ffi/src/room/mod.rs b/bindings/matrix-sdk-ffi/src/room/mod.rs
-index c018a38a4..a66d209c8 100644
+index a2d603463..59ac3279d 100644
 --- a/bindings/matrix-sdk-ffi/src/room/mod.rs
 +++ b/bindings/matrix-sdk-ffi/src/room/mod.rs
-@@ -580,6 +580,24 @@ impl Room {
+@@ -603,6 +603,24 @@ impl Room {
          Ok(())
      }
  
@@ -45,10 +45,10 @@ index c018a38a4..a66d209c8 100644
          self.inner.active_members_count()
      }
 diff --git a/crates/matrix-sdk/src/event_cache/caches/room/mod.rs b/crates/matrix-sdk/src/event_cache/caches/room/mod.rs
-index 30344400c..f8e180a2d 100644
+index 3a5fda799..46420a9b3 100644
 --- a/crates/matrix-sdk/src/event_cache/caches/room/mod.rs
 +++ b/crates/matrix-sdk/src/event_cache/caches/room/mod.rs
-@@ -283,6 +283,27 @@ impl RoomEventCache {
+@@ -321,6 +321,27 @@ impl RoomEventCache {
          Ok(())
      }
  
@@ -77,10 +77,10 @@ index 30344400c..f8e180a2d 100644
      pub(in super::super) fn update_sender(&self) -> &RoomEventCacheUpdateSender {
          &self.inner.update_sender
 diff --git a/crates/matrix-sdk/src/event_cache/caches/room/state.rs b/crates/matrix-sdk/src/event_cache/caches/room/state.rs
-index bc056d3f2..06c7a914e 100644
+index d9cfd724c..1cc6479a0 100644
 --- a/crates/matrix-sdk/src/event_cache/caches/room/state.rs
 +++ b/crates/matrix-sdk/src/event_cache/caches/room/state.rs
-@@ -27,12 +27,13 @@ use matrix_sdk_base::{
+@@ -28,12 +28,13 @@ use matrix_sdk_base::{
  };
  use matrix_sdk_common::executor::spawn;
  use ruma::{
@@ -93,9 +93,9 @@ index bc056d3f2..06c7a914e 100644
      room_version_rules::RoomVersionRules,
 +    serde::Raw,
  };
- use tokio::sync::broadcast::Sender;
  use tracing::{debug, error, instrument, trace};
-@@ -722,6 +723,74 @@ impl<'a> StateLockWriteGuard<'a, RoomEventCacheState> {
+ 
+@@ -787,6 +788,74 @@ impl<'a> StateLockWriteGuard<'a, RoomEventCacheState> {
          Ok(())
      }
  
@@ -171,10 +171,10 @@ index bc056d3f2..06c7a914e 100644
      /// event in the chunk, and replace it by the redacted form.
      #[instrument(skip_all)]
 diff --git a/crates/matrix-sdk/tests/integration/event_cache/mod.rs b/crates/matrix-sdk/tests/integration/event_cache/mod.rs
-index 2c5cc5637..70b6a4c8a 100644
+index 1c50f7eb3..67ce290b4 100644
 --- a/crates/matrix-sdk/tests/integration/event_cache/mod.rs
 +++ b/crates/matrix-sdk/tests/integration/event_cache/mod.rs
-@@ -1311,6 +1311,94 @@ async fn test_dont_delete_gap_that_wasnt_inserted() {
+@@ -1312,6 +1312,94 @@ async fn test_dont_delete_gap_that_wasnt_inserted() {
      assert!(stream.is_empty());
  }
  

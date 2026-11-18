@@ -1,4 +1,4 @@
-From 85d933268c3e95c99410659244a45f7faf4f5109 Mon Sep 17 00:00:00 2001
+From e2c331ededf3c61b666add2238588c61cd95daad Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
 Subject: [PATCH 08/23] FreeChat: remove per-account data of sessions that no
@@ -19,18 +19,18 @@ for every account not in the session store.
  create mode 100644 libraries/pushstore/impl/src/test/kotlin/io/element/android/libraries/pushstore/impl/freechat/StaleSessionDataCleanerTest.kt
 
 diff --git a/app/src/main/kotlin/io/element/android/x/ElementXApplication.kt b/app/src/main/kotlin/io/element/android/x/ElementXApplication.kt
-index b39dc353fc..8f4087f93b 100644
+index 9120ee8061..eec05e554b 100644
 --- a/app/src/main/kotlin/io/element/android/x/ElementXApplication.kt
 +++ b/app/src/main/kotlin/io/element/android/x/ElementXApplication.kt
-@@ -25,6 +25,7 @@ import io.element.android.x.di.ApplicationBindings
+@@ -28,6 +28,7 @@ import io.element.android.x.di.ApplicationBindings
  import io.element.android.x.info.logApplicationInfo
  import io.element.android.x.initializer.CacheCleanerInitializer
  import io.element.android.x.initializer.CrashInitializer
 +import io.element.android.x.initializer.FreeChatCleanupInitializer
  import io.element.android.x.initializer.PlatformInitializer
  
- class ElementXApplication : Application(), DependencyInjectionGraphOwner, Configuration.Provider {
-@@ -46,6 +47,7 @@ class ElementXApplication : Application(), DependencyInjectionGraphOwner, Config
+ // The private constructor is there so the native call screen's host can be a delegate: Android instantiates
+@@ -58,6 +59,7 @@ class ElementXApplication private constructor(
              initializeComponent(CrashInitializer::class.java)
              initializeComponent(PlatformInitializer::class.java)
              initializeComponent(CacheCleanerInitializer::class.java)
