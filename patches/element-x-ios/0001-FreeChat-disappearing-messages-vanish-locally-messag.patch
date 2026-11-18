@@ -1,7 +1,7 @@
 From b8ddbbc75efd9e803c9329763ec3db389c7cbca1 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 01/15] FreeChat: disappearing messages vanish locally;
+Subject: [PATCH 01/16] FreeChat: disappearing messages vanish locally;
  messages stay off disk
 
 Expiry markers are honoured to the second and purged messages are dropped
