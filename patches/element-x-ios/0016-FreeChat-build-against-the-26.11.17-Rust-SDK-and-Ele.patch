@@ -1,0 +1,40 @@
+From 6b1a96af23d96b1769234861f2d5d0ca3ba48174 Mon Sep 17 00:00:00 2001
+From: sjcsf <346224915+llsf2020@users.noreply.github.com>
+Date: Wed, 18 Nov 2026 00:00:00 +0000
+Subject: [PATCH 16/16] FreeChat: build against the 26.11.17 Rust SDK and
+ Element X 26.11
+
+sendStateEventRaw gained requestConfigOverride; nil keeps the client defaults.
+The app coordinator state machine has no signOut event any more: strict mode
+signs out through logoutAllAccounts, which also logs out on the server.
+---
+ ElementX/Sources/Application/AppCoordinator.swift    | 2 +-
+ ElementX/Sources/Services/Room/JoinedRoomProxy.swift | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/ElementX/Sources/Application/AppCoordinator.swift b/ElementX/Sources/Application/AppCoordinator.swift
+index 30f625f2e..31dd50e5a 100644
+--- a/ElementX/Sources/Application/AppCoordinator.swift
++++ b/ElementX/Sources/Application/AppCoordinator.swift
+@@ -907,7 +907,7 @@ class AppCoordinator: AppCoordinatorProtocol, NotificationManagerDelegate, Secur
+            Date.now.timeIntervalSince(backgroundedAt) >= TimeInterval(FreeChatStrictMode.settings.idleMinutes * 60) {
+             MXLog.info("FreeChat: strict session idle in the background, signing out")
+             freechatBackgroundedAt = nil
+-            stateMachine.processEvent(.signOut(isSoft: false, disableAppLock: false))
++            Task { await logoutAllAccounts(disableAppLock: false) }
+             return
+         }
+         freechatBackgroundedAt = nil
+diff --git a/ElementX/Sources/Services/Room/JoinedRoomProxy.swift b/ElementX/Sources/Services/Room/JoinedRoomProxy.swift
+index 9fe2d4a64..4c3f2f32b 100644
+--- a/ElementX/Sources/Services/Room/JoinedRoomProxy.swift
++++ b/ElementX/Sources/Services/Room/JoinedRoomProxy.swift
+@@ -451,7 +451,7 @@ class JoinedRoomProxy: JoinedRoomProxyProtocol {
+     
+     func sendFreechatState(type: String, contentJSON: String) async -> Result<Void, RoomProxyError> {
+         do {
+-            _ = try await room.sendStateEventRaw(eventType: type, stateKey: "", content: contentJSON)
++            _ = try await room.sendStateEventRaw(eventType: type, stateKey: "", content: contentJSON, requestConfigOverride: nil)
+             return .success(())
+         } catch {
+             MXLog.error("FreeChat: failed sending \(type) state: \(error)")
