@@ -1,7 +1,7 @@
 From 8e87eaeb1f151fb96c66904c5094c0364a0aff46 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 05/14] FreeChat: delete disappearing messages locally from
+Subject: [PATCH 05/15] FreeChat: delete disappearing messages locally from
  server markers
 
 The server now purges expired messages without a redaction, so the client
