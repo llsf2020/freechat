@@ -23,7 +23,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 	cargo build --release --locked --bin tuwunel \
 	&& cp target/release/tuwunel /usr/local/bin/tuwunel
 
-FROM debian:trixie-slim@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0
+FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db
 # Security updates released after the base image was built.
 RUN apt-get update \
 	&& DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
