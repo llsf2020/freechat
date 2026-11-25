@@ -7,7 +7,8 @@
 #   images:   the images deploy/install.sh runs: freechat-server and freechat-web (latest on ghcr.io) and the
 #             pinned LiveKit, lk-jwt-service and ntfy images
 #   upstream: scripts/upstream.sh status (information only, never fails)
-# A scan job fails when it finds a known vulnerability, so GitHub emails about it. The findings are in the run
+# A scan job fails when it finds a known vulnerability that osv-scanner.toml does not accept (each accepted one
+# has a reason and a review date), so GitHub emails about it. The findings are in the run
 # summary and in the osv-* artifacts (JSON). Element Web's lockfile also covers build and test tools
 # (storybook, vite, ...) that never reach the browser, so check whether a finding is in the shipped app.
 # Runs every day, after changes to what is scanned, and by hand: gh workflow run security.yml
@@ -26,6 +27,7 @@ on:
       - patches/element-x-ios/**
       - docker/checkout.sh
       - deploy/install.sh
+      - osv-scanner.toml
       - .github/workflows/security.yml
   workflow_dispatch:
 
@@ -77,10 +79,10 @@ jobs:
               -L "$dir/ElementX.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved" ;;
           esac
           status=0
-          osv-scanner scan source --format json "$@" > "osv-$NAME.json" || status=$?
+          osv-scanner scan source --config osv-scanner.toml --format json "$@" > "osv-$NAME.json" || status=$?
           {
             echo "## $NAME ($(awk -v n="$NAME" '$1 == n && $0 !~ /^#/ { print $3 }' upstream.conf))"
-            osv-scanner scan source --format markdown "$@" || true
+            osv-scanner scan source --config osv-scanner.toml --format markdown "$@" || true
           } >> "$GITHUB_STEP_SUMMARY"
           # 0: nothing found, 1: vulnerabilities found, anything else: the scan itself failed
           case "$status" in
@@ -138,10 +140,10 @@ jobs:
               echo "::error::could not pull $image"; failed="$failed $image"; continue
             fi
             status=0
-            osv-scanner scan image --format json "$image" > "$file" || status=$?
+            osv-scanner scan image --config osv-scanner.toml --format json "$image" > "$file" || status=$?
             {
               echo "## ${image%%@*}"
-              osv-scanner scan image --format markdown "$image" || true
+              osv-scanner scan image --config osv-scanner.toml --format markdown "$image" || true
             } >> "$GITHUB_STEP_SUMMARY"
             case "$status" in
               0) ;;

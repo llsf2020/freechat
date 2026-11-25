@@ -1,0 +1,49 @@
+# Advisories the daily scan (.github/workflows/security.yml) accepts, so that it fails only on new ones.
+# Every entry needs a reason and expires on its review date: after ignoreUntil the advisory counts again,
+# and the scan fails until someone looks at it again and moves the date or fixes it.
+# Only advisories with no fixed version, or that do not reach what FreeChat ships, belong here.
+
+# Rust crates that are no longer maintained. They have no known vulnerability and no fixed release;
+# upstream accepts them too (matrix-rust-sdk .deny.toml, tuwunel .cargo/audit.toml).
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0449"
+ignoreUntil = 2027-02-25
+reason = "unsafe-libyaml is unmaintained, no fix; Tuwunel (serde_yaml) reads only its own config with it. Tuwunel ignores it."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0215"
+ignoreUntil = 2027-02-25
+reason = "smallstr is unmaintained, no fix; no known vulnerability. Tuwunel ignores it."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0542"
+ignoreUntil = 2027-02-25
+reason = "humantime is unmaintained, no fix; no known vulnerability. Used by Tuwunel to parse durations in its config."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0543"
+ignoreUntil = 2027-02-25
+reason = "chrono is unmaintained, no fix; no known vulnerability. Used by Tuwunel and the Rust SDK through their dependencies."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0388"
+ignoreUntil = 2027-02-25
+reason = "derivative is unmaintained, no fix; a compile-time derive macro in the Rust SDK. matrix-rust-sdk ignores it."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0374"
+ignoreUntil = 2027-02-25
+reason = "basic-toml is unmaintained, no fix; build-time only in the Rust SDK. matrix-rust-sdk ignores it."
+
+# Element Web
+
+[[IgnoredVulns]]
+id = "GHSA-2488-w585-72ch"
+ignoreUntil = 2027-02-25
+reason = "counterpart prototype pollution, no fixed release. Element Web feeds it only its own bundled translations, never user input."
+
+[[IgnoredVulns]]
+id = "GHSA-848j-6mx2-7j84"
+ignoreUntil = 2027-02-25
+reason = "elliptic, no fixed release. Reaches the lockfile only through vite-plugin-node-polyfills (crypto-browserify); the builds polyfill only events and util, so it is not in the web app."
