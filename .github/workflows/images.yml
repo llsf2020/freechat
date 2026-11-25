@@ -30,8 +30,10 @@ permissions:
   contents: read
   packages: write
 
+# One queue per branch: each branch publishes its own tags, and GitHub keeps only one waiting run per
+# group, so a shared group would drop one variant's run when another variant's run is queued.
 concurrency:
-  group: images
+  group: images-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
