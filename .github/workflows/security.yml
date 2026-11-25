@@ -136,7 +136,8 @@ jobs:
           done
           failed=""
           for image in $images; do
-            file="osv-image-$(printf '%s' "${image%%[@:]*}" | tr '/' '-').json"
+            # name and tag (without the digest): several tags of one image get a file each
+            file="osv-image-$(printf '%s' "${image%%@*}" | tr '/:' '--').json"
             if ! docker pull --quiet "$image"; then
               echo "::error::could not pull $image"; failed="$failed $image"; continue
             fi
