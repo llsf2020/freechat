@@ -29,4 +29,6 @@ COPY docker/check-csp.py deploy/install.sh /freechat/csp/
 RUN python3 /freechat/csp/check-csp.py apps/web/webapp /freechat/csp/install.sh
 
 FROM caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
+# Security updates released after the base image was built.
+RUN apk upgrade --no-cache
 COPY --from=build /src/apps/web/webapp /srv/web

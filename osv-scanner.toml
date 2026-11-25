@@ -47,3 +47,21 @@ reason = "counterpart prototype pollution, no fixed release. Element Web feeds i
 id = "GHSA-848j-6mx2-7j84"
 ignoreUntil = 2027-02-25
 reason = "elliptic, no fixed release. Reaches the lockfile only through vite-plugin-node-polyfills (crypto-browserify); the builds polyfill only events and util, so it is not in the web app."
+
+# Element Web build and test tools. Fixed only in new major versions that the tools using them do not
+# support yet; none of them is in the web app (they read files or parse CSV on the build machine).
+
+[[IgnoredVulns]]
+id = "GHSA-3g3m-2fjr-6pw4"
+ignoreUntil = 2026-12-25
+reason = "glob, fixed in 14 only. Used by build tools (Electron packaging, rimraf, Sentry bundler plugin, Storybook); not in the web app."
+
+[[IgnoredVulns]]
+id = "GHSA-g3hv-75wg-m249"
+ignoreUntil = 2026-12-25
+reason = "minimatch, fixed in 11 only. Used by build and lint tools (ESLint, nx, Electron builder, API extractor); not in the web app."
+
+[[IgnoredVulns]]
+id = "GHSA-8cw4-87c7-c6xx"
+ignoreUntil = 2026-12-25
+reason = "csv-parse, fixed in 7 only. Used by the nx container tooling on the build machine; not in the web app."

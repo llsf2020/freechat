@@ -20,7 +20,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 	&& cp target/release/tuwunel /usr/local/bin/tuwunel
 
 FROM debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e
+# Security updates released after the base image was built.
 RUN apt-get update \
+	&& apt-get upgrade -y \
 	&& apt-get install -y --no-install-recommends liburing2 ca-certificates \
 	&& rm -rf /var/lib/apt/lists/* \
 	&& useradd --system --uid 10001 --home-dir /var/lib/tuwunel tuwunel \
