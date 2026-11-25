@@ -19,7 +19,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 	cargo build --release --locked --bin tuwunel \
 	&& cp target/release/tuwunel /usr/local/bin/tuwunel
 
-FROM debian:bookworm-slim@sha256:7ff6ba31527b9e336162fa061746c366c4b2032f4d2cff2078bea43f78efe3f8
+FROM debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends liburing2 ca-certificates \
 	&& rm -rf /var/lib/apt/lists/* \

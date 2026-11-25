@@ -6,7 +6,7 @@
 # config.json at /srv/web/config.json.
 
 # The static build is architecture independent, so it runs natively on the builder.
-FROM --platform=$BUILDPLATFORM node:24-bookworm@sha256:14078204b6bb268c107ceff6d3c43f45a888105e5c2b18b14c32b3409d93a1b0 AS build
+FROM --platform=$BUILDPLATFORM node:24-bookworm@sha256:49f7adaf9f1574bc45c20ea317139b39a59d7e758d0e93745e112fd85cb42623 AS build
 RUN corepack enable \
 	&& apt-get update && apt-get install -y --no-install-recommends python3-pil \
 	&& rm -rf /var/lib/apt/lists/*
@@ -28,5 +28,5 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
 COPY docker/check-csp.py deploy/install.sh /freechat/csp/
 RUN python3 /freechat/csp/check-csp.py apps/web/webapp /freechat/csp/install.sh
 
-FROM caddy:2.11.7-alpine@sha256:d8542f48d34a9cf4e4c11a478865229840e87e4c96ea3f439101f31a5d35f75f
+FROM caddy:2.11.9-alpine@sha256:003a97808e781aa9f7e75cc2f43d34d461099031faf5e20faefb9f61126836f0
 COPY --from=build /src/apps/web/webapp /srv/web

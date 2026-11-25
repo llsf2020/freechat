@@ -34,7 +34,7 @@ DIR=/opt/freechat
 # Pinned to the multi-arch index digest so a moved tag cannot change what runs.
 LIVEKIT_IMAGE=livekit/livekit-server:v1.13.11@sha256:25cd902de7cacbd5f1f779f6a6ac1eae20ba8f56b0935934ce6b0ab80d1e3d20
 JWT_IMAGE=ghcr.io/element-hq/lk-jwt-service:0.10.0@sha256:b821befeb148929825f1a9059253d9faa0764991f45c07a91db5ad21a81c2dde
-NTFY_IMAGE=binwiederhier/ntfy:v2.38.1@sha256:038da2be5e668fee6d36a62884eea48975e1b71c29a56964e5298c1b9165a573
+NTFY_IMAGE=binwiederhier/ntfy:v2.38.2@sha256:ca35419d29a834824db2440fa9320897fbe40b026c5fc2360c76ed3501b5e716
 RTC_TCP_PORT=7881
 RTC_UDP_START=50100
 RTC_UDP_END=50200
