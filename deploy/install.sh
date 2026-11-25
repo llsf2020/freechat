@@ -22,6 +22,8 @@
 #                            run `freechat unlock` and type the passphrase. It is never stored on the server.
 #   --owner NAME             GitHub owner of the images (default: the one this script came from)
 #   --tag TAG                image tag to install (default: latest)
+#   --server-tag TAG         homeserver image tag only: ubuntu24.04 or ubuntu26.04 for the same server on Ubuntu
+#                            instead of Debian 13 (default: the --tag value; kept on upgrades)
 #   --server-image IMAGE     override the homeserver image
 #   --web-image IMAGE        override the web image
 #
@@ -40,7 +42,7 @@ RTC_UDP_START=50100
 RTC_UDP_END=50200
 TURN_UDP_PORT=3478
 
-DOMAIN="" EMAIL="" ASSUME_YES=0 LOCAL=0 TAG=latest SERVER_IMAGE="" WEB_IMAGE="" ENCRYPT=0 VAULT_SIZE=8G REGISTRY_USER="" RETENTION="" BRAND=FreeChat
+DOMAIN="" EMAIL="" ASSUME_YES=0 LOCAL=0 TAG=latest SERVER_TAG="" SERVER_IMAGE="" WEB_IMAGE="" ENCRYPT=0 VAULT_SIZE=8G REGISTRY_USER="" RETENTION="" BRAND=FreeChat
 
 say() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
@@ -77,14 +79,17 @@ parse_args() {
 			--encrypt-data=*) ENCRYPT=1; VAULT_SIZE="${1#*=}"; shift ;;
 			--owner) FREECHAT_OWNER="$2"; shift 2 ;;
 			--tag) TAG="$2"; shift 2 ;;
+			--server-tag) SERVER_TAG="$2"; shift 2 ;;
 			--server-image) SERVER_IMAGE="$2"; shift 2 ;;
 			--web-image) WEB_IMAGE="$2"; shift 2 ;;
-			-h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+			-h|--help) sed -n '2,28p' "$0"; exit 0 ;;
 			*) die "unknown option: $1 (see --help)" ;;
 		esac
 	done
 	owner=$(printf '%s' "$FREECHAT_OWNER" | tr '[:upper:]' '[:lower:]')
-	[ -n "$SERVER_IMAGE" ] || SERVER_IMAGE="ghcr.io/$owner/freechat-server:$TAG"
+	# An upgrade keeps the server variant (e.g. ubuntu24.04) chosen at install time.
+	[ -n "$SERVER_TAG" ] || [ ! -f "$DIR/.env" ] || SERVER_TAG=$(sed -n 's/^SERVER_TAG=//p' "$DIR/.env")
+	[ -n "$SERVER_IMAGE" ] || SERVER_IMAGE="ghcr.io/$owner/freechat-server:${SERVER_TAG:-$TAG}"
 	[ -n "$WEB_IMAGE" ] || WEB_IMAGE="ghcr.io/$owner/freechat-web:$TAG"
 }
 
@@ -327,6 +332,7 @@ load_or_create_secrets() {
 # FreeChat install settings and secrets (keep private)
 DOMAIN=$DOMAIN
 EMAIL=$EMAIL
+SERVER_TAG=$SERVER_TAG
 SERVER_IMAGE=$SERVER_IMAGE
 WEB_IMAGE=$WEB_IMAGE
 LIVEKIT_IMAGE=$LIVEKIT_IMAGE

@@ -64,6 +64,18 @@ This repository and its images are public, so the commands above just work. If y
 
    The installer asks you to paste the read-only token (it is not shown while you type). The token can only download images, nothing else. It is kept in `/root/.docker/config.json` on the VPS for later `freechat update` runs.
 
+### Server image: Debian 13 or Ubuntu
+
+The homeserver image is built on Debian 13 by default. The same server is also published on Ubuntu:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/llsf2020/freechat/main/deploy/install.sh | sudo sh -s -- --server-tag ubuntu24.04
+```
+
+- `--server-tag ubuntu24.04` (Ubuntu 24.04 LTS) or `--server-tag ubuntu26.04` (Ubuntu 26.04 LTS). Only the system libraries inside the container differ; the server code and data are the same.
+- The choice is kept: later runs of the installer and `freechat update` stay on it. To switch, run the installer again with another `--server-tag` (`--server-tag latest` goes back to Debian 13).
+- This is unrelated to the system of the VPS itself, which can be any of the ones listed above.
+
 ### Optional: encrypted database volume
 
 ```bash

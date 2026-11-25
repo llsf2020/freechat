@@ -1,13 +1,19 @@
 # Builds the FreeChat images from upstream baselines + patches and publishes them to ghcr.io:
 #   ghcr.io/<owner>/freechat-server
 #   ghcr.io/<owner>/freechat-web
+# Where each comes from:
+#   main          freechat-server:latest (Debian 13) and freechat-web:latest
+#   ubuntu-24.04  freechat-server:ubuntu24.04 (same code on Ubuntu 24.04; the web image is not rebuilt)
+#   ubuntu-26.04  freechat-server:ubuntu26.04
+# Each server tag also gets a <tag>-<date>-<commit> tag. Other branches are refused, so a temporary
+# branch can never replace what servers install. A server image is tagged only after it starts.
 # Public repos get linux/amd64 and linux/arm64. Private repos (such as a private fork) get linux/amd64
 # only, because GitHub's free arm64 runners serve public repos only.
 name: images
 
 on:
   push:
-    branches: [main]
+    branches: [main, ubuntu-24.04, ubuntu-26.04]
     # Only what goes into the images: the server and web patches, the build files, the branding the web
     # image applies, and install.sh, whose CSP the web build checks.
     paths:
@@ -35,12 +41,18 @@ jobs:
       owner: ${{ steps.meta.outputs.owner }}
       version: ${{ steps.meta.outputs.version }}
       server_matrix: ${{ steps.meta.outputs.server_matrix }}
+      server_tag: ${{ steps.meta.outputs.server_tag }}
       web_platforms: ${{ steps.meta.outputs.web_platforms }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: meta
         run: |
           echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+          case "$GITHUB_REF_NAME" in
+            main) echo "server_tag=latest" >> "$GITHUB_OUTPUT" ;;
+            ubuntu-24.04|ubuntu-26.04) echo "server_tag=ubuntu${GITHUB_REF_NAME#ubuntu-}" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::images are published only from main, ubuntu-24.04 and ubuntu-26.04"; exit 1 ;;
+          esac
           # e.g. 2026.10.18-a1b2c3d
           echo "version=$(date -u +%Y.%m.%d)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           if [ "${{ github.event.repository.private }}" = "true" ]; then
@@ -70,9 +82,11 @@ jobs:
           context: .
           file: docker/server.Dockerfile
           platforms: ${{ matrix.platform }}
-          cache-from: type=gha,scope=server-${{ matrix.runner }}
-          cache-to: type=gha,mode=max,scope=server-${{ matrix.runner }}
+          cache-from: type=gha,scope=server-${{ needs.meta.outputs.server_tag }}-${{ matrix.runner }}
+          cache-to: type=gha,mode=max,scope=server-${{ needs.meta.outputs.server_tag }}-${{ matrix.runner }}
           outputs: type=image,name=ghcr.io/${{ needs.meta.outputs.owner }}/freechat-server,push-by-digest=true,name-canonical=true,push=true
+      # The image starts: its libraries are there and new enough for the binary.
+      - run: docker run --rm "ghcr.io/${{ needs.meta.outputs.owner }}/freechat-server@${{ steps.build.outputs.digest }}" --version
       - run: |
           mkdir -p /tmp/digests
           echo "${{ steps.build.outputs.digest }}" > "/tmp/digests/${{ matrix.runner }}"
@@ -98,14 +112,18 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - run: |
           image=ghcr.io/${{ needs.meta.outputs.owner }}/freechat-server
+          tag=${{ needs.meta.outputs.server_tag }}
+          version=${{ needs.meta.outputs.version }}
+          [ "$tag" = latest ] || version="$tag-$version"
           # The digests are meant to split into one argument each.
           # shellcheck disable=SC2046
           docker buildx imagetools create \
-            -t "$image:latest" -t "$image:${{ needs.meta.outputs.version }}" \
+            -t "$image:$tag" -t "$image:$version" \
             $(for f in /tmp/digests/*; do echo "$image@$(cat "$f")"; done)
 
   web:
     needs: meta
+    if: github.ref_name == main
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

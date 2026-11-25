@@ -1,8 +1,12 @@
 # FreeChat homeserver: Tuwunel at its upstream baseline plus FreeChat patches.
 #
 #   docker build -f docker/server.Dockerfile -t freechat-server .
+#
+# main builds on Debian 13. The ubuntu-24.04 and ubuntu-26.04 branches differ from main only in the two
+# FROM lines (published as freechat-server:ubuntu24.04 and :ubuntu26.04). The build stage must not have a
+# newer glibc than the runtime stage, or the binary will not start.
 
-FROM rust:1.95-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1 AS build
+FROM rust:1.95-trixie@sha256:f49565f188ee00bc2a18dd418183f2c5f23ef7d6e691890517ed341a598f67c3 AS build
 ARG TARGETARCH
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends clang libclang-dev liburing-dev cmake pkg-config libssl-dev git \
@@ -19,10 +23,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 	cargo build --release --locked --bin tuwunel \
 	&& cp target/release/tuwunel /usr/local/bin/tuwunel
 
-FROM debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e
+FROM debian:trixie-slim@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0
 # Security updates released after the base image was built.
 RUN apt-get update \
-	&& apt-get upgrade -y \
+	&& DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
 	&& apt-get install -y --no-install-recommends liburing2 ca-certificates \
 	&& rm -rf /var/lib/apt/lists/* \
 	&& useradd --system --uid 10001 --home-dir /var/lib/tuwunel tuwunel \

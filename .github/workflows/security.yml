@@ -4,7 +4,8 @@
 #             lockfiles: Tuwunel and the Rust SDK (Cargo.lock), Element Web (pnpm-lock.yaml) and Element X iOS
 #             (Package.resolved). Element X Android has no lockfile, only a Gradle version catalog, so its JVM
 #             libraries are not checked here; its Rust SDK is covered by matrix-rust-sdk.
-#   images:   the images deploy/install.sh runs: freechat-server and freechat-web (latest on ghcr.io) and the
+#   images:   the images deploy/install.sh runs: freechat-server (latest = Debian 13, ubuntu24.04, ubuntu26.04)
+#             and freechat-web (latest) on ghcr.io, and the
 #             pinned LiveKit, lk-jwt-service and ntfy images
 #   upstream: scripts/upstream.sh status (information only, never fails)
 # A scan job fails when it finds a known vulnerability that osv-scanner.toml does not accept (each accepted one
@@ -127,7 +128,7 @@ jobs:
       - name: Scan
         run: |
           owner="${GITHUB_REPOSITORY_OWNER,,}"
-          images="ghcr.io/$owner/freechat-server:latest ghcr.io/$owner/freechat-web:latest"
+          images="ghcr.io/$owner/freechat-server:latest ghcr.io/$owner/freechat-server:ubuntu24.04 ghcr.io/$owner/freechat-server:ubuntu26.04 ghcr.io/$owner/freechat-web:latest"
           for var in LIVEKIT_IMAGE JWT_IMAGE NTFY_IMAGE; do
             ref="$(sed -n "s/^$var=//p" deploy/install.sh | head -n 1)"
             [ -n "$ref" ] || { echo "::error::$var not found in deploy/install.sh"; exit 1; }
