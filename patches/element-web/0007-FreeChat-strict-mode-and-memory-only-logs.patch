@@ -1,7 +1,7 @@
-From d57b2f8b73dc8ec15b0bffd8abafa37ac26e3100 Mon Sep 17 00:00:00 2001
+From 8096674bb98e75d86acb665b19dae65e713da251 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 07/16] FreeChat: strict mode and memory-only logs
+Subject: [PATCH 07/15] FreeChat: strict mode and memory-only logs
 
 Strict mode (per device, opt-in): the session and crypto store stay in memory,
 closing the page signs out on the server and wipes localStorage, and hiding the
@@ -164,7 +164,7 @@ index 86a2668301..764b3a8411 100644
          setDeviceIsolationMode(this.matrixClient, SettingsStore.getValue("feature_exclude_insecure_devices"));
  
 diff --git a/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx b/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx
-index 3828a9d250..0c427017d0 100644
+index da2beff50a..4bdbf65011 100644
 --- a/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx
 +++ b/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx
 @@ -35,6 +35,7 @@ import { DiscoverySettings } from "../../discovery/DiscoverySettings";
@@ -175,7 +175,7 @@ index 3828a9d250..0c427017d0 100644
  
  interface IIgnoredUserProps {
      userId: string;
-@@ -374,6 +375,9 @@ export default class SecurityUserSettingsTab extends React.Component<EmptyObject
+@@ -376,6 +377,9 @@ export default class SecurityUserSettingsTab extends React.Component<EmptyObject
                  <SettingsSection heading={ft("burn_section")}>
                      <GlobalReadBurnSettings />
                  </SettingsSection>

@@ -1,7 +1,7 @@
-From cf5b11f266731fcf8d93f78c195d4c6817ed88fb Mon Sep 17 00:00:00 2001
+From c2734f63ecefdf7cb292fc1a7f4a1c7f21a44f65 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Wed, 18 Nov 2026 00:00:00 +0000
-Subject: [PATCH 16/16] FreeChat: strict mode covers SSO, OAuth and QR logins
+Subject: [PATCH 15/15] FreeChat: strict mode covers SSO, OAuth and QR logins
 
 Those logins stored the credentials and a pickle key, then started the
 session from storage, so a strict session left an access token on disk

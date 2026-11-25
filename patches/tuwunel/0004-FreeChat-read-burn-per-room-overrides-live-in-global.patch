@@ -1,7 +1,7 @@
-From 94b47fc47aa85f7bcfc9d59c78432f9bbe66f48b Mon Sep 17 00:00:00 2001
+From 83dd7f3247fcf0526e7015bf49469b5ade2ccee2 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 04/17] FreeChat: read-burn per-room overrides live in global
+Subject: [PATCH 04/16] FreeChat: read-burn per-room overrides live in global
  account data
 
 matrix-rust-sdk (Element X) cannot write room account data, so the

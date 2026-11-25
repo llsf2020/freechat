@@ -1,7 +1,7 @@
-From b9b1c89b1607548e73d0b5a23372d6cbff595b16 Mon Sep 17 00:00:00 2001
+From 8f2eaaea5b7e96dbde34d3fa625f1fa0a00e6cca Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Wed, 18 Nov 2026 00:00:00 +0000
-Subject: [PATCH 17/17] FreeChat: build against Tuwunel 2.0
+Subject: [PATCH 16/16] FreeChat: build against Tuwunel 2.0
 
 Event, StateKey and the PDU types moved from tuwunel_core::matrix to the tuwunel_matrix crate; append_pdu now rebinds pdu_json after read_replaced, so the expiry annotation needs it mutable.
 ---
@@ -89,7 +89,7 @@ index d2e8528df..82ffd1ed1 100644
  use super::STATE_TYPE;
  
 diff --git a/src/service/rooms/search/mod.rs b/src/service/rooms/search/mod.rs
-index b22d06e98..a129bfb79 100644
+index fb27e9056..cb02d61d5 100644
 --- a/src/service/rooms/search/mod.rs
 +++ b/src/service/rooms/search/mod.rs
 @@ -11,7 +11,7 @@
@@ -102,10 +102,10 @@ index b22d06e98..a129bfb79 100644
  	PduCount,
  	event::{Event, Matches},
 diff --git a/src/service/rooms/timeline/append.rs b/src/service/rooms/timeline/append.rs
-index 0ff2b3784..90269b485 100644
+index 7d383eb5a..8e9cdbb16 100644
 --- a/src/service/rooms/timeline/append.rs
 +++ b/src/service/rooms/timeline/append.rs
-@@ -183,7 +183,7 @@ pub async fn append_pdu<'a, Leafs>(
+@@ -182,7 +182,7 @@ pub async fn append_pdu<'a, Leafs>(
  		.await
  		.map_err(|_| err!(Database("Room does not exist")))?;
  

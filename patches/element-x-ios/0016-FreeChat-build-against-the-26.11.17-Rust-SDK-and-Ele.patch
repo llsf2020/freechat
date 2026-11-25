@@ -1,4 +1,4 @@
-From 6b1a96af23d96b1769234861f2d5d0ca3ba48174 Mon Sep 17 00:00:00 2001
+From 896c60931ae595324bacedb6562a868b0f3bdbbe Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Wed, 18 Nov 2026 00:00:00 +0000
 Subject: [PATCH 16/16] FreeChat: build against the 26.11.17 Rust SDK and
@@ -13,10 +13,10 @@ signs out through logoutAllAccounts, which also logs out on the server.
  2 files changed, 2 insertions(+), 2 deletions(-)
 
 diff --git a/ElementX/Sources/Application/AppCoordinator.swift b/ElementX/Sources/Application/AppCoordinator.swift
-index 30f625f2e..31dd50e5a 100644
+index c6c381eaa..60ce693e5 100644
 --- a/ElementX/Sources/Application/AppCoordinator.swift
 +++ b/ElementX/Sources/Application/AppCoordinator.swift
-@@ -907,7 +907,7 @@ class AppCoordinator: AppCoordinatorProtocol, NotificationManagerDelegate, Secur
+@@ -909,7 +909,7 @@ class AppCoordinator: AppCoordinatorProtocol, NotificationManagerDelegate, Secur
             Date.now.timeIntervalSince(backgroundedAt) >= TimeInterval(FreeChatStrictMode.settings.idleMinutes * 60) {
              MXLog.info("FreeChat: strict session idle in the background, signing out")
              freechatBackgroundedAt = nil

@@ -1,4 +1,4 @@
-From d02c72bb0d065a9394ffc83a9edd904225713421 Mon Sep 17 00:00:00 2001
+From e8e9d2a4823b44e9611604fb80d8d1f46466ffdf Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
 Subject: [PATCH 09/23] FreeChat: name, app ID and icon
@@ -5925,7 +5925,7 @@ index 1cbabacb4f..07b83057c0 100644
          android:pathData="m0,0h108v108h-108z" />
  </vector>
 diff --git a/plugins/src/main/kotlin/config/BuildTimeConfig.kt b/plugins/src/main/kotlin/config/BuildTimeConfig.kt
-index 4160efeb78..cd39fbb62f 100644
+index 06fc440b8a..5c7206d3e3 100644
 --- a/plugins/src/main/kotlin/config/BuildTimeConfig.kt
 +++ b/plugins/src/main/kotlin/config/BuildTimeConfig.kt
 @@ -9,8 +9,8 @@

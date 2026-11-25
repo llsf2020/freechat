@@ -1,7 +1,7 @@
-From 8c882a15812b188b32c3920396b971e1116dc99e Mon Sep 17 00:00:00 2001
+From 0767e0bdb5768481045821c8ced0e9baba6bbcce Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 03/17] FreeChat: admin-only room TTL and personal
+Subject: [PATCH 03/16] FreeChat: admin-only room TTL and personal
  burn-after-read
 
 - Only power level 100 (or v12 creators) may set com.freechat.disappearing;
@@ -12,28 +12,30 @@ Subject: [PATCH 03/17] FreeChat: admin-only room TTL and personal
   receipt or private read marker, at or after the event), then expire N
   seconds later through the regular expiry path.
 ---
- src/api/client/state.rs                     |   8 +-
+ src/api/client/state.rs                     |  10 +-
  src/database/maps.rs                        |  13 ++
  src/service/rooms/disappearing/mod.rs       |  59 ++++-
  src/service/rooms/disappearing/read_burn.rs | 225 ++++++++++++++++++++
  src/service/rooms/read_receipt/mod.rs       |  19 +-
- 5 files changed, 311 insertions(+), 13 deletions(-)
+ 5 files changed, 313 insertions(+), 13 deletions(-)
  create mode 100644 src/service/rooms/disappearing/read_burn.rs
 
 diff --git a/src/api/client/state.rs b/src/api/client/state.rs
-index 1ec57cc53..ed60ecf0c 100644
+index 3b2b266f0..a4a323397 100644
 --- a/src/api/client/state.rs
 +++ b/src/api/client/state.rs
-@@ -30,7 +30,7 @@
+@@ -30,7 +30,9 @@
  	Event,
- 	pdu::{PduBuilder, PduEvent},
+ 	pdu::{Content, PduBuilder, PduEvent},
  };
--use tuwunel_service::{Services, profile::check_member_content};
-+use tuwunel_service::{Services, profile::check_member_content, rooms::disappearing};
+-use tuwunel_service::{Services, membership::RemoteInvite, profile::check_member_content};
++use tuwunel_service::{
++	Services, membership::RemoteInvite, profile::check_member_content, rooms::disappearing,
++};
  
- use crate::{Ruma, RumaResponse, with_membership};
+ use crate::{Ruma, RumaResponse, utils::invite_check, with_membership};
  
-@@ -384,6 +384,12 @@ pub(crate) async fn allowed_to_send_state_event(
+@@ -396,6 +398,12 @@ pub(crate) async fn allowed_to_send_state_event(
  			validate_canonical_alias(services, room_id, json).await,
  		| StateEventType::RoomMember =>
  			validate_member(services, sender, room_id, state_key, json, suspended).await,
@@ -47,7 +49,7 @@ index 1ec57cc53..ed60ecf0c 100644
  	}
  }
 diff --git a/src/database/maps.rs b/src/database/maps.rs
-index 0ffbba62c..40c06ea16 100644
+index 14087e9c2..05a0bcf0d 100644
 --- a/src/database/maps.rs
 +++ b/src/database/maps.rs
 @@ -200,6 +200,19 @@ pub(crate) fn descriptor(name: &str) -> &'static Descriptor {

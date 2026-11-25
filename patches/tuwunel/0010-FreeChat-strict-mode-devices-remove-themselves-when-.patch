@@ -1,7 +1,7 @@
-From ac769b7e27fc03c94f1e67c9ba115b5e30c6abb5 Mon Sep 17 00:00:00 2001
+From 7d8bb236ee9761a184ef839a5df71302bd285ee9 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 10/17] FreeChat: strict-mode devices remove themselves when
+Subject: [PATCH 10/16] FreeChat: strict-mode devices remove themselves when
  idle
 
 A device with ID FCS<minutes>_<random> is deleted once its token has not been
@@ -16,7 +16,7 @@ used for that long (plus a minute). Last use is tracked in memory only.
  create mode 100644 src/service/rooms/disappearing/strict_device.rs
 
 diff --git a/src/api/router/auth.rs b/src/api/router/auth.rs
-index 65a3b9c4e..f6d74fc9f 100644
+index ce598a5dd..98254d2aa 100644
 --- a/src/api/router/auth.rs
 +++ b/src/api/router/auth.rs
 @@ -190,7 +190,15 @@ async fn find_token(services: &Services, token: Option<&str>) -> Result<Token> {
@@ -207,10 +207,10 @@ index c53e0af07..068b8c76b 100644
 +	assert_eq!(strict_idle(device_id!("fcs5_x")), None);
 +}
 diff --git a/src/service/users/device.rs b/src/service/users/device.rs
-index 1c2c2664c..1807d4660 100644
+index d55e405ca..83082fc29 100644
 --- a/src/service/users/device.rs
 +++ b/src/service/users/device.rs
-@@ -543,6 +543,11 @@ async fn issue_tokens(
+@@ -566,6 +566,11 @@ async fn issue_tokens(
  		return Err!(Request(Forbidden("Cannot issue tokens for a removed device.")));
  	}
  

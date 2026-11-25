@@ -1,15 +1,15 @@
-From 4e1cc3c9bfbf998a9950091b86afda40ccb36720 Mon Sep 17 00:00:00 2001
+From 82d46bd960bca1e8950fa97ed690549f0cab6184 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
-Date: Tue, 17 Nov 2026 00:00:00 +0000
+Date: Wed, 25 Nov 2026 00:00:00 +0000
 Subject: [PATCH 3/3] FreeChat: dependency security updates
 
-rustix 1.1.6 (RUSTSEC-2026-0486) and quinn-udp 0.5.16 (RUSTSEC-2026-0538).
+rustix 1.1.6 (RUSTSEC-2026-0486), quinn-udp 0.5.16 (RUSTSEC-2026-0538) and url 2.5.9 (RUSTSEC-2026-0592).
 ---
- Cargo.lock | 26 +++++++++++++-------------
- 1 file changed, 13 insertions(+), 13 deletions(-)
+ Cargo.lock | 34 +++++++++++++++++-----------------
+ 1 file changed, 17 insertions(+), 17 deletions(-)
 
 diff --git a/Cargo.lock b/Cargo.lock
-index 902f204b2..80943247f 100644
+index 902f204b2..aa3ba9508 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
 @@ -1678,7 +1678,7 @@ dependencies = [
@@ -30,6 +30,18 @@ index 902f204b2..80943247f 100644
  ]
  
  [[package]]
+@@ -2185,9 +2185,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+ 
+ [[package]]
+ name = "form_urlencoded"
+-version = "1.2.2"
++version = "1.2.3"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
++checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
+ dependencies = [
+  "percent-encoding",
+ ]
 @@ -3111,7 +3111,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
  dependencies = [
   "hermit-abi",
@@ -105,6 +117,18 @@ index 902f204b2..80943247f 100644
  ]
  
  [[package]]
+@@ -7475,9 +7475,9 @@ checksum = "e497bb1f828cc9fb236722c2eaa100dcf201563f38f4da6252357a59037adf31"
+ 
+ [[package]]
+ name = "url"
+-version = "2.5.8"
++version = "2.5.9"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
++checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
+ dependencies = [
+  "form_urlencoded",
+  "idna",
 @@ -7952,7 +7952,7 @@ version = "0.1.11"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"

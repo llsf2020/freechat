@@ -1,4 +1,4 @@
-From f2d33fb6ea32dc1f18f835d43b093258cdbe3496 Mon Sep 17 00:00:00 2001
+From 281fb208c84d707f60b61d5d89f6e5d25c86a4bf Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Fri, 23 Oct 2026 00:00:00 +0000
 Subject: [PATCH 18/23] FreeChat: show the auto-delete duration in the timeline

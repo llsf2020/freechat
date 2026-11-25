@@ -1,7 +1,7 @@
-From 1a53e429b7e376fa2c4036cb62d44a532496a5b8 Mon Sep 17 00:00:00 2001
+From 761b123fe8dffdeb9db9b50194b1ea7e0b9e227f Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 08/17] FreeChat: existing_events endpoint for devices to drop
+Subject: [PATCH 08/16] FreeChat: existing_events endpoint for devices to drop
  purged messages
 
 POST /_matrix/client/unstable/com.freechat/rooms/{roomId}/existing_events
@@ -81,10 +81,10 @@ index 9e047006b..31a784277 100644
  async fn authenticate(services: &crate::State, token: &str) -> Result<OwnedUserId> {
  	let Ok((user_id, _device_id, expires_at)) = services.users.find_from_token(token).await
 diff --git a/src/api/client/routes.rs b/src/api/client/routes.rs
-index cc4e79cde..5e10b673a 100644
+index ff7d7aeae..cff10febd 100644
 --- a/src/api/client/routes.rs
 +++ b/src/api/client/routes.rs
-@@ -160,6 +160,10 @@ fn register_client_room_routes(router: Router<State>) -> Router<State> {
+@@ -185,6 +185,10 @@ fn register_client_room_routes(router: Router<State>) -> Router<State> {
  			"/_matrix/client/unstable/com.freechat/rooms/{room_id}/join_with_password",
  			post(client::freechat::join_with_password_route),
  		)

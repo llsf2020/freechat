@@ -1,4 +1,4 @@
-From af345496ae251bc7a86dbf90656a6b331f1a39aa Mon Sep 17 00:00:00 2001
+From f8773a196b886d16ca7408b69bbe6e20b8b6e4e4 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
 Subject: [PATCH 04/16] FreeChat: strict mode and global privacy settings on
@@ -23,7 +23,7 @@ and the strict mode switch. Untested: needs a Mac to build.
  create mode 100644 ElementX/Sources/FreeChat/FreeChatStrictMode.swift
 
 diff --git a/ElementX/Sources/Application/AppCoordinator.swift b/ElementX/Sources/Application/AppCoordinator.swift
-index de135cbf3..30f625f2e 100644
+index bbe395257..c6c381eaa 100644
 --- a/ElementX/Sources/Application/AppCoordinator.swift
 +++ b/ElementX/Sources/Application/AppCoordinator.swift
 @@ -33,6 +33,7 @@ class AppCoordinator: AppCoordinatorProtocol, NotificationManagerDelegate, Secur
@@ -34,7 +34,7 @@ index de135cbf3..30f625f2e 100644
      
      private var backgroundRefreshSyncObserver: AnyCancellable?
      
-@@ -866,6 +867,7 @@ class AppCoordinator: AppCoordinatorProtocol, NotificationManagerDelegate, Secur
+@@ -868,6 +869,7 @@ class AppCoordinator: AppCoordinatorProtocol, NotificationManagerDelegate, Secur
      @objc
      private func applicationDidEnterBackground() {
          MXLog.info("Application did enter background")
@@ -42,7 +42,7 @@ index de135cbf3..30f625f2e 100644
          
          scheduleDelayedPauseServices()
          scheduleBackgroundAppRefresh()
-@@ -899,6 +901,16 @@ class AppCoordinator: AppCoordinatorProtocol, NotificationManagerDelegate, Secur
+@@ -901,6 +903,16 @@ class AppCoordinator: AppCoordinatorProtocol, NotificationManagerDelegate, Secur
      private func applicationWillEnterForeground() {
          MXLog.info("Application will enter foreground")
          endActiveBackgroundTask()
@@ -293,10 +293,10 @@ index 000000000..6ec4f2980
 +    private static let strictClient = Mutex(false)
 +}
 diff --git a/ElementX/Sources/Screens/Settings/SettingsScreen/SettingsScreenCoordinator.swift b/ElementX/Sources/Screens/Settings/SettingsScreen/SettingsScreenCoordinator.swift
-index 279a12a08..0415d798a 100644
+index afd063322..364b04aa4 100644
 --- a/ElementX/Sources/Screens/Settings/SettingsScreen/SettingsScreenCoordinator.swift
 +++ b/ElementX/Sources/Screens/Settings/SettingsScreen/SettingsScreenCoordinator.swift
-@@ -54,9 +54,16 @@ final class SettingsScreenCoordinator: CoordinatorProtocol {
+@@ -55,9 +55,16 @@ final class SettingsScreenCoordinator: CoordinatorProtocol {
      
      private var cancellables = Set<AnyCancellable>()
      
@@ -313,7 +313,7 @@ index 279a12a08..0415d798a 100644
          viewModel = SettingsScreenViewModel(userSession: parameters.userSession,
                                              availableSessionsPublisher: parameters.availableSessionsPublisher,
                                              isInSecondaryWindow: parameters.isInSecondaryWindow,
-@@ -119,6 +126,6 @@ final class SettingsScreenCoordinator: CoordinatorProtocol {
+@@ -122,6 +129,6 @@ final class SettingsScreenCoordinator: CoordinatorProtocol {
      // MARK: - Public
      
      func toPresentable() -> AnyView {
@@ -322,7 +322,7 @@ index 279a12a08..0415d798a 100644
      }
  }
 diff --git a/ElementX/Sources/Screens/Settings/SettingsScreen/View/SettingsScreen.swift b/ElementX/Sources/Screens/Settings/SettingsScreen/View/SettingsScreen.swift
-index 50f88d6ed..3793638ae 100644
+index fe3733845..11b0167b1 100644
 --- a/ElementX/Sources/Screens/Settings/SettingsScreen/View/SettingsScreen.swift
 +++ b/ElementX/Sources/Screens/Settings/SettingsScreen/View/SettingsScreen.swift
 @@ -12,6 +12,7 @@ import SwiftUI
@@ -345,7 +345,7 @@ index 50f88d6ed..3793638ae 100644
              
              appSettingsSection
 diff --git a/ElementX/Sources/Services/Authentication/AuthenticationService.swift b/ElementX/Sources/Services/Authentication/AuthenticationService.swift
-index 7c18ac335..c0a062bc4 100644
+index 23460fdf7..cb1ce0d3b 100644
 --- a/ElementX/Sources/Services/Authentication/AuthenticationService.swift
 +++ b/ElementX/Sources/Services/Authentication/AuthenticationService.swift
 @@ -156,7 +156,9 @@ class AuthenticationService: AuthenticationServiceProtocol {

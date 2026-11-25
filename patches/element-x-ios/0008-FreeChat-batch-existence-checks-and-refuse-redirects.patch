@@ -1,4 +1,4 @@
-From 1b50d4eb97e7ff31e1660433ec33ef16cabe443f Mon Sep 17 00:00:00 2001
+From 8fbcf1f096455e35da696d9818577d83cb35aa70 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
 Subject: [PATCH 08/16] FreeChat: batch existence checks and refuse redirects

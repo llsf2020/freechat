@@ -1,7 +1,7 @@
-From 22833394c1a7dc1fe80bab6551c931e6647e671e Mon Sep 17 00:00:00 2001
+From bf5a860f3337ad2f4edce8dee10369a775677e86 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 02/16] FreeChat: admin-only auto-delete, burn after reading,
+Subject: [PATCH 02/15] FreeChat: admin-only auto-delete, burn after reading,
  no deleted placeholders
 
 - Room auto-delete can only be changed by room admins (power level 100 or
@@ -45,7 +45,7 @@ index 47fdc70fb7..bc62f05dfe 100644
                  </Form.Root>
              </SettingsTab>
 diff --git a/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx b/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx
-index 174522522f..9e674c184c 100644
+index 4abeb64824..848d9ab6ff 100644
 --- a/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx
 +++ b/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx
 @@ -34,6 +34,8 @@ import { SettingsSubsection, SettingsSubsectionText } from "../../shared/Setting
@@ -57,7 +57,7 @@ index 174522522f..9e674c184c 100644
  
  interface IIgnoredUserProps {
      userId: string;
-@@ -378,6 +380,10 @@ export default class SecurityUserSettingsTab extends React.Component<EmptyObject
+@@ -380,6 +382,10 @@ export default class SecurityUserSettingsTab extends React.Component<EmptyObject
                      {eventIndex}
                  </SettingsSection>
                  {privacySection}

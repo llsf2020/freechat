@@ -1,7 +1,7 @@
-From 6fdf26de41c3488b1048deb0ed58cdb610d45140 Mon Sep 17 00:00:00 2001
+From 29f1e22d13ff09148f75612968fb2fd3d21ee546 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 06/16] FreeChat: keep messages, drafts and sent history in
+Subject: [PATCH 06/15] FreeChat: keep messages, drafts and sent history in
  memory only
 
 The sync store is a MemoryStore; the legacy IndexedDB sync store and stored
@@ -112,7 +112,7 @@ index 149dbe42d2..dc6a32a8a5 100644
  
      public getItem(offset: number): IHistoryItem {
 diff --git a/apps/web/src/components/structures/MatrixChat.test.tsx b/apps/web/src/components/structures/MatrixChat.test.tsx
-index 8dac0654fc..f60a6d6c14 100644
+index c3d65fb95e..2dbaf42dbc 100644
 --- a/apps/web/src/components/structures/MatrixChat.test.tsx
 +++ b/apps/web/src/components/structures/MatrixChat.test.tsx
 @@ -81,6 +81,7 @@ import UserSettingsDialog from "../../components/views/dialogs/UserSettingsDialo
@@ -324,7 +324,7 @@ index 44fe239ea5..b493b94871 100644
  
      private get voiceRecording(): VoiceMessageRecording | undefined {
 diff --git a/apps/web/src/components/views/rooms/SendMessageComposer.test.tsx b/apps/web/src/components/views/rooms/SendMessageComposer.test.tsx
-index aade509fbd..323de24672 100644
+index 4f2859379c..4f9eb0330a 100644
 --- a/apps/web/src/components/views/rooms/SendMessageComposer.test.tsx
 +++ b/apps/web/src/components/views/rooms/SendMessageComposer.test.tsx
 @@ -33,6 +33,7 @@ import { MessageComposerUrlPreviewViewModel } from "../../../viewmodels/composer
@@ -335,7 +335,7 @@ index aade509fbd..323de24672 100644
  
  vi.mock("../../../utils/local-room", () => ({
      doMaybeLocalRoomAction: vi.fn(),
-@@ -184,7 +185,7 @@ describe("<SendMessageComposer/>", () => {
+@@ -183,7 +184,7 @@ describe("<SendMessageComposer/>", () => {
          const spyDispatcher = vi.spyOn(defaultDispatcher, "dispatch");
  
          beforeEach(() => {
@@ -344,7 +344,7 @@ index aade509fbd..323de24672 100644
              // Note: unlike Jest, Vitest's mockReset() on a spy restores call-through to the
              // original implementation rather than stubbing it out, so re-apply a no-op
              // implementation to avoid a stray real dispatch crashing the test worker later.
-@@ -238,11 +239,11 @@ describe("<SendMessageComposer/>", () => {
+@@ -237,11 +238,11 @@ describe("<SendMessageComposer/>", () => {
              const key = "mx_cider_state_myfakeroom";
  
              expect(container.textContent).toBe("Test Text");
@@ -358,7 +358,7 @@ index aade509fbd..323de24672 100644
                  parts: [{ type: "plain", text: "Test Text" }],
                  replyEventId: mockEvent.getId(),
              });
-@@ -258,7 +259,7 @@ describe("<SendMessageComposer/>", () => {
+@@ -257,7 +258,7 @@ describe("<SendMessageComposer/>", () => {
  
              // now try with localStorage wiped out
              unmount();
@@ -367,7 +367,7 @@ index aade509fbd..323de24672 100644
              ({ container } = getComponent(props));
              expect(container.textContent).toBe("");
          });
-@@ -276,7 +277,7 @@ describe("<SendMessageComposer/>", () => {
+@@ -275,7 +276,7 @@ describe("<SendMessageComposer/>", () => {
  
              // the replacement composer should persist the draft again when it unmounts
              unmount();
@@ -376,7 +376,7 @@ index aade509fbd..323de24672 100644
                  parts: [{ type: "plain", text: "Notes from call" }],
              });
          });
-@@ -289,11 +290,11 @@ describe("<SendMessageComposer/>", () => {
+@@ -288,11 +289,11 @@ describe("<SendMessageComposer/>", () => {
              const key = "mx_cider_state_myfakeroom";
  
              expect(container.textContent).toBe("Hello World");
@@ -390,7 +390,7 @@ index aade509fbd..323de24672 100644
                  parts: [{ type: "plain", text: "Hello World" }],
              });
          });
-@@ -315,7 +316,7 @@ describe("<SendMessageComposer/>", () => {
+@@ -314,7 +315,7 @@ describe("<SendMessageComposer/>", () => {
              });
  
              expect(container.textContent).toBe("");
@@ -400,7 +400,7 @@ index aade509fbd..323de24672 100644
                  parts: [{ type: "plain", text: "This is a message" }],
                  replyEventId: mockEvent.getId(),
 diff --git a/apps/web/src/components/views/rooms/SendMessageComposer.tsx b/apps/web/src/components/views/rooms/SendMessageComposer.tsx
-index 9d67309c58..427332bee7 100644
+index ebd5bcdec8..fed8fb9bd8 100644
 --- a/apps/web/src/components/views/rooms/SendMessageComposer.tsx
 +++ b/apps/web/src/components/views/rooms/SendMessageComposer.tsx
 @@ -69,6 +69,7 @@ import { type RoomUploadViewModel, useRoomUploadViewModel } from "../../../viewm
@@ -439,7 +439,7 @@ index 9d67309c58..427332bee7 100644
              this.clearStoredEditorState();
          }
 diff --git a/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx b/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx
-index 9e674c184c..3828a9d250 100644
+index 848d9ab6ff..da2beff50a 100644
 --- a/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx
 +++ b/apps/web/src/components/views/settings/tabs/user/SecurityUserSettingsTab.tsx
 @@ -23,7 +23,6 @@ import SettingsStore from "../../../../../settings/SettingsStore";
@@ -463,7 +463,7 @@ index 9e674c184c..3828a9d250 100644
          let warning;
          if (!privateShouldBeEncrypted(MatrixClientPeg.safeGet())) {
              warning = (
-@@ -375,10 +368,7 @@ export default class SecurityUserSettingsTab extends React.Component<EmptyObject
+@@ -377,10 +370,7 @@ export default class SecurityUserSettingsTab extends React.Component<EmptyObject
              <SettingsTab>
                  {warning}
                  <SetIntegrationManager />

@@ -1,4 +1,4 @@
-From 9c6770fc58ebda17e19b878d24533b157dd3a340 Mon Sep 17 00:00:00 2001
+From 996def63260079054e1cd782e2a13d88cf96b4a1 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
 Subject: [PATCH 07/23] FreeChat: notifications only say there are new messages

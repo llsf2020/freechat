@@ -1,4 +1,4 @@
-From 5f04bf393a4d47f694bf427e49c73b385398e4a1 Mon Sep 17 00:00:00 2001
+From c35b701a62ff8cc24afe29eb2613406339ef7f94 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
 Subject: [PATCH 06/23] FreeChat: UnifiedPush only through the user's own

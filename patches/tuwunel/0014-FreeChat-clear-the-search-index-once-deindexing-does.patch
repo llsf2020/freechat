@@ -1,7 +1,7 @@
-From 6955e0c070d36c0aba26491631de8dd24811864d Mon Sep 17 00:00:00 2001
+From ee8d812dda57a6f7760124d3e14a125d56d53b73 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 14/17] FreeChat: clear the search index once; deindexing does
+Subject: [PATCH 14/16] FreeChat: clear the search index once; deindexing does
  nothing
 
 ---
@@ -72,10 +72,10 @@ index f394562e2..16e3e22f5 100644
  
  	// A newer same-lineage database was already refused; stamping ours is safe. A
 diff --git a/src/service/rooms/search/mod.rs b/src/service/rooms/search/mod.rs
-index 78bdfce78..b22d06e98 100644
+index b3905733e..fb27e9056 100644
 --- a/src/service/rooms/search/mod.rs
 +++ b/src/service/rooms/search/mod.rs
-@@ -67,24 +67,12 @@ pub fn index_pdu(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId, message_bod
+@@ -71,24 +71,12 @@ pub fn index_pdu(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId, message_bod
  	let _ = (self, shortroomid, pdu_id, message_body);
  }
  

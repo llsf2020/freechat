@@ -1,4 +1,4 @@
-From bbc14aff95b47849462ce3b088b2f2fd535b7e3e Mon Sep 17 00:00:00 2001
+From 5c57ab00cf6ae8ad3de4f1196c1a862567ab3a4c Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
 Subject: [PATCH 10/16] FreeChat: fix the iOS build

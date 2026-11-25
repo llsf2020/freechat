@@ -1,7 +1,7 @@
-From c3bdc02fa74bde84f2db19372934e99702b217aa Mon Sep 17 00:00:00 2001
+From 6aa7fac78f0ae10a3dc3ff10d30a6e98dd94a117 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 01/16] FreeChat: disappearing messages
+Subject: [PATCH 01/15] FreeChat: disappearing messages
 
 - Room setting (Security & Privacy) to pick a TTL via the
   com.freechat.disappearing state event
@@ -96,10 +96,10 @@ index 0c6f6a03a7..47fdc70fb7 100644
                  </Form.Root>
              </SettingsTab>
 diff --git a/apps/web/src/events/EventTileFactory.tsx b/apps/web/src/events/EventTileFactory.tsx
-index 78a4f62f0f..495161cd72 100644
+index e2ee26a12d..c34490300a 100644
 --- a/apps/web/src/events/EventTileFactory.tsx
 +++ b/apps/web/src/events/EventTileFactory.tsx
-@@ -59,6 +59,7 @@ import { ViewSourceEventViewModel } from "../viewmodels/room/timeline/event-tile
+@@ -58,6 +58,7 @@ import { ViewSourceEventViewModel } from "../viewmodels/room/timeline/event-tile
  import { ElementCallEventType } from "../call-types";
  import { RootCallTileViewModel } from "../viewmodels/room/timeline/event-tile/call/RootCallTileViewModel";
  import { SDKContext } from "../contexts/SDKContext";
@@ -107,7 +107,7 @@ index 78a4f62f0f..495161cd72 100644
  
  // Subset of EventTile's IProps plus some mixins
  export interface EventTileTypeProps extends Pick<
-@@ -251,6 +252,9 @@ for (const evType of ElementCallEventType.names) {
+@@ -250,6 +251,9 @@ for (const evType of ElementCallEventType.names) {
      STATE_EVENT_TILE_TYPES.set(evType, CallEventFactory);
  }
  
@@ -117,7 +117,7 @@ index 78a4f62f0f..495161cd72 100644
  // Add all the Mjolnir stuff to the renderer too
  for (const evType of ALL_RULE_TYPES) {
      STATE_EVENT_TILE_TYPES.set(evType, TextualEventFactory);
-@@ -272,6 +276,7 @@ const SINGULAR_STATE_EVENTS = new Set([
+@@ -271,6 +275,7 @@ const SINGULAR_STATE_EVENTS = new Set([
      EventType.RoomTombstone,
      EventType.RoomJoinRules,
      EventType.RoomGuestAccess,

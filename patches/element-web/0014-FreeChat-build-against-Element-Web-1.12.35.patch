@@ -1,7 +1,7 @@
-From 7eed65d8564ec5030fb6b2efcdebecaf04b687e9 Mon Sep 17 00:00:00 2001
+From 86717cac2de8dbd630f34ade533c28a1a32c9c32 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Wed, 18 Nov 2026 00:00:00 +0000
-Subject: [PATCH 14/16] FreeChat: build against Element Web 1.12.35
+Subject: [PATCH 14/15] FreeChat: build against Element Web 1.12.35
 
 copyPlaintext moved to shared-utils as copyPlainTextToClipboard; the indexedDB handle in createMatrixClient is unused now that neither the sync store nor the legacy crypto store needs it.
 ---

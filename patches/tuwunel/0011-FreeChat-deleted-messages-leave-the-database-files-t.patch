@@ -1,7 +1,7 @@
-From cc97b4b6e230829e82eef3291b560b43b88d0bd8 Mon Sep 17 00:00:00 2001
+From 067f74cded6ff61bb4ea5ca5dbd41f0f86f0bdf9 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 11/17] FreeChat: deleted messages leave the database files too
+Subject: [PATCH 11/16] FreeChat: deleted messages leave the database files too
 
 No WAL archive; after messages are purged, all memtables are flushed and the
 event maps compacted all the way down, at most daily. There is no server-side
@@ -184,10 +184,10 @@ index 000000000..4972d9c20
 +	info!("Scrubbed deleted messages from the database files");
 +}
 diff --git a/src/service/rooms/search/mod.rs b/src/service/rooms/search/mod.rs
-index f4fcd2acd..78bdfce78 100644
+index 68566dfc8..b3905733e 100644
 --- a/src/service/rooms/search/mod.rs
 +++ b/src/service/rooms/search/mod.rs
-@@ -58,20 +58,18 @@ fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
+@@ -62,20 +62,18 @@ fn build(args: &crate::Args<'_>) -> Result<Arc<Self>> {
  	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
  }
  
@@ -216,7 +216,7 @@ index f4fcd2acd..78bdfce78 100644
  #[implement(Service)]
  pub fn deindex_pdu(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId, message_body: &str) {
  	let batch = tokenize(message_body).map(|word| {
-@@ -83,7 +81,9 @@ pub fn deindex_pdu(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId, message_b
+@@ -87,7 +85,9 @@ pub fn deindex_pdu(&self, shortroomid: ShortRoomId, pdu_id: &RawPduId, message_b
  	});
  
  	for token in batch {

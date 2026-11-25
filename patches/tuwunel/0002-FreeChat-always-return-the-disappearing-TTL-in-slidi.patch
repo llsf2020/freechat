@@ -1,7 +1,7 @@
-From 10d43173a11880cbcd754231fc3ed092d3615d86 Mon Sep 17 00:00:00 2001
+From ce20f777fb74a11f89e6b32ef57ce9e10b3f7d5f Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 02/17] FreeChat: always return the disappearing TTL in sliding
+Subject: [PATCH 02/16] FreeChat: always return the disappearing TTL in sliding
  sync
 
 matrix-rust-sdk clients (Element X) only store state their sync asked
@@ -13,10 +13,10 @@ com.freechat.disappearing to every room's required_state.
  2 files changed, 15 insertions(+), 3 deletions(-)
 
 diff --git a/src/api/client/sync/v5/rooms.rs b/src/api/client/sync/v5/rooms.rs
-index 49f438ffe..a8e42be5b 100644
+index c07a44eea..22bf04971 100644
 --- a/src/api/client/sync/v5/rooms.rs
 +++ b/src/api/client/sync/v5/rooms.rs
-@@ -51,7 +51,7 @@
+@@ -52,7 +52,7 @@
  };
  use tuwunel_service::{
  	Services,
@@ -25,7 +25,7 @@ index 49f438ffe..a8e42be5b 100644
  	sync::{RequiredState, Room, RoomConfig, UnreadState},
  };
  
-@@ -366,7 +366,9 @@ pub(super) fn merged_room_details(
+@@ -448,7 +448,9 @@ pub(super) fn merged_room_details(
  		.filter_map(|list_id| conn.lists.get(list_id))
  		.map(|list| &list.room_details)
  		.chain(conn.subscriptions.get(room_id))

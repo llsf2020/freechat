@@ -1,7 +1,7 @@
-From ce4a1a435fcec75b836d537dcd28e6c301117335 Mon Sep 17 00:00:00 2001
+From 3012c819bb3cc79ad64e74db8dc6da55e8899bb0 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
-Subject: [PATCH 07/17] FreeChat: metadata minimization; expiry markers and
+Subject: [PATCH 07/16] FreeChat: metadata minimization; expiry markers and
  immediate purge
 
 - Devices: never store IP addresses or device names (also on rename);
@@ -281,10 +281,10 @@ index 7656e1c24..d53732daf 100644
  /// event cannot be used to remove someone else's file.
  #[implement(Service)]
 diff --git a/src/service/rooms/timeline/append.rs b/src/service/rooms/timeline/append.rs
-index 349e9a47e..0ff2b3784 100644
+index 686b8d169..7d383eb5a 100644
 --- a/src/service/rooms/timeline/append.rs
 +++ b/src/service/rooms/timeline/append.rs
-@@ -185,6 +185,12 @@ pub async fn append_pdu<'a, Leafs>(
+@@ -184,6 +184,12 @@ pub async fn append_pdu<'a, Leafs>(
  
  	let (pdu_json, replaced_join) = self.read_replaced(pdu, pdu_json).await?;
  
@@ -356,10 +356,10 @@ index e54b4b34b..de9d7f5e1 100644
 +	Ok(true)
 +}
 diff --git a/src/service/users/device.rs b/src/service/users/device.rs
-index 7ac6a0ee3..1c2c2664c 100644
+index 016c8ed7f..d55e405ca 100644
 --- a/src/service/users/device.rs
 +++ b/src/service/users/device.rs
-@@ -1139,7 +1139,11 @@ pub async fn update_device_metadata<Update>(
+@@ -1171,7 +1171,11 @@ pub async fn update_device_metadata<Update>(
  		.get_device_metadata(user_id, device_id)
  		.await?;
  
@@ -371,7 +371,7 @@ index 7ac6a0ee3..1c2c2664c 100644
  
  	assert_eq!(&device.device_id, device_id, "update must keep the device ID");
  	self.put_device_metadata(user_id, notify, &device)
-@@ -1154,6 +1158,9 @@ pub async fn update_device_metadata<Update>(
+@@ -1186,6 +1190,9 @@ pub async fn update_device_metadata<Update>(
  #[implement(super::Service)]
  #[tracing::instrument(level = "trace", skip(self, device))]
  async fn put_device_metadata(&self, user_id: &UserId, notify: bool, device: &Device) {
@@ -381,7 +381,7 @@ index 7ac6a0ee3..1c2c2664c 100644
  	let key = (user_id, &device.device_id);
  	self.db
  		.userdeviceid_metadata
-@@ -1321,3 +1328,17 @@ fn provided_device_id_is_preserved() {
+@@ -1395,3 +1402,17 @@ fn provided_device_id_is_preserved() {
  		assert_eq!(device_id.as_str(), "HELLOWORLD");
  	}
  }

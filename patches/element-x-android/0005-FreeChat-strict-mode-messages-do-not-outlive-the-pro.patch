@@ -1,4 +1,4 @@
-From 6ebe9028b05063c61b4a3af54410f768bd12e0f9 Mon Sep 17 00:00:00 2001
+From 5747d76d573956e8545badda9d652472d3e8fca8 Mon Sep 17 00:00:00 2001
 From: sjcsf <346224915+llsf2020@users.noreply.github.com>
 Date: Thu, 22 Oct 2026 00:00:00 +0000
 Subject: [PATCH 05/23] FreeChat: strict mode; messages do not outlive the
@@ -20,7 +20,7 @@ event and media caches are dropped whenever a session's client is created.
  .../matrix/api/freechat/StrictMode.kt         |  48 +++++++
  .../matrix/impl/RustMatrixClientFactory.kt    |  15 ++
  .../auth/RustMatrixAuthenticationService.kt   |  21 ++-
- .../matrix/impl/paths/SessionPathsFactory.kt  |  17 ++-
+ .../matrix/impl/paths/SessionPathsFactory.kt  |  23 ++-
  .../RustMatrixAuthenticationServiceTest.kt    |   2 +
  .../test/freechat/FakeStrictModeStore.kt      |  22 +++
  .../impl/freechat/DataStoreStrictModeStore.kt |  49 +++++++
@@ -30,7 +30,7 @@ event and media caches are dropped whenever a session's client is created.
  .../res/values-zh-rTW/freechat_strings.xml    |   9 ++
  .../main/res/values-zh/freechat_strings.xml   |   9 ++
  .../src/main/res/values/freechat_strings.xml  |   9 ++
- 20 files changed, 809 insertions(+), 38 deletions(-)
+ 20 files changed, 815 insertions(+), 38 deletions(-)
  create mode 100644 appnav/src/main/kotlin/io/element/android/appnav/freechat/StrictSessionGuard.kt
  create mode 100644 appnav/src/test/kotlin/io/element/android/appnav/freechat/StrictSessionGuardTest.kt
  create mode 100644 features/preferences/impl/src/main/kotlin/io/element/android/features/preferences/impl/freechat/StrictModePresenter.kt
@@ -42,10 +42,10 @@ event and media caches are dropped whenever a session's client is created.
  create mode 100644 libraries/session-storage/impl/src/test/kotlin/io/element/android/libraries/sessionstorage/impl/StrictSessionStoreTest.kt
 
 diff --git a/appnav/build.gradle.kts b/appnav/build.gradle.kts
-index cc11f5c033..9474b9fff6 100644
+index 944930b052..59e90a5146 100644
 --- a/appnav/build.gradle.kts
 +++ b/appnav/build.gradle.kts
-@@ -56,6 +56,7 @@ dependencies {
+@@ -57,6 +57,7 @@ dependencies {
  
      implementation(projects.services.apperror.api)
      implementation(projects.services.appnavstate.api)
@@ -53,7 +53,7 @@ index cc11f5c033..9474b9fff6 100644
      implementation(projects.services.analytics.api)
  
      testCommonDependencies(libs)
-@@ -80,5 +81,6 @@ dependencies {
+@@ -82,5 +83,6 @@ dependencies {
      testImplementation(projects.features.signedout.test)
      testImplementation(projects.services.apperror.test)
      testImplementation(projects.services.appnavstate.test)
@@ -61,7 +61,7 @@ index cc11f5c033..9474b9fff6 100644
      testImplementation(projects.services.analytics.test)
  }
 diff --git a/appnav/src/main/kotlin/io/element/android/appnav/LoggedInFlowNode.kt b/appnav/src/main/kotlin/io/element/android/appnav/LoggedInFlowNode.kt
-index b3b3a9d2cf..4e5eb628be 100644
+index 5485306f21..675896e600 100644
 --- a/appnav/src/main/kotlin/io/element/android/appnav/LoggedInFlowNode.kt
 +++ b/appnav/src/main/kotlin/io/element/android/appnav/LoggedInFlowNode.kt
 @@ -40,6 +40,7 @@ import com.bumble.appyx.navmodel.backstack.operation.singleTop
@@ -72,7 +72,7 @@ index b3b3a9d2cf..4e5eb628be 100644
  import io.element.android.appnav.loggedin.LoggedInNode
  import io.element.android.appnav.loggedin.MediaPreviewConfigMigration
  import io.element.android.appnav.loggedin.SendQueues
-@@ -158,6 +159,7 @@ class LoggedInFlowNode(
+@@ -161,6 +162,7 @@ class LoggedInFlowNode(
      private val locationService: LocationService,
      private val loggedInEventProcessorFactory: LoggedInEventProcessor.Factory,
      private val screenshotPolicy: ScreenshotPolicy, // FreeChat
@@ -80,7 +80,7 @@ index b3b3a9d2cf..4e5eb628be 100644
  ) : BaseFlowNode<LoggedInFlowNode.NavTarget>(
      backstack = BackStack(
          initialElement = NavTarget.Placeholder,
-@@ -205,6 +207,7 @@ class LoggedInFlowNode(
+@@ -208,6 +210,7 @@ class LoggedInFlowNode(
          lifecycle.subscribe(
              onCreate = {
                  analyticsRoomListStateWatcher.start()
@@ -630,7 +630,7 @@ index e86e51cc64..39eba1f625 100644
   * Directory holding the local message search index, under the session's file directory.
   * Not the cache directory: the index is not disposable, and a cache wipe should not destroy it.
 diff --git a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationService.kt b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationService.kt
-index b06f0b5163..dc685787f3 100644
+index ad1010b27e..aea9a44dcb 100644
 --- a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationService.kt
 +++ b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/auth/RustMatrixAuthenticationService.kt
 @@ -31,6 +31,9 @@ import io.element.android.libraries.matrix.api.auth.qrlogin.MatrixQrCodeLoginDat
@@ -685,20 +685,20 @@ index b06f0b5163..dc685787f3 100644
                  // Ensure that the user is not already logged in with the same account
                  ensureNotAlreadyLoggedIn(client)
 diff --git a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/paths/SessionPathsFactory.kt b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/paths/SessionPathsFactory.kt
-index f40c134209..97ca60f828 100644
+index 8ccb0d8681..6fa8ea95a1 100644
 --- a/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/paths/SessionPathsFactory.kt
 +++ b/libraries/matrix/impl/src/main/kotlin/io/element/android/libraries/matrix/impl/paths/SessionPathsFactory.kt
 @@ -11,6 +11,7 @@ package io.element.android.libraries.matrix.impl.paths
  import dev.zacsweers.metro.Inject
- import io.element.android.libraries.di.BaseDirectory
- import io.element.android.libraries.di.CacheDirectory
+ import io.element.android.libraries.di.SessionsCacheDirectory
+ import io.element.android.libraries.di.SessionsFilesDirectory
 +import io.element.android.libraries.matrix.api.freechat.StrictMode
  import io.element.android.libraries.matrix.api.paths.SessionPaths
  import java.io.File
  import java.util.UUID
-@@ -20,11 +21,23 @@ class SessionPathsFactory(
-     @BaseDirectory private val baseDirectory: File,
-     @CacheDirectory private val cacheDirectory: File,
+@@ -20,11 +21,29 @@ class SessionPathsFactory(
+     @SessionsFilesDirectory private val sessionsFilesDirectory: File,
+     @SessionsCacheDirectory private val sessionsCacheDirectory: File,
  ) {
 -    fun create(): SessionPaths {
 -        val subPath = UUID.randomUUID().toString()
@@ -706,17 +706,23 @@ index f40c134209..97ca60f828 100644
 +    fun create(strict: Boolean = false): SessionPaths {
 +        val subPath = (if (strict) StrictMode.STRICT_SESSION_DIR_PREFIX else "") + UUID.randomUUID().toString()
          return SessionPaths(
-             fileDirectory = File(baseDirectory, subPath),
-             cacheDirectory = File(cacheDirectory, subPath),
+             fileDirectory = File(sessionsFilesDirectory, subPath),
+             cacheDirectory = File(sessionsCacheDirectory, subPath),
          )
      }
 +
 +    /**
 +     * FreeChat: deletes the directories of strict-mode sessions from earlier runs of the process. Their key
 +     * died with that process, so they only hold unreadable data. Call before any strict session is created.
++     * Versions before 26.11.1 kept session directories directly in the files and cache directories, one level up.
 +     */
 +    fun deleteStaleStrictSessions() {
-+        listOf(baseDirectory, cacheDirectory).forEach { parent ->
++        listOfNotNull(
++            sessionsFilesDirectory,
++            sessionsCacheDirectory,
++            sessionsFilesDirectory.parentFile,
++            sessionsCacheDirectory.parentFile,
++        ).forEach { parent ->
 +            parent.listFiles { file -> file.isDirectory && file.name.startsWith(StrictMode.STRICT_SESSION_DIR_PREFIX) }
 +                ?.forEach { it.deleteRecursively() }
 +        }
